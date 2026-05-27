@@ -1,0 +1,110 @@
+camera:
+  # Leave both values empty to use the first detected Basler camera.
+  serial_number:
+  user_defined_name:
+  # For the a2A2464-115g5mBAS monochrome camera, Mono8 is a compact baseline.
+  # Use Mono10/Mono12/Mono16 only when the extra bit depth is required.
+  pixel_format: Mono8
+  exposure_us: 5000
+  gain: 0
+  # true = configure FrameStart software trigger and call ExecuteSoftwareTrigger.
+  # false = grab one frame with TriggerMode Off.
+  use_software_trigger: true
+  trigger_selector: FrameStart
+  trigger_source: Software
+  trigger_mode: Off
+  output_pixel_format: Mono8
+  timeout_ms: 5000
+
+stage:
+  serial_port: COM3
+  baud_rate: 115200
+  identify_devices: true
+  home_on_start: true
+  settle_s: 0.2
+  move_velocity_mm_s:
+  axes:
+    # device_index is zero-based in the order returned by Zaber detection.
+    # For one 2-axis controller, set both device_index values to 0 and use
+    # axis_number 1 for X, axis_number 2 for Y.
+    x:
+      device_index: 0
+      axis_number: 1
+    y:
+      device_index: 1
+      axis_number: 1
+
+dataset:
+  output_root: "%USERPROFILE%/Documents/LinearStageControl/datasets"
+  # Raw image output is kept lossless. Supported: tiff, png, bmp.
+  image_format: tiff
+  save_numpy: false
+  # Metadata formats are generated per run for analysis, archiving, and papers.
+  metadata_formats: [csv, jsonl, json, tsv, yaml, xlsx]
+  summary_formats: [json, yaml, md]
+  write_jsonl: true
+
+calibration:
+  # Informational snapshot only. The app uses these fixed Zaber manufacturer specs
+  # for the 210 mm LDM/X-LDM-AE crossed XY stage calculation.
+  stage_model: Zaber LDM/X-LDM-AE 210 mm crossed XY
+  source_url: https://www.zaber.com/products/linear-stages/X-LDM-AE/specs
+  travel_range_mm: 210.0
+  stage_accuracy_um: 1.0
+  stage_repeatability_um: 0.08
+  horizontal_runout_um: 5.0
+  vertical_runout_um: 8.0
+  pitch_mrad: 0.174
+  roll_mrad: 0.087
+  yaw_mrad: 0.087
+  xy_axis_worst_case_um: 6.08
+  xy_radial_worst_case_um: 8.598418459
+  max_allowed_um: 8.598418459
+
+scan:
+  # Used when a position row does not define capture_count.
+  default_capture_count: 1
+  # Preferred: enter a fixed position list here, or set positions_file below.
+  positions:
+    - label: origin
+      x_mm: 0
+      y_mm: 0
+    - label: sample_a
+      x_mm: 0.5
+      y_mm: 0
+    - label: sample_b
+      x_mm: 0.5
+      y_mm: 0.5
+      # Optional per-position override. Leave absent/blank to use stage.move_velocity_mm_s.
+      move_velocity_mm_s:
+      # Optional per-position override. Leave absent/blank to use scan.default_capture_count.
+      capture_count:
+  # Supported files: CSV, TSV, TXT, JSON, JSONL, YAML, XLSX.
+  # Flexible columns are accepted: label/name/id, x/x_mm/X mm/target_x_mm,
+  # y/y_mm/Y mm/target_y_mm, velocity/move_velocity_mm_s/speed_mm_s,
+  # capture_count/captures/frames.
+  positions_file:
+
+  # Optional fallback: create a straight continuous path when positions and
+  # positions_file are empty.
+  linear_path:
+    # start_x_mm: 0
+    # start_y_mm: 0
+    # end_x_mm: 1
+    # end_y_mm: 0
+    # spacing_mm: 0.1
+    # If spacing_mm is set, the app creates one position every spacing_mm and
+    # always includes the end point. If spacing_mm is blank, count is used.
+    # count: 5
+    # label_prefix: line
+    # move_velocity_mm_s:
+    # capture_count:
+
+  # Fallback grid is used only when positions and positions_file are empty.
+  x_start_mm: 0
+  x_stop_mm: 1
+  x_step_mm: 0.5
+  y_start_mm: 0
+  y_stop_mm: 1
+  y_step_mm: 0.5
+  serpentine: true

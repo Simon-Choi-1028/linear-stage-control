@@ -1,0 +1,31 @@
+# 개발 Rules
+
+- 스테이지와 카메라는 순차 제어한다. 한 포인트에서 `move_absolute_mm -> wait_until_idle -> settle_s 대기`가 끝난 뒤 해당 위치의 `capture_count`만큼 `capture_original_to`를 반복하고 다음 포인트로 이동한다.
+- Zaber X/Y 축 이동은 동시에 명령을 보내고 두 축 모두 idle 상태가 될 때까지 기다린다. 불필요한 축별 직렬 대기를 줄이면서도 캡처 전 위치 안정성을 보장한다.
+- Basler ace 2 LAN/GigE 카메라는 기본적으로 software trigger 모드를 사용한다. `TriggerSelector=FrameStart`, `TriggerSource=Software`, `ExecuteSoftwareTrigger()` 흐름으로 캡처 시점을 명확히 남긴다.
+- 원본 보존은 변환 없는 `grab_result.GetArray().copy()`를 기준으로 한다. 저장 기본값은 lossless TIFF이며, 완전한 numpy 배열 재현이 필요할 때만 `dataset.save_numpy: true`를 켠다.
+- 데이터셋은 run 단위 timestamp 디렉터리로 격리한다. 각 run에는 `manifest.json`, `config.yaml` 스냅샷, `captures.csv`, 선택적 `captures.jsonl`, `images/`를 둔다.
+- 각 캡처 레코드에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡처 순번, 이동/settle/capture timestamp, 카메라 timestamp, 이미지 경로를 모두 기록한다.
+- 위치 입력은 `scan.positions` 또는 `scan.positions_file`을 우선한다. `scan.linear_path`는 명시적으로 설정된 선형 연속 경로 fallback이고, grid scan은 테스트나 균일 스캔이 필요할 때의 최종 fallback으로만 둔다. 파일 입력은 CSV, TSV, TXT, JSON, JSONL, YAML, XLSX를 지원하고, `label/name/id`, `x/x_mm/X mm/target_x_mm`, `y/y_mm/Y mm/target_y_mm`, `velocity/move_velocity_mm_s/speed_mm_s`, `capture_count/captures/frames`처럼 흔한 컬럼명 변형을 허용한다.
+- GUI 위치 입력은 Zaber 210 mm 이동 범위 기준 `0-210 mm`를 즉시 검사한다. 범위를 벗어난 좌표는 오류로 표시하고 촬영 run 시작을 막는다. 위치별 이동속도는 비워 두거나 0보다 커야 하며, 위치별 캡쳐 수는 비워 두거나 1 이상 정수여야 한다. 중복 좌표, 빈 라벨, 매우 큰 위치 목록은 경고로 표시한다.
+- 위치 파일 파싱 오류는 행 번호와 원인을 함께 제시한다. 빈 파일, X/Y 컬럼 누락, 숫자 변환 실패, 지원하지 않는 확장자는 장비 동작 전에 차단한다.
+- 파일명에는 index, timestamp, X/Y 위치, label을 넣되 label은 파일명 안전 문자로 정규화한다.
+- GUI는 장비 제어 루프를 Qt worker thread에서 실행한다. 메인 UI thread는 위치 편집, 진행률, 로그, 이미지 미리보기만 담당한다.
+- GUI의 Basler LAN/GigE 카메라 자동 검색은 사용자가 `자동검색`을 누를 때 짧은 Qt worker thread로 단발 실행한다. 주기 타이머로 반복 검색하지 않고, `탐색중/성공/실패` 상태 배지를 색상으로 구분해 pypylon 장치 열기/트리거 흐름과 충돌할 가능성을 줄인다.
+- GUI 화면 문구는 한국어를 기본으로 한다. 촬영 중에는 연결, 원점 복귀, 이동, 안정화, 촬영, 저장 단계를 별도 상태 라벨에 표시해 사용자가 현재 진행 위치를 알 수 있게 한다.
+- GUI 표시 숫자는 저장 데이터와 분리한다. CSV/JSONL에는 계산 원본 값을 보존하되, 화면에서는 mm 위치값 최대 4자리, um 오차값 최대 2자리로 trailing zero를 줄이고 상세 정보는 `|`로 이어붙이지 않고 표 칸으로 나눠 표시한다.
+- GUI는 폭이 좁을 때 좌우 분할을 위아래 배치로 전환하고 제어 패널을 스크롤 영역에 넣는다. 원본 이미지는 미리보기 더블클릭 또는 `전체화면 보기`로 확대 창에서 확인할 수 있게 한다.
+- 주요 GUI 버튼에는 Qt 표준 아이콘과 툴팁을 붙인다. 버튼을 단순 텍스트 덩어리로 늘어놓지 않고, 위치 편집처럼 버튼 수가 많은 영역은 2줄 그리드로 정리한다.
+- 노출, 안정화, 이동속도, 기본 캡쳐 수처럼 반복 조정이 잦은 수치 파라미터는 키보드 입력칸을 유지하되, 같은 행 오른쪽에 outlined 빠른 증감 버튼을 둔다. 각 값 입력칸과 버튼에는 조정 대상, 단위, 기본값 또는 증감량 툴팁을 제공한다.
+- 메타데이터, 요약 출력 포맷, 실행 옵션 체크박스는 별도 박스 안에 배치해 촬영 파라미터 입력부와 시각적으로 구분한다. 실행 옵션에는 소프트웨어 트리거, NPY 저장, 원점 복귀 생략을 둔다.
+- GUI와 config의 선형 경로 생성은 `간격 mm/캡쳐` 기준을 우선 지원한다. 간격 기준은 경로 거리마다 한 위치를 만들고 끝점을 항상 포함하며, 필요할 때만 총 `위치 수` 기준으로 균등 보간한다.
+- 촬영 시작 전에는 preflight 점검 창을 띄운다. 위치 목록, Basler 카메라 감지, Zaber COM 포트, X/Y 축 매핑, 저장 폴더, 이동 속도, 촬영 설정, 고정 오차 기준을 확인하고 오류가 있으면 시작 버튼을 비활성화한다.
+- X/Y 축이 같은 Zaber device/axis 주소를 가리키는 설정은 안전하지 않으므로 run 전에 오류로 차단한다. 저장 폴더는 run 시작 전에 생성 가능 여부를 확인해 데이터셋 기록 실패를 앞단에서 줄인다.
+- 제조사 고정 스펙처럼 사용자가 자주 조작하지 않는 정보는 메인 제어 패널에 상시 노출하지 않는다. 필요 시 `오차` 탭의 `스펙 보기` 같은 상세 버튼으로 확인하게 한다.
+- 배포는 PyInstaller one-folder portable 빌드를 기본으로 한다. Basler pylon runtime처럼 드라이버 성격의 의존성은 앱에 정적으로 묶는 대신 installer 폴더에 함께 넣고 새 PC에서 별도로 설치한다.
+- PyInstaller 빌드에서는 Zaber Motion Python 패키지와 별도로 `zaber_motion_bindings` 네이티브 DLL을 반드시 포함한다. `zaber-motion-core-windows-amd64.dll`이 `dist/LinearStageControl/_internal/zaber_motion_bindings/`에 없으면 frozen exe가 시작 시 import 단계에서 실패한다.
+- 데이터셋 메타데이터는 기본적으로 CSV, JSONL, JSON, TSV, YAML, XLSX를 생성한다. run 요약은 JSON, YAML, Markdown으로 저장해 실험 기록, 통계 분석, 논문 표 작성에 재사용할 수 있게 한다.
+- GUI와 CLI는 같은 `base_capture_record`, `DatasetRun`, 위치 파서, 위치 검증 모듈을 사용한다. 포맷이나 레코드 필드가 늘어날 때 중복 구현을 만들지 않는다.
+- Optical calibration 오차 표시는 Zaber 210 mm LDM/X-LDM-AE crossed XY 스테이지 제조사 스펙을 고정값으로 사용한다. 사용자 입력형 `오차 예산`을 두지 않는다. 단축 정확도 1.00 um, 반복 정밀도 0.08 um, 수평 런아웃 5.00 um을 합산해 `xy_axis_worst_case_um = 6.08 um`로 두고, XY 반경 기준은 `sqrt(2) * 6.08 = 8.60 um`로 둔다. 수직 런아웃 8.00 um은 Z/초점 참고값으로 별도 표시한다.
+- 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_stage_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
+- 각 사진에는 개별 `predicted_min_error_um`, `predicted_max_error_um`, X/Y 예측 범위를 저장하고, run 전체에는 GUI Error 탭에서 캔들차트와 최대/평균/제한 초과 개수를 표시한다.

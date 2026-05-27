@@ -1,0 +1,24 @@
+[project]
+name = "linear-stage-control"
+version = "0.1.0"
+description = "Baseline Basler ace 2 and Zaber XY stage acquisition scripts."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "numpy==2.4.6",
+  "pillow==12.2.0",
+  "pypylon==26.4.1",
+  "PySide6==6.10.1",
+  "pyinstaller==6.17.0",
+  "pyserial==3.5",
+  "python-dotenv==1.2.2",
+  "PyYAML==6.0.3",
+  "rich==15.0.0",
+  "zaber-motion==9.3.0",
+]
+
+[build-system]
+requires = ["setuptools>=82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["linear_stage_control*"]

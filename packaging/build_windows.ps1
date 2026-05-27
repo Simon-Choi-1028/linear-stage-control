@@ -1,3 +1,7 @@
+param(
+  [switch]$SkipSmoke
+)
+
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
@@ -17,24 +21,53 @@ if (Test-Path -LiteralPath $distTarget) {
   Remove-Item -LiteralPath $distTarget -Recurse -Force
 }
 
-& .\.venv\Scripts\pyinstaller.exe `
-  --noconfirm `
-  --clean `
-  --windowed `
-  --name LinearStageControl `
-  --paths . `
-  --distpath dist `
-  --workpath .pyinstaller_build `
-  --collect-all pypylon `
-  --collect-all zaber_motion `
-  --collect-binaries zaber_motion_bindings `
-  --collect-submodules serial `
-  --add-data "config.example.yaml;." `
-  --add-data "positions.example.csv;." `
-  --add-data "README.md;." `
-  --add-data "rules.md;." `
-  --add-data "sdk_downloads\README.md;sdk_downloads" `
-  --add-data "sdk_downloads\installers\pylon_Runtime_26.04.1.exe;sdk_downloads\installers" `
-  scripts\launch_gui.py
+$pyinstallerArgs = @(
+  "--noconfirm",
+  "--clean",
+  "--windowed",
+  "--name", "LinearStageControl",
+  "--paths", ".",
+  "--distpath", "dist",
+  "--workpath", ".pyinstaller_build",
+  "--collect-all", "pypylon",
+  "--collect-all", "zaber_motion",
+  "--collect-binaries", "zaber_motion_bindings",
+  "--collect-submodules", "serial"
+)
+
+$dataFiles = @(
+  @{ Source = "config.example.yaml"; Target = "."; Required = $true },
+  @{ Source = "positions.example.csv"; Target = "."; Required = $true },
+  @{ Source = "README.md"; Target = "."; Required = $true },
+  @{ Source = "rules.md"; Target = "."; Required = $true },
+  @{ Source = "sdk_downloads\README.md"; Target = "sdk_downloads"; Required = $false },
+  @{ Source = "sdk_downloads\installers\pylon_Runtime_26.04.1.exe"; Target = "sdk_downloads\installers"; Required = $false }
+)
+
+foreach ($item in $dataFiles) {
+  if (Test-Path -LiteralPath $item.Source) {
+    $pyinstallerArgs += "--add-data"
+    $pyinstallerArgs += "$($item.Source);$($item.Target)"
+  } elseif ($item.Required) {
+    throw "Required build data file is missing: $($item.Source)"
+  } else {
+    Write-Warning "Optional build data file is missing and will not be bundled: $($item.Source)"
+  }
+}
+
+$pyinstallerArgs += "scripts\launch_gui.py"
+& .\.venv\Scripts\pyinstaller.exe @pyinstallerArgs
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
+
+$appExe = Join-Path $distTarget "LinearStageControl.exe"
+if (-not $SkipSmoke) {
+  Write-Host "Running packaged smoke test: $appExe --smoke-test"
+  $smoke = Start-Process -FilePath $appExe -ArgumentList "--smoke-test" -Wait -PassThru -WindowStyle Hidden
+  if ($smoke.ExitCode -ne 0) {
+    throw "Packaged smoke test failed with exit code $($smoke.ExitCode)"
+  }
+}
 
 Write-Host "Built: $distTarget\LinearStageControl.exe"

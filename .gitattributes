@@ -1,0 +1,23 @@
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.csv text eol=lf
+*.iss text eol=crlf
+*.ps1 text eol=crlf
+
+*.exe binary
+*.dll binary
+*.pyd binary
+*.whl binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.tif binary
+*.tiff binary
+*.bmp binary
+*.npy binary
+*.xlsx binary

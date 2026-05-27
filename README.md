@@ -175,7 +175,12 @@ dataset:
 
 ```yaml
 camera:
+  # 여러 Basler 카메라가 연결된 경우 선택 필터로 사용할 수 있습니다.
+  model_name:
+  device_class:
+  # Auto로 두면 현재 카메라 픽셀 포맷을 유지합니다.
   pixel_format: Mono8
+  pixel_format_candidates: [Mono8, Mono10, Mono12, Mono16, BayerRG8, BayerGB8, BayerGR8, BayerBG8, RGB8, BGR8]
   use_software_trigger: true
   trigger_selector: FrameStart
   trigger_source: Software
@@ -200,6 +205,8 @@ Python이 없는 다른 PC에서 실행할 수 있도록 PyInstaller portable �
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
+빌드가 끝나면 `LinearStageControl.exe --smoke-test`를 실행해 PyInstaller 패키지 안의 Python 모듈, pypylon, Zaber native DLL 로딩을 실제로 확인합니다. 이 검증을 임시로 건너뛰려면 `-SkipSmoke`를 붙입니다.
+
 빌드 결과:
 
 ```text
@@ -218,4 +225,4 @@ powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
 dist/LinearStageControlSetup.exe
 ```
 
-빌드 폴더에는 Basler pylon runtime installer도 포함됩니다. 새 PC에서 Basler 카메라가 감지되지 않으면 설치 프로그램의 post-install 옵션으로 pylon runtime을 설치하세요. 설치 후 수동 실행이 필요하면 앱 설치 폴더의 `_internal/sdk_downloads/installers/pylon_Runtime_26.04.1.exe`를 실행하면 됩니다.
+`sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있으면 빌드 폴더와 설치 프로그램에 함께 포함됩니다. 깨끗한 clone처럼 해당 파일이 없을 때는 경고만 출력하고 앱 빌드는 계속 진행됩니다. 이 경우 새 PC에서 Basler 카메라를 쓰려면 Basler pylon Runtime을 별도로 설치해야 합니다. 포함된 설치 파일을 수동 실행해야 할 때는 앱 설치 폴더의 `_internal/sdk_downloads/installers/pylon_Runtime_26.04.1.exe`를 실행하면 됩니다.

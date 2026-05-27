@@ -2,6 +2,7 @@
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "Linear Stage Control"
 #define MyAppExeName "LinearStageControl.exe"
+#define PylonRuntimeFile "..\dist\LinearStageControl\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"
 
 [Setup]
 AppId={{A0F7CE33-A85E-4C38-B1C6-0FF11B284C88}
@@ -35,4 +36,6 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+#if FileExists(PylonRuntimeFile)
 Filename: "{app}\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"; Description: "Run Basler pylon Runtime installer"; Flags: postinstall skipifsilent unchecked shellexec
+#endif

@@ -2,9 +2,15 @@ camera:
   # Leave both values empty to use the first detected Basler camera.
   serial_number:
   user_defined_name:
+  # Optional filters for labs with several Basler cameras connected.
+  # model_name can be a partial model string. device_class examples: BaslerGigE, BaslerUsb.
+  model_name:
+  device_class:
   # For the a2A2464-115g5mBAS monochrome camera, Mono8 is a compact baseline.
-  # Use Mono10/Mono12/Mono16 only when the extra bit depth is required.
+  # Set pixel_format to Auto to keep the camera's current format.
   pixel_format: Mono8
+  # If the requested format is unsupported on another Basler model, these are tried in order.
+  pixel_format_candidates: [Mono8, Mono10, Mono12, Mono16, BayerRG8, BayerGB8, BayerGR8, BayerBG8, RGB8, BGR8]
   exposure_us: 5000
   gain: 0
   # true = configure FrameStart software trigger and call ExecuteSoftwareTrigger.

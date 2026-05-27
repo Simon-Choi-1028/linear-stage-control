@@ -12,10 +12,28 @@ from pypylon import pylon
 from .config import none_if_blank
 
 
-PIXEL_TYPES: dict[str, int] = {
-    "Mono8": pylon.PixelType_Mono8,
-    "BGR8": pylon.PixelType_BGR8packed,
-    "RGB8": pylon.PixelType_RGB8packed,
+DEFAULT_PIXEL_FORMAT_CANDIDATES = (
+    "Mono8",
+    "Mono10",
+    "Mono12",
+    "Mono16",
+    "BayerRG8",
+    "BayerGB8",
+    "BayerGR8",
+    "BayerBG8",
+    "RGB8",
+    "BGR8",
+)
+
+OUTPUT_PIXEL_TYPE_ALIASES = {
+    "Mono8": "Mono8",
+    "Mono10": "Mono16",
+    "Mono12": "Mono16",
+    "Mono16": "Mono16",
+    "RGB8": "RGB8packed",
+    "BGR8": "BGR8packed",
+    "RGBA8": "RGBA8packed",
+    "BGRA8": "BGRA8packed",
 }
 
 
@@ -23,7 +41,10 @@ PIXEL_TYPES: dict[str, int] = {
 class CameraSettings:
     serial_number: str | None = None
     user_defined_name: str | None = None
+    model_name: str | None = None
+    device_class: str | None = None
     pixel_format: str | None = "Mono8"
+    pixel_format_candidates: tuple[str, ...] = DEFAULT_PIXEL_FORMAT_CANDIDATES
     exposure_us: float | None = None
     gain: float | None = None
     trigger_mode: str | None = "Off"
@@ -39,7 +60,13 @@ def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
     return CameraSettings(
         serial_number=none_if_blank(camera.get("serial_number")),
         user_defined_name=none_if_blank(camera.get("user_defined_name")),
+        model_name=none_if_blank(camera.get("model_name")),
+        device_class=none_if_blank(camera.get("device_class")),
         pixel_format=none_if_blank(camera.get("pixel_format", "Mono8")),
+        pixel_format_candidates=_string_tuple(
+            camera.get("pixel_format_candidates"),
+            DEFAULT_PIXEL_FORMAT_CANDIDATES,
+        ),
         exposure_us=camera.get("exposure_us"),
         gain=camera.get("gain"),
         trigger_mode=none_if_blank(camera.get("trigger_mode", "Off")),
@@ -231,7 +258,7 @@ class BaslerCamera:
                 self.camera.StopGrabbing()
 
     def _select_device(self) -> Any:
-        devices = pylon.TlFactory.GetInstance().EnumerateDevices()
+        devices = list(pylon.TlFactory.GetInstance().EnumerateDevices())
         if not devices:
             raise RuntimeError("No Basler camera was detected.")
 
@@ -252,14 +279,33 @@ class BaslerCamera:
                 f"Basler camera user-defined name not found: {self.settings.user_defined_name}"
             )
 
-        return devices[0]
+        candidates = devices
+        if self.settings.model_name:
+            expected = self.settings.model_name.lower()
+            candidates = [
+                device
+                for device in candidates
+                if expected in (_safe_device_value(device, "GetModelName") or "").lower()
+            ]
+            if not candidates:
+                raise RuntimeError(f"Basler camera model not found: {self.settings.model_name}")
+        if self.settings.device_class:
+            expected = self.settings.device_class.lower()
+            candidates = [
+                device
+                for device in candidates
+                if expected == (_safe_device_value(device, "GetDeviceClass") or "").lower()
+            ]
+            if not candidates:
+                raise RuntimeError(f"Basler camera device class not found: {self.settings.device_class}")
+
+        return candidates[0]
 
     def _apply_settings(self) -> None:
         if self.camera is None:
             raise RuntimeError("Camera is not open.")
 
-        if self.settings.pixel_format:
-            self._set_feature("PixelFormat", self.settings.pixel_format)
+        self._apply_pixel_format()
         if self.settings.use_software_trigger:
             self._set_feature("TriggerSelector", self.settings.trigger_selector)
             self._set_feature("TriggerMode", "On")
@@ -267,30 +313,109 @@ class BaslerCamera:
         elif self.settings.trigger_mode:
             self._set_feature("TriggerMode", self.settings.trigger_mode)
         if self.settings.exposure_us is not None:
-            self._set_feature("ExposureAuto", "Off")
-            self._set_feature("ExposureTime", float(self.settings.exposure_us))
+            self._set_first_available_feature(("ExposureAuto",), "Off", warn_if_missing=False)
+            self._set_first_available_feature(
+                ("ExposureTime", "ExposureTimeAbs"),
+                float(self.settings.exposure_us),
+                label="ExposureTime",
+            )
         if self.settings.gain is not None:
-            self._set_feature("GainAuto", "Off")
-            self._set_feature("Gain", float(self.settings.gain))
+            self._set_first_available_feature(("GainAuto",), "Off", warn_if_missing=False)
+            self._set_first_available_feature(
+                ("Gain", "GainRaw"),
+                float(self.settings.gain),
+                label="Gain",
+            )
 
-    def _set_feature(self, feature_name: str, value: Any) -> None:
+    def _apply_pixel_format(self) -> None:
+        if self.camera is None:
+            raise RuntimeError("Camera is not open.")
+        if str(self.settings.pixel_format or "").strip().lower() in {"auto", "default"}:
+            return
+        requested = _dedupe_strings(
+            [self.settings.pixel_format or ""] + list(self.settings.pixel_format_candidates)
+        )
+        requested = [item for item in requested if item.lower() not in {"auto", "default"}]
+        if not requested:
+            return
+
+        available = set(self._enum_symbolics("PixelFormat"))
+        skipped: list[str] = []
+        for pixel_format in requested:
+            if available and pixel_format not in available:
+                skipped.append(pixel_format)
+                continue
+            if self._set_feature("PixelFormat", pixel_format, warn=False):
+                if pixel_format != self.settings.pixel_format:
+                    self.warnings.append(
+                        f"PixelFormat: requested {self.settings.pixel_format!r}, using fallback {pixel_format!r}"
+                    )
+                return
+            skipped.append(pixel_format)
+
+        supported = ", ".join(sorted(available)) if available else "unknown"
+        tried = ", ".join(skipped) if skipped else ", ".join(requested)
+        self.warnings.append(f"PixelFormat: no requested format was accepted. Tried: {tried}. Supported: {supported}")
+
+    def _set_first_available_feature(
+        self,
+        feature_names: tuple[str, ...],
+        value: Any,
+        label: str | None = None,
+        warn_if_missing: bool = True,
+    ) -> bool:
+        for feature_name in feature_names:
+            if not self._feature_exists(feature_name):
+                continue
+            if self._set_feature(feature_name, value):
+                return True
+        if warn_if_missing:
+            feature_text = "/".join(feature_names)
+            self.warnings.append(f"{label or feature_text}: camera does not expose a writable {feature_text} feature")
+        return False
+
+    def _set_feature(self, feature_name: str, value: Any, warn: bool = True) -> bool:
         if self.camera is None:
             raise RuntimeError("Camera is not open.")
         try:
             feature = getattr(self.camera, feature_name)
             feature.SetValue(value)
+            return True
         except Exception as exc:
-            self.warnings.append(f"{feature_name}: {exc}")
+            if warn:
+                self.warnings.append(f"{feature_name}: {exc}")
+            return False
+
+    def _feature_exists(self, feature_name: str) -> bool:
+        if self.camera is None:
+            return False
+        try:
+            getattr(self.camera, feature_name)
+            return True
+        except Exception:
+            return False
+
+    def _enum_symbolics(self, feature_name: str) -> list[str]:
+        if self.camera is None:
+            return []
+        try:
+            feature = getattr(self.camera, feature_name)
+            symbolics = feature.GetSymbolics()
+        except Exception:
+            return []
+        return [str(item) for item in symbolics]
 
     def _output_pixel_type(self) -> int:
-        try:
-            return PIXEL_TYPES[self.settings.output_pixel_format]
-        except KeyError as exc:
-            supported = ", ".join(sorted(PIXEL_TYPES))
+        output_format = _normalise_pixel_format_name(self.settings.output_pixel_format)
+        pylon_name = OUTPUT_PIXEL_TYPE_ALIASES.get(output_format, output_format)
+        pixel_type = getattr(pylon, f"PixelType_{pylon_name}", None)
+        if pixel_type is None:
+            supported = ", ".join(sorted(OUTPUT_PIXEL_TYPE_ALIASES))
             raise ValueError(
                 f"Unsupported output_pixel_format {self.settings.output_pixel_format!r}. "
                 f"Supported values: {supported}"
-            ) from exc
+            )
+        return pixel_type
 
 
 def _safe_device_value(device_info: Any, method_name: str) -> str | None:
@@ -304,11 +429,45 @@ def _safe_device_value(device_info: Any, method_name: str) -> str | None:
     return str(value) if value else None
 
 
+def _string_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        items = value.split(",")
+    else:
+        try:
+            items = list(value)
+        except TypeError:
+            items = [value]
+    normalised = _dedupe_strings(items)
+    return tuple(normalised) if normalised else default
+
+
+def _dedupe_strings(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _normalise_pixel_format_name(value: Any) -> str:
+    return str(value or "").strip().replace(" ", "")
+
+
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    output_format = _normalise_pixel_format_name(pixel_format)
     if array.ndim == 2:
         image = Image.fromarray(array)
-    elif array.ndim == 3 and array.shape[2] == 3 and pixel_format == "BGR8":
+    elif array.ndim == 3 and array.shape[2] == 3 and output_format in {"BGR8", "BGR8packed"}:
         image = Image.fromarray(np.ascontiguousarray(array[:, :, ::-1]), "RGB")
     elif array.ndim == 3 and array.shape[2] == 3:
         image = Image.fromarray(np.ascontiguousarray(array), "RGB")

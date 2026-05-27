@@ -1,18 +1,7 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
-
-
-def _is_smoke_test() -> bool:
-    return any(arg.lower() == "--smoke-test" for arg in sys.argv[1:]) or os.environ.get(
-        "LINEAR_STAGE_SMOKE_TEST"
-    ) == "1"
-
-
-if _is_smoke_test() and getattr(sys, "frozen", False):
-    os._exit(0)
 
 
 if not getattr(sys, "frozen", False):

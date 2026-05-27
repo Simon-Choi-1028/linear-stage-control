@@ -26,6 +26,9 @@
 - PyInstaller 빌드에서는 Zaber Motion Python 패키지와 별도로 `zaber_motion_bindings` 네이티브 DLL을 반드시 포함한다. `zaber-motion-core-windows-amd64.dll`이 `dist/LinearStageControl/_internal/zaber_motion_bindings/`에 없으면 frozen exe가 시작 시 import 단계에서 실패한다.
 - 데이터셋 메타데이터는 기본적으로 CSV, JSONL, JSON, TSV, YAML, XLSX를 생성한다. run 요약은 JSON, YAML, Markdown으로 저장해 실험 기록, 통계 분석, 논문 표 작성에 재사용할 수 있게 한다.
 - GUI와 CLI는 같은 `base_capture_record`, `DatasetRun`, 위치 파서, 위치 검증 모듈을 사용한다. 포맷이나 레코드 필드가 늘어날 때 중복 구현을 만들지 않는다.
+- packaged exe의 `--smoke-test`는 import 직후 종료하지 않는다. GUI를 device scan 없이 초기화했다가 닫아 pypylon, PySide6, Zaber native DLL, bundled data 누락을 빌드 직후 잡는다.
+- Basler 카메라는 특정 ace 2 모델에만 고정하지 않는다. serial/user name이 없으면 model/device class 필터를 선택적으로 쓰고, `pixel_format`이 실패하면 `pixel_format_candidates` 순서로 fallback한다. `Auto`는 카메라 현재 픽셀 포맷을 유지한다.
+- `gui_app.py`는 화면 구성과 이벤트 처리 중심으로 유지하고, 장시간 실행되는 acquisition/camera discovery thread는 별도 모듈에 둔다. 하드웨어 제어 loop가 커질 때는 UI 파일에 직접 누적하지 않는다.
 - Optical calibration 오차 표시는 Zaber 210 mm LDM/X-LDM-AE crossed XY 스테이지 제조사 스펙을 고정값으로 사용한다. 사용자 입력형 `오차 예산`을 두지 않는다. 단축 정확도 1.00 um, 반복 정밀도 0.08 um, 수평 런아웃 5.00 um을 합산해 `xy_axis_worst_case_um = 6.08 um`로 두고, XY 반경 기준은 `sqrt(2) * 6.08 = 8.60 um`로 둔다. 수직 런아웃 8.00 um은 Z/초점 참고값으로 별도 표시한다.
 - 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_stage_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
 - 각 사진에는 개별 `predicted_min_error_um`, `predicted_max_error_um`, X/Y 예측 범위를 저장하고, run 전체에는 GUI Error 탭에서 캔들차트와 최대/평균/제한 초과 개수를 표시한다.

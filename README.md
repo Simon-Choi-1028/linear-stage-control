@@ -1,5 +1,12 @@
 # Basler ace 2 + Zaber XY 스테이지 캡처
 
+## 배포 버전
+
+- Current release: `v0.1.0`
+- Windows installer: `LinearStageControlSetup.exe`
+- SHA256: `1E2071C0EC100E0DEE41CF16FDAB61BB59465C88151D7C250AF31F96C6F6EF1C`
+- Release notes: [CHANGELOG.md](CHANGELOG.md)
+
 Basler ace 2 `a2A2464-115g5mBAS` 카메라와 Zaber XY 스테이지를 연동해, 사전에 입력한 위치마다 이동 완료 후 카메라 캡처를 수행하고 데이터셋으로 저장하는 기본 환경입니다.
 
 ## 실행 흐름

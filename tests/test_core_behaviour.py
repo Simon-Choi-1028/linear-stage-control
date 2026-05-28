@@ -217,6 +217,34 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(window.live_size_label.text(), "100%")
         window.close()
 
+    def test_preview_zoom_grid_and_cross_render_without_hardware(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.preview_mode = "live"
+        frame = np.arange(48 * 64, dtype=np.uint16).reshape(48, 64)
+        window.preview_zoom_slider.setValue(200)
+        window.preview_grid_check.setChecked(True)
+        window.preview_cross_check.setChecked(True)
+        window.on_live_frame(frame, {})
+        app.processEvents()
+
+        self.assertEqual(window.preview_zoom_label.text(), "200%")
+        self.assertTrue(window.preview_grid_check.isChecked())
+        self.assertTrue(window.preview_cross_check.isChecked())
+        self.assertFalse(window.preview_label.pixmap().isNull())
+        self.assertIsNotNone(window.preview_crop_rect)
+        self.assertLess(window.preview_crop_rect[2], frame.shape[1])
+
+        window.set_preview_center_from_label(
+            window.preview_label.width() / 2,
+            window.preview_label.height() / 2,
+        )
+        self.assertGreaterEqual(window.preview_center_x, 0.0)
+        self.assertLessEqual(window.preview_center_x, 1.0)
+        window.close()
+
     def test_linear_path_preview_widget_renders_without_hardware(self) -> None:
         from linear_stage_control.gui_widgets import LinearPathPreviewWidget
 

@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
 
 class ImagePreviewLabel(QLabel):
     double_clicked = Signal()
+    clicked = Signal(float, float)
+
+    def mousePressEvent(self, event: object) -> None:
+        position = getattr(event, "position", lambda: None)()
+        if position is not None:
+            self.clicked.emit(float(position.x()), float(position.y()))
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: object) -> None:
         self.double_clicked.emit()

@@ -15,8 +15,8 @@ from typing import Any
 import numpy as np
 import yaml
 from PIL import Image
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QImage, QPalette, QPixmap
+from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QImage, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -146,6 +146,10 @@ class MainWindow(QMainWindow):
         self._camera_user_touched = False
         self._layout_is_narrow: bool | None = None
         self.preview_base_min_height = 360
+        self.preview_source_qimage: QImage | None = None
+        self.preview_crop_rect: tuple[int, int, int, int] | None = None
+        self.preview_center_x = 0.5
+        self.preview_center_y = 0.5
         self._build_ui()
         self._apply_style()
         self._load_initial_config()
@@ -257,6 +261,70 @@ class MainWindow(QMainWindow):
         height = max(160, int(self.preview_base_min_height * scale / 100))
         self.preview_label.setMinimumHeight(height)
         self.preview_label.setMaximumHeight(height)
+        self.render_preview_source()
+
+    def set_preview_zoom(self, value: int) -> None:
+        zoom = int(value)
+        if hasattr(self, "preview_zoom_label"):
+            self.preview_zoom_label.setText(f"{zoom}%")
+        self.render_preview_source()
+
+    def reset_preview_zoom(self) -> None:
+        self.preview_center_x = 0.5
+        self.preview_center_y = 0.5
+        if hasattr(self, "preview_zoom_slider"):
+            self.preview_zoom_slider.setValue(100)
+        self.render_preview_source()
+
+    def set_preview_center_from_label(self, x: float, y: float) -> None:
+        if self.preview_source_qimage is None or self.preview_crop_rect is None:
+            return
+        pixmap = self.preview_label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        x_offset = max(0.0, (self.preview_label.width() - pixmap.width()) / 2)
+        y_offset = max(0.0, (self.preview_label.height() - pixmap.height()) / 2)
+        rel_x = (x - x_offset) / max(1, pixmap.width())
+        rel_y = (y - y_offset) / max(1, pixmap.height())
+        if rel_x < 0 or rel_x > 1 or rel_y < 0 or rel_y > 1:
+            return
+        crop_x, crop_y, crop_w, crop_h = self.preview_crop_rect
+        source_w = max(1, self.preview_source_qimage.width())
+        source_h = max(1, self.preview_source_qimage.height())
+        self.preview_center_x = min(1.0, max(0.0, (crop_x + rel_x * crop_w) / source_w))
+        self.preview_center_y = min(1.0, max(0.0, (crop_y + rel_y * crop_h) / source_h))
+        self.render_preview_source()
+
+    def preview_target_size(self) -> QSize:
+        return QSize(
+            max(100, self.preview_label.width() - 24),
+            max(100, self.preview_label.height() - 24),
+        )
+
+    def set_preview_source(self, qimage: QImage, reset_center: bool = False) -> None:
+        self.preview_source_qimage = qimage.copy()
+        if reset_center:
+            self.preview_center_x = 0.5
+            self.preview_center_y = 0.5
+        self.render_preview_source()
+
+    def render_preview_source(self) -> None:
+        if not hasattr(self, "preview_label") or self.preview_source_qimage is None:
+            return
+        zoom = self.preview_zoom_slider.value() if hasattr(self, "preview_zoom_slider") else 100
+        grid = self.preview_grid_check.isChecked() if hasattr(self, "preview_grid_check") else False
+        cross = self.preview_cross_check.isChecked() if hasattr(self, "preview_cross_check") else False
+        pixmap, crop_rect = _render_preview_qimage(
+            self.preview_source_qimage,
+            self.preview_target_size(),
+            zoom,
+            self.preview_center_x,
+            self.preview_center_y,
+            grid,
+            cross,
+        )
+        self.preview_crop_rect = crop_rect
+        self.preview_label.setPixmap(pixmap)
 
     def _build_control_panel(self) -> QWidget:
         panel = QWidget()
@@ -717,6 +785,7 @@ class MainWindow(QMainWindow):
         self.preview_label.setMinimumHeight(360)
         self.preview_label.setObjectName("preview")
         self.preview_label.double_clicked.connect(self.open_fullscreen_image)
+        self.preview_label.clicked.connect(self.set_preview_center_from_label)
         self.preview_info_label = QLabel("촬영 이미지를 선택하면 아래 칸에 위치와 오차가 표시됩니다")
         self.preview_info_label.setWordWrap(True)
         self.preview_info_label.setObjectName("previewInfo")
@@ -759,6 +828,36 @@ class MainWindow(QMainWindow):
         live_size_row.addWidget(self.live_size_slider)
         live_size_row.addWidget(self.live_size_label)
         live_size_row.addWidget(self.live_size_reset_button)
+
+        self.preview_zoom_label = QLabel("100%")
+        self.preview_zoom_label.setMinimumWidth(42)
+        self.preview_zoom_label.setAlignment(Qt.AlignCenter)
+        self.preview_zoom_slider = QSlider(Qt.Horizontal)
+        self.preview_zoom_slider.setRange(100, 800)
+        self.preview_zoom_slider.setValue(100)
+        self.preview_zoom_slider.setFixedWidth(140)
+        self.preview_zoom_slider.setToolTip("미리보기 디지털 확대 비율입니다. 확대 후 이미지를 클릭하면 해당 지점으로 중심이 이동합니다.")
+        self.preview_zoom_reset_button = QPushButton("맞춤")
+        self.preview_zoom_reset_button.setMinimumWidth(64)
+        self.preview_zoom_reset_button.setToolTip("확대를 100%로 되돌리고 중심을 화면 중앙으로 맞춥니다.")
+        self.preview_grid_check = QCheckBox("격자")
+        self.preview_grid_check.setToolTip("미리보기 이미지 위에 4분할 격자를 겹쳐 표시합니다.")
+        self.preview_cross_check = QCheckBox("중앙선")
+        self.preview_cross_check.setToolTip("미리보기 이미지 중앙에 수평/수직 크로스라인을 표시합니다.")
+        _apply_button_icon(self.preview_zoom_reset_button, QStyle.SP_LineEditClearButton, "미리보기 확대 초기화")
+        self.preview_zoom_slider.valueChanged.connect(self.set_preview_zoom)
+        self.preview_zoom_reset_button.clicked.connect(self.reset_preview_zoom)
+        self.preview_grid_check.toggled.connect(lambda _checked=False: self.render_preview_source())
+        self.preview_cross_check.toggled.connect(lambda _checked=False: self.render_preview_source())
+
+        preview_tools_row = QHBoxLayout()
+        preview_tools_row.addStretch(1)
+        preview_tools_row.addWidget(QLabel("확대"))
+        preview_tools_row.addWidget(self.preview_zoom_slider)
+        preview_tools_row.addWidget(self.preview_zoom_label)
+        preview_tools_row.addWidget(self.preview_zoom_reset_button)
+        preview_tools_row.addWidget(self.preview_grid_check)
+        preview_tools_row.addWidget(self.preview_cross_check)
 
         self.preview_metrics_table = QTableWidget(1, 11)
         self.preview_metrics_table.setObjectName("previewMetrics")
@@ -863,6 +962,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.preview_label, 3)
         layout.addLayout(preview_info_row)
         layout.addLayout(live_size_row)
+        layout.addLayout(preview_tools_row)
         layout.addWidget(self.preview_metrics_table)
         layout.addWidget(tabs, 2)
         return panel
@@ -1322,14 +1422,7 @@ class MainWindow(QMainWindow):
     def on_live_frame(self, array: object, metadata: dict[str, Any]) -> None:
         if self.preview_mode != "live":
             return
-        pixmap = _pixmap_from_array(
-            array,
-            QSize(
-                max(100, self.preview_label.width() - 24),
-                max(100, self.preview_label.height() - 24),
-            ),
-        )
-        self.preview_label.setPixmap(pixmap)
+        self.set_preview_source(_qimage_from_array(array), reset_center=False)
         self.live_status_label.setText(f"Live {self.live_preview_fps()} FPS")
         timestamp = metadata.get("completed_at") or metadata.get("captured_at") or ""
         self.preview_info_label.setText(f"Live preview 표시 중 {timestamp}".strip())
@@ -2518,17 +2611,10 @@ class MainWindow(QMainWindow):
             self.preview_mode = "capture"
             self.current_image_path = path
             image = Image.open(path)
-            image.thumbnail(
-                (
-                    max(100, self.preview_label.width() - 24),
-                    max(100, self.preview_label.height() - 24),
-                ),
-                Image.Resampling.LANCZOS,
-            )
             image = image.convert("RGB")
             data = image.tobytes("raw", "RGB")
             qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
-            self.preview_label.setPixmap(QPixmap.fromImage(qimage))
+            self.set_preview_source(qimage, reset_center=True)
             self.fullscreen_button.setEnabled(True)
         except Exception as exc:
             self.current_image_path = None
@@ -2849,39 +2935,106 @@ def _set_table_values(table: QTableWidget, values: list[str]) -> None:
 
 
 def _pixmap_from_array(array: object, target_size: QSize) -> QPixmap:
+    qimage = _qimage_from_array(array)
+    return QPixmap.fromImage(qimage).scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+def _qimage_from_array(array: object) -> QImage:
     arr = np.asarray(array)
     if arr.ndim == 2:
         arr8 = _to_uint8(arr)
-        qimage = QImage(
+        return QImage(
             arr8.data,
             arr8.shape[1],
             arr8.shape[0],
             arr8.strides[0],
             QImage.Format_Grayscale8,
         ).copy()
-    elif arr.ndim == 3:
+    if arr.ndim == 3:
         if arr.shape[2] == 1:
-            return _pixmap_from_array(arr[:, :, 0], target_size)
+            return _qimage_from_array(arr[:, :, 0])
         arr8 = _to_uint8(arr[:, :, :4])
         if arr8.shape[2] >= 4:
-            qimage = QImage(
+            return QImage(
                 arr8.data,
                 arr8.shape[1],
                 arr8.shape[0],
                 arr8.strides[0],
                 QImage.Format_RGBA8888,
             ).copy()
-        else:
-            qimage = QImage(
-                arr8.data,
-                arr8.shape[1],
-                arr8.shape[0],
-                arr8.strides[0],
-                QImage.Format_RGB888,
-            ).copy()
-    else:
-        raise ValueError(f"Unsupported live frame shape: {arr.shape}")
-    return QPixmap.fromImage(qimage).scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return QImage(
+            arr8.data,
+            arr8.shape[1],
+            arr8.shape[0],
+            arr8.strides[0],
+            QImage.Format_RGB888,
+        ).copy()
+    raise ValueError(f"Unsupported live frame shape: {arr.shape}")
+
+
+def _render_preview_qimage(
+    qimage: QImage,
+    target_size: QSize,
+    zoom_percent: int,
+    center_x: float,
+    center_y: float,
+    show_grid: bool,
+    show_cross: bool,
+) -> tuple[QPixmap, tuple[int, int, int, int]]:
+    crop_rect = _preview_crop_rect(qimage, zoom_percent, center_x, center_y)
+    crop_x, crop_y, crop_w, crop_h = crop_rect
+    cropped = qimage.copy(crop_x, crop_y, crop_w, crop_h)
+    pixmap = QPixmap.fromImage(cropped).scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if show_grid or show_cross:
+        _draw_preview_overlays(pixmap, show_grid=show_grid, show_cross=show_cross)
+    return pixmap, crop_rect
+
+
+def _preview_crop_rect(
+    qimage: QImage,
+    zoom_percent: int,
+    center_x: float,
+    center_y: float,
+) -> tuple[int, int, int, int]:
+    source_w = max(1, qimage.width())
+    source_h = max(1, qimage.height())
+    zoom = max(1.0, float(zoom_percent) / 100.0)
+    crop_w = max(1, min(source_w, int(round(source_w / zoom))))
+    crop_h = max(1, min(source_h, int(round(source_h / zoom))))
+    center_px = min(1.0, max(0.0, center_x)) * source_w
+    center_py = min(1.0, max(0.0, center_y)) * source_h
+    crop_x = int(round(center_px - crop_w / 2))
+    crop_y = int(round(center_py - crop_h / 2))
+    crop_x = max(0, min(source_w - crop_w, crop_x))
+    crop_y = max(0, min(source_h - crop_h, crop_y))
+    return crop_x, crop_y, crop_w, crop_h
+
+
+def _draw_preview_overlays(pixmap: QPixmap, show_grid: bool, show_cross: bool) -> None:
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    width = pixmap.width()
+    height = pixmap.height()
+    if show_grid:
+        shadow_pen = QPen(QColor(0, 0, 0, 120), 2)
+        line_pen = QPen(QColor(255, 255, 255, 185), 1)
+        for index in range(1, 4):
+            x = round(width * index / 4)
+            y = round(height * index / 4)
+            for pen in (shadow_pen, line_pen):
+                painter.setPen(pen)
+                painter.drawLine(x, 0, x, height)
+                painter.drawLine(0, y, width, y)
+    if show_cross:
+        center_x = round(width / 2)
+        center_y = round(height / 2)
+        for pen in (QPen(QColor(0, 0, 0, 160), 3), QPen(QColor("#ff3b30"), 1)):
+            painter.setPen(pen)
+            painter.drawLine(center_x, 0, center_x, height)
+            painter.drawLine(0, center_y, width, center_y)
+        painter.setPen(QPen(QColor("#ff3b30"), 2))
+        painter.drawEllipse(QPointF(center_x, center_y), 5, 5)
+    painter.end()
 
 
 def _to_uint8(array: np.ndarray) -> np.ndarray:

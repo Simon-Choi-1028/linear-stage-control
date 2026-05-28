@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import math
 import os
 import sys
 import threading
@@ -15,7 +14,7 @@ from typing import Any
 import yaml
 from PIL import Image
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QImage, QPalette
+from PySide6.QtGui import QBrush, QColor, QImage
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -69,8 +68,17 @@ from .gui_widgets import (
     ErrorChartWidget,
     FullscreenImageWindow,
     ImagePreviewLabel,
-    LinearPathPreviewWidget,
     ParameterAdjustRow,
+)
+from .linear_path_dialog import show_linear_path_dialog
+from .gui_support import (
+    apply_button_icon as _apply_button_icon,
+    apply_default_font as _apply_default_font,
+    app_base_dir,
+    bundled_resource,
+    preflight_status_color as _preflight_status_color,
+    set_placeholder_color as _set_placeholder_color,
+    set_table_values as _set_table_values,
 )
 from .position_validation import (
     POSITION_MAX_MM,
@@ -85,14 +93,30 @@ from .position_validation import (
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
-    linear_path_points,
-    linear_path_points_by_spacing,
     points_from_config,
     points_from_file,
     total_capture_count,
 )
 from .preview_rendering import qimage_from_array, render_preview_qimage
 from .stage import list_serial_ports
+from .text_formatting import (
+    axis_activity_from_stage_config as _axis_activity_from_stage_config,
+    camera_display_name as _camera_display_name,
+    camera_signature as _camera_signature,
+    capture_sequence_text as _capture_sequence_text,
+    mm_text as _mm_text,
+    number_text as _number_text,
+    optional_float_text as _optional_float_text,
+    optional_int_text as _optional_int_text,
+    point_config_record as _point_config_record,
+    position_cell_tooltip as _position_cell_tooltip,
+    safe_float_text as _safe_float_text,
+    settle_display_text as _settle_display_text,
+    stage_settle_seconds_from_config as _stage_settle_seconds_from_config,
+    status_text as _status_text,
+    threshold_text as _threshold_text,
+    um_text as _um_text,
+)
 from .updater import UpdateInfo, update_settings_from_config
 from . import __version__
 
@@ -302,7 +326,7 @@ class MainWindow(QMainWindow):
         )
 
     def set_preview_source(self, qimage: QImage, reset_center: bool = False) -> None:
-        self.preview_source_qimage = qimage.copy()
+        self.preview_source_qimage = qimage
         if reset_center:
             self.preview_center_x = 0.5
             self.preview_center_y = 0.5
@@ -1745,327 +1769,23 @@ class MainWindow(QMainWindow):
         self.positions_table.setRowCount(0)
         self.refresh_position_feedback()
 
-    def _generate_linear_path_dialog_legacy(self) -> None:
-        self.generate_linear_path_dialog()
-        return
-        start_x, start_y, end_x, end_y = self._linear_path_defaults()
-        default_spacing = max(0.001, _linear_distance(start_x, start_y, end_x, end_y) / 10.0)
-        dialog = QDialog(self)
-        dialog.setWindowTitle("선형 연속 경로 생성")
-        dialog.resize(460, 390)
-        layout = QVBoxLayout(dialog)
-        form = QFormLayout()
-
-        start_x_edit = QLineEdit(_mm_text(start_x))
-        start_y_edit = QLineEdit(_mm_text(start_y))
-        end_x_edit = QLineEdit(_mm_text(end_x))
-        end_y_edit = QLineEdit(_mm_text(end_y))
-        basis_combo = QComboBox()
-        basis_combo.addItem("간격 mm/캡쳐", "spacing")
-        basis_combo.addItem("위치 수", "count")
-        spacing_edit = QLineEdit(_mm_text(default_spacing))
-        count_spin = QSpinBox()
-        count_spin.setRange(2, 100_000)
-        count_spin.setValue(11)
-        count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        label_prefix_edit = QLineEdit("line")
-        velocity_edit = QLineEdit()
-        velocity_edit.setPlaceholderText("비우면 촬영 설정 이동속도 사용")
-        capture_count_edit = QLineEdit()
-        capture_count_edit.setPlaceholderText(f"비우면 기본 캡쳐 {self.capture_count_spin.value()}장")
-        _set_placeholder_color(velocity_edit)
-        _set_placeholder_color(capture_count_edit)
-        replace_check = QCheckBox("기존 위치를 지우고 생성")
-
-        for editor, tooltip in (
-            (start_x_edit, "선형 경로 시작 X 좌표입니다. 단위: mm"),
-            (start_y_edit, "선형 경로 시작 Y 좌표입니다. 단위: mm"),
-            (end_x_edit, "선형 경로 끝 X 좌표입니다. 단위: mm"),
-            (end_y_edit, "선형 경로 끝 Y 좌표입니다. 단위: mm"),
-            (basis_combo, "선형 경로 생성 기준입니다. 기본값: 간격 mm/캡쳐"),
-            (spacing_edit, "경로를 따라 몇 mm마다 한 위치를 생성할지 지정합니다. 끝점은 항상 포함됩니다."),
-            (count_spin, "시작점과 끝점을 포함한 총 위치 개수입니다."),
-            (label_prefix_edit, "생성될 위치 라벨 접두어입니다. 예: line_0001"),
-            (velocity_edit, "생성 위치에 고정할 이동속도입니다. 비우면 촬영 설정 이동속도를 따릅니다."),
-            (capture_count_edit, "생성 위치에 고정할 캡쳐 수입니다. 비우면 기본 캡쳐 수를 따릅니다."),
-            (replace_check, "켜면 현재 위치 테이블을 비우고 새 경로만 넣습니다."),
-        ):
-            editor.setToolTip(tooltip)
-
-        form.addRow("시작 X mm", start_x_edit)
-        form.addRow("시작 Y mm", start_y_edit)
-        form.addRow("끝 X mm", end_x_edit)
-        form.addRow("끝 Y mm", end_y_edit)
-        form.addRow("생성 기준", basis_combo)
-        form.addRow("간격 mm/캡쳐", spacing_edit)
-        form.addRow("위치 수", count_spin)
-        form.addRow("라벨 접두어", label_prefix_edit)
-        form.addRow("이동속도 mm/s", velocity_edit)
-        form.addRow("캡쳐 수", capture_count_edit)
-        form.addRow("", replace_check)
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("생성")
-        buttons.button(QDialogButtonBox.Cancel).setText("취소")
-        layout.addWidget(buttons)
-
-        def sync_generation_mode() -> None:
-            use_spacing = basis_combo.currentData() == "spacing"
-            spacing_edit.setEnabled(use_spacing)
-            count_spin.setReadOnly(use_spacing)
-            count_spin.setEnabled(not use_spacing)
-            update_linear_count_preview()
-
-        def update_linear_count_preview() -> None:
-            if basis_combo.currentData() != "spacing":
-                return
-            try:
-                calculated_count = _linear_spacing_point_count(
-                    float(start_x_edit.text().strip()),
-                    float(start_y_edit.text().strip()),
-                    float(end_x_edit.text().strip()),
-                    float(end_y_edit.text().strip()),
-                    float(spacing_edit.text().strip()),
-                )
-            except Exception:
-                calculated_count = 2
-            count_spin.setValue(max(2, min(count_spin.maximum(), calculated_count)))
-
-        basis_combo.currentIndexChanged.connect(sync_generation_mode)
-        for editor in (start_x_edit, start_y_edit, end_x_edit, end_y_edit, spacing_edit):
-            editor.textChanged.connect(update_linear_count_preview)
-        sync_generation_mode()
-
-        def accept_generated_path() -> None:
-            try:
-                x_start = float(start_x_edit.text().strip())
-                y_start = float(start_y_edit.text().strip())
-                x_stop = float(end_x_edit.text().strip())
-                y_stop = float(end_y_edit.text().strip())
-                move_velocity = _optional_float_text(velocity_edit.text())
-                if move_velocity is not None and move_velocity <= 0:
-                    raise ValueError("이동속도는 비워 두거나 0보다 커야 합니다.")
-                capture_count = _optional_int_text(capture_count_edit.text())
-                if capture_count is not None and capture_count < 1:
-                    raise ValueError("캡쳐 수는 비워 두거나 1 이상이어야 합니다.")
-                start_index = 0 if replace_check.isChecked() else self.positions_table.rowCount()
-                if basis_combo.currentData() == "spacing":
-                    spacing_mm = float(spacing_edit.text().strip())
-                    points = list(
-                        linear_path_points_by_spacing(
-                            x_start=x_start,
-                            y_start=y_start,
-                            x_stop=x_stop,
-                            y_stop=y_stop,
-                            spacing_mm=spacing_mm,
-                            label_prefix=label_prefix_edit.text().strip() or "line",
-                            start_index=start_index,
-                            move_velocity_mm_s=move_velocity,
-                            capture_count=capture_count,
-                        )
-                    )
-                else:
-                    points = list(
-                        linear_path_points(
-                            x_start=x_start,
-                            y_start=y_start,
-                            x_stop=x_stop,
-                            y_stop=y_stop,
-                            count=count_spin.value(),
-                            label_prefix=label_prefix_edit.text().strip() or "line",
-                            start_index=start_index,
-                            move_velocity_mm_s=move_velocity,
-                            capture_count=capture_count,
-                        )
-                    )
-            except Exception as exc:
-                QMessageBox.warning(dialog, "경로 생성 오류", str(exc))
-                return
-
-            if replace_check.isChecked():
-                self.set_positions(points)
-            else:
-                for point in points:
-                    self.add_position_row(point, update_feedback=False)
-                self.reindex_positions()
-                self.refresh_position_feedback()
-            self.log(f"선형 경로 생성: {len(points)}개 위치")
-            dialog.accept()
-
-        buttons.accepted.connect(accept_generated_path)
-        buttons.rejected.connect(dialog.reject)
-        dialog.exec()
-
     def generate_linear_path_dialog(self) -> None:
-        start_x, start_y, end_x, end_y = self._linear_path_defaults()
-        default_spacing = max(0.001, _linear_distance(start_x, start_y, end_x, end_y) / 10.0)
-        dialog = QDialog(self)
-        dialog.setWindowTitle("선형 연속 경로 생성")
-        dialog.resize(760, 520)
-        layout = QVBoxLayout(dialog)
-        body_layout = QHBoxLayout()
-        form_widget = QWidget()
-        form = QFormLayout(form_widget)
-
-        start_x_edit = QLineEdit(_mm_text(start_x))
-        start_y_edit = QLineEdit(_mm_text(start_y))
-        end_x_edit = QLineEdit(_mm_text(end_x))
-        end_y_edit = QLineEdit(_mm_text(end_y))
-        basis_combo = QComboBox()
-        basis_combo.addItem("간격 mm/캡쳐", "spacing")
-        basis_combo.addItem("위치 수", "count")
-        spacing_edit = QLineEdit(_mm_text(default_spacing))
-        count_spin = QSpinBox()
-        count_spin.setRange(2, 100_000)
-        count_spin.setValue(11)
-        count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        label_prefix_edit = QLineEdit("line")
-        velocity_edit = QLineEdit()
-        velocity_edit.setPlaceholderText("비우면 촬영 설정 이동속도 사용")
-        capture_count_edit = QLineEdit()
-        capture_count_edit.setPlaceholderText(f"비우면 기본 캡쳐 {self.capture_count_spin.value()}장")
-        _set_placeholder_color(velocity_edit)
-        _set_placeholder_color(capture_count_edit)
-        replace_check = QCheckBox("기존 위치를 지우고 생성")
-        preview_widget = LinearPathPreviewWidget()
-        preview_status = QLabel()
-        preview_status.setWordWrap(True)
-
-        form.addRow("시작 X mm", start_x_edit)
-        form.addRow("시작 Y mm", start_y_edit)
-        form.addRow("끝 X mm", end_x_edit)
-        form.addRow("끝 Y mm", end_y_edit)
-        form.addRow("생성 기준", basis_combo)
-        form.addRow("간격 mm/캡쳐", spacing_edit)
-        form.addRow("위치 수", count_spin)
-        form.addRow("라벨 접두어", label_prefix_edit)
-        form.addRow("이동속도 mm/s", velocity_edit)
-        form.addRow("캡쳐 수", capture_count_edit)
-        form.addRow("", replace_check)
-        body_layout.addWidget(form_widget, 0)
-        body_layout.addWidget(preview_widget, 1)
-        layout.addLayout(body_layout)
-        layout.addWidget(preview_status)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        ok_button = buttons.button(QDialogButtonBox.Ok)
-        ok_button.setText("생성")
-        buttons.button(QDialogButtonBox.Cancel).setText("취소")
-        layout.addWidget(buttons)
-
-        def build_points(start_index: int = 0) -> list[ScanPoint]:
-            x_start = float(start_x_edit.text().strip())
-            y_start = float(start_y_edit.text().strip())
-            x_stop = float(end_x_edit.text().strip())
-            y_stop = float(end_y_edit.text().strip())
-            move_velocity = _optional_float_text(velocity_edit.text())
-            if move_velocity is not None and move_velocity <= 0:
-                raise ValueError("이동속도는 비워 두거나 0보다 커야 합니다.")
-            capture_count = _optional_int_text(capture_count_edit.text())
-            if capture_count is not None and capture_count < 1:
-                raise ValueError("캡쳐 수는 비워 두거나 1 이상이어야 합니다.")
-            if basis_combo.currentData() == "spacing":
-                return list(
-                    linear_path_points_by_spacing(
-                        x_start=x_start,
-                        y_start=y_start,
-                        x_stop=x_stop,
-                        y_stop=y_stop,
-                        spacing_mm=float(spacing_edit.text().strip()),
-                        label_prefix=label_prefix_edit.text().strip() or "line",
-                        start_index=start_index,
-                        move_velocity_mm_s=move_velocity,
-                        capture_count=capture_count,
-                    )
-                )
-            return list(
-                linear_path_points(
-                    x_start=x_start,
-                    y_start=y_start,
-                    x_stop=x_stop,
-                    y_stop=y_stop,
-                    count=count_spin.value(),
-                    label_prefix=label_prefix_edit.text().strip() or "line",
-                    start_index=start_index,
-                    move_velocity_mm_s=move_velocity,
-                    capture_count=capture_count,
-                )
-            )
-
-        def update_linear_preview() -> None:
-            try:
-                points = build_points()
-                if basis_combo.currentData() == "spacing":
-                    count_spin.blockSignals(True)
-                    count_spin.setValue(len(points))
-                    count_spin.blockSignals(False)
-                distance = _linear_distance(
-                    float(start_x_edit.text().strip()),
-                    float(start_y_edit.text().strip()),
-                    float(end_x_edit.text().strip()),
-                    float(end_y_edit.text().strip()),
-                )
-                capture_count = _optional_int_text(capture_count_edit.text()) or self.capture_count_spin.value()
-                total_captures = len(points) * capture_count
-                summary = f"총 거리 {_mm_text(distance)} mm | 위치 {len(points)}개 | 예상 {total_captures}장"
-                preview_widget.set_path([(point.x_mm, point.y_mm) for point in points], summary)
-                preview_status.setText(summary)
-                preview_status.setStyleSheet("color: #1f5f43; font-weight: 600;")
-                ok_button.setEnabled(True)
-            except Exception as exc:
-                if basis_combo.currentData() == "spacing":
-                    count_spin.blockSignals(True)
-                    count_spin.setValue(2)
-                    count_spin.blockSignals(False)
-                message = str(exc)
-                preview_widget.set_path([], "", message)
-                preview_status.setText(message)
-                preview_status.setStyleSheet("color: #b42318; font-weight: 700;")
-                ok_button.setEnabled(False)
-
-        def sync_generation_mode() -> None:
-            use_spacing = basis_combo.currentData() == "spacing"
-            spacing_edit.setEnabled(use_spacing)
-            count_spin.setReadOnly(use_spacing)
-            update_linear_preview()
-
-        basis_combo.currentIndexChanged.connect(sync_generation_mode)
-        for editor in (
-            start_x_edit,
-            start_y_edit,
-            end_x_edit,
-            end_y_edit,
-            spacing_edit,
-            label_prefix_edit,
-            velocity_edit,
-            capture_count_edit,
-        ):
-            editor.textChanged.connect(update_linear_preview)
-        count_spin.valueChanged.connect(update_linear_preview)
-        sync_generation_mode()
-
-        def accept_generated_path() -> None:
-            try:
-                start_index = 0 if replace_check.isChecked() else self.positions_table.rowCount()
-                points = build_points(start_index=start_index)
-            except Exception as exc:
-                QMessageBox.warning(dialog, "경로 생성 오류", str(exc))
-                return
-
-            if replace_check.isChecked():
-                self.set_positions(points)
-            else:
-                for point in points:
-                    self.add_position_row(point, update_feedback=False)
-                self.reindex_positions()
-                self.refresh_position_feedback()
-            self.log(f"선형 경로 생성: {len(points)}개 위치")
-            dialog.accept()
-
-        buttons.accepted.connect(accept_generated_path)
-        buttons.rejected.connect(dialog.reject)
-        dialog.exec()
+        result = show_linear_path_dialog(
+            self,
+            self._linear_path_defaults(),
+            default_capture_count=self.capture_count_spin.value(),
+            append_start_index=self.positions_table.rowCount(),
+        )
+        if result is None:
+            return
+        if result.replace_existing:
+            self.set_positions(result.points)
+        else:
+            for point in result.points:
+                self.add_position_row(point, update_feedback=False)
+            self.reindex_positions()
+            self.refresh_position_feedback()
+        self.log(f"선형 경로 생성: {len(result.points)}개 위치")
 
     def _linear_path_defaults(self) -> tuple[float, float, float, float]:
         selected_rows = sorted({index.row() for index in self.positions_table.selectedIndexes()})
@@ -2758,244 +2478,6 @@ class MainWindow(QMainWindow):
             if combo.itemData(index) == data:
                 combo.setCurrentIndex(index)
                 return
-
-
-def _optional_float_text(text: str) -> float | None:
-    clean = text.strip()
-    if not clean:
-        return None
-    return float(clean)
-
-
-def _optional_int_text(text: str) -> int | None:
-    clean = text.strip()
-    if not clean:
-        return None
-    number = float(clean)
-    if not number.is_integer():
-        raise ValueError(f"정수로 입력해야 합니다: {text}")
-    return int(number)
-
-
-def _safe_float_text(text: str, default: float) -> float:
-    try:
-        return float(text.strip())
-    except (TypeError, ValueError):
-        return default
-
-
-def _linear_distance(x_start: float, y_start: float, x_stop: float, y_stop: float) -> float:
-    return ((x_stop - x_start) ** 2 + (y_stop - y_start) ** 2) ** 0.5
-
-
-def _linear_spacing_point_count(
-    x_start: float,
-    y_start: float,
-    x_stop: float,
-    y_stop: float,
-    spacing_mm: float,
-) -> int:
-    if spacing_mm <= 0:
-        raise ValueError("선형 경로 간격은 0보다 커야 합니다.")
-    length = math.hypot(x_stop - x_start, y_stop - y_start)
-    if length <= 0:
-        return 2
-    base_count = int(math.floor(length / spacing_mm)) + 1
-    endpoint_count = (
-        0
-        if math.isclose((base_count - 1) * spacing_mm, length, rel_tol=0.0, abs_tol=1e-9)
-        else 1
-    )
-    return base_count + endpoint_count
-
-
-def _set_placeholder_color(line_edit: QLineEdit) -> None:
-    palette = line_edit.palette()
-    palette.setColor(QPalette.PlaceholderText, QColor("#9aa5af"))
-    line_edit.setPalette(palette)
-
-
-def _compact_number_text(value: Any, max_decimals: int) -> str:
-    if value is None or value == "":
-        return ""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if abs(number) < 10 ** (-max_decimals):
-        number = 0.0
-    text = f"{number:.{max_decimals}f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def _mm_text(value: Any) -> str:
-    return _compact_number_text(value, 4)
-
-
-def _um_text(value: Any) -> str:
-    return _compact_number_text(value, 2)
-
-
-def _number_text(value: Any) -> str:
-    return _compact_number_text(value, 3)
-
-
-def _settle_display_text(seconds: float) -> str:
-    if seconds < 1:
-        return f"{_number_text(seconds * 1000)} ms"
-    return f"{_number_text(seconds)} s"
-
-
-def _stage_settle_seconds_from_config(stage: dict[str, Any]) -> float:
-    if stage.get("settle_s") not in (None, ""):
-        return float(stage.get("settle_s", 0.2))
-    if stage.get("settle_ms") not in (None, ""):
-        return float(stage["settle_ms"]) / 1000.0
-    return 0.2
-
-
-def _velocity_text(value: Any) -> str:
-    if value in (None, ""):
-        return "장비 기본값"
-    return f"{_number_text(value)} mm/s"
-
-
-def _capture_sequence_text(record: dict[str, Any]) -> str:
-    capture_index = record.get("capture_index", "")
-    capture_count = record.get("capture_count", "")
-    if capture_index == "" and capture_count == "":
-        return "-"
-    if capture_index == "":
-        return f"-/{capture_count}"
-    if capture_count == "":
-        return str(capture_index)
-    return f"{capture_index}/{capture_count}"
-
-
-def _position_cell_tooltip(column: int) -> str:
-    tooltips = {
-        1: "위치 라벨입니다. 비워도 실행은 가능하지만 구분하기 어렵습니다.",
-        2: f"X 좌표입니다. 허용 범위: {_mm_text(POSITION_MIN_MM)}-{_mm_text(POSITION_MAX_MM)} mm",
-        3: f"Y 좌표입니다. 허용 범위: {_mm_text(POSITION_MIN_MM)}-{_mm_text(POSITION_MAX_MM)} mm",
-        4: "위치별 이동속도입니다. 비워 두면 촬영 설정의 이동속도를 사용합니다.",
-        5: "위치별 캡쳐 수입니다. 비워 두면 촬영 설정의 기본 캡쳐 수를 사용합니다.",
-    }
-    return tooltips.get(column, "")
-
-
-def _point_config_record(point: ScanPoint) -> dict[str, Any]:
-    record: dict[str, Any] = {"label": point.label, "x_mm": point.x_mm, "y_mm": point.y_mm}
-    if point.move_velocity_mm_s is not None:
-        record["move_velocity_mm_s"] = point.move_velocity_mm_s
-    if point.capture_count is not None:
-        record["capture_count"] = point.capture_count
-    return record
-
-
-def _axis_activity_from_stage_config(stage: dict[str, Any]) -> tuple[bool, bool]:
-    axes = stage.get("axes", {})
-    x_axis = axes.get("x", {}) or {}
-    y_axis = axes.get("y", {}) or {}
-    return bool(x_axis.get("enabled", True)), bool(y_axis.get("enabled", True))
-
-
-def _status_text(value: Any) -> str:
-    mapping = {
-        "ok": "완료",
-        "error": "오류",
-        "pending": "대기",
-    }
-    return mapping.get(str(value), str(value))
-
-
-def _threshold_text(record: dict[str, Any]) -> str:
-    if record.get("status") == "error":
-        return "오류"
-    if record.get("within_error_threshold") is True:
-        return "통과"
-    if record.get("within_error_threshold") is False:
-        return "초과"
-    return "확인"
-
-
-def _preflight_status_color(status: str) -> QColor:
-    if status == "오류":
-        return QColor("#ffe1df")
-    if status == "경고":
-        return QColor("#fff4cc")
-    return QColor("#dff2e8")
-
-
-def _set_table_values(table: QTableWidget, values: list[str]) -> None:
-    for column, value in enumerate(values[: table.columnCount()]):
-        item = QTableWidgetItem(value)
-        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-        item.setTextAlignment(Qt.AlignCenter)
-        table.setItem(0, column, item)
-
-
-def _apply_button_icon(
-    button: QPushButton,
-    standard_pixmap: QStyle.StandardPixmap,
-    tooltip: str,
-    icon_size: int = 18,
-) -> None:
-    button.setIcon(QApplication.style().standardIcon(standard_pixmap))
-    button.setIconSize(QSize(icon_size, icon_size))
-    button.setToolTip(tooltip)
-
-
-def _camera_display_name(camera: dict[str, str]) -> str:
-    return " | ".join(
-        item
-        for item in (
-            camera.get("model", ""),
-            camera.get("serial", ""),
-            camera.get("ip", ""),
-            camera.get("device_class", ""),
-        )
-        if item
-    )
-
-
-def _camera_signature(cameras: list[dict[str, str]]) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            "|".join(
-                (
-                    camera.get("serial", ""),
-                    camera.get("ip", ""),
-                    camera.get("model", ""),
-                    camera.get("device_class", ""),
-                )
-            )
-            for camera in cameras
-        )
-    )
-
-
-def app_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path.cwd()
-
-
-def _apply_default_font() -> None:
-    app = QApplication.instance()
-    if app is not None:
-        font_family = "Malgun Gothic"
-        windows_font = Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts" / "malgun.ttf"
-        if windows_font.exists():
-            font_id = QFontDatabase.addApplicationFont(str(windows_font))
-            families = QFontDatabase.applicationFontFamilies(font_id)
-            if families:
-                font_family = families[0]
-        app.setFont(QFont(font_family, 9))
-
-
-def bundled_resource(name: str) -> Path:
-    base = Path(getattr(sys, "_MEIPASS", app_base_dir()))
-    return base / name
 
 
 def _smoke_trace(message: str) -> None:

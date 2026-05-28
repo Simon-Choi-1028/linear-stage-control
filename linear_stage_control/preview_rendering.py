@@ -111,9 +111,20 @@ def _to_uint8(array: np.ndarray) -> np.ndarray:
     arr = np.asarray(array)
     if arr.dtype == np.uint8:
         return np.ascontiguousarray(arr)
-    arr_float = arr.astype(np.float32, copy=False)
-    max_value = float(np.nanmax(arr_float)) if arr_float.size else 0.0
-    min_value = float(np.nanmin(arr_float)) if arr_float.size else 0.0
+    if not arr.size:
+        return np.zeros(arr.shape, dtype=np.uint8)
+    if np.issubdtype(arr.dtype, np.integer):
+        min_value = float(arr.min())
+        max_value = float(arr.max())
+        arr_float = arr.astype(np.float32, copy=False)
+    else:
+        arr_float = arr.astype(np.float32, copy=False)
+        finite = np.isfinite(arr_float)
+        if not finite.any():
+            return np.zeros(arr.shape, dtype=np.uint8)
+        finite_values = arr_float[finite]
+        min_value = float(finite_values.min())
+        max_value = float(finite_values.max())
     if max_value <= min_value:
         return np.zeros(arr.shape, dtype=np.uint8)
     scaled = (arr_float - min_value) * (255.0 / (max_value - min_value))

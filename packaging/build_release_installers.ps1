@@ -43,6 +43,21 @@ function Get-InstallerInfo {
   }
 }
 
+function Remove-DistPylonRuntimePayload {
+  $payload = Join-Path $Root "dist\LinearStageControl\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"
+  if (-not (Test-Path -LiteralPath $payload)) {
+    return
+  }
+  $internalDir = Join-Path $Root "dist\LinearStageControl\_internal"
+  $resolvedPayload = Resolve-Path -LiteralPath $payload
+  $resolvedInternal = Resolve-Path -LiteralPath $internalDir
+  if (-not $resolvedPayload.Path.StartsWith($resolvedInternal.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove pylon payload outside dist internal directory: $resolvedPayload"
+  }
+  Remove-Item -LiteralPath $resolvedPayload -Force
+  Write-Host "Removed offline pylon Runtime payload from dist after offline installer build."
+}
+
 function Invoke-WindowsBuild {
   param(
     [switch]$IncludePylonRuntime,
@@ -96,6 +111,7 @@ if (-not $SkipOffline) {
     -Channel "offline" `
     -Description "Offline installer with the Basler pylon Runtime installer bundled."
 
+  Remove-DistPylonRuntimePayload
   Copy-Item -LiteralPath $OnlineNamedSetup -Destination $OnlineSetup -Force
 }
 

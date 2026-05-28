@@ -17,6 +17,7 @@ from .scan import (
     total_capture_count,
 )
 from .stage import StageMoveCancelled, ZaberXYStage, stage_settings_from_config
+from .text_formatting import mm_text as _mm_text, velocity_text as _velocity_text
 from .updater import UpdateInfo, download_file, fetch_latest_update, verify_file_sha256
 
 
@@ -306,24 +307,3 @@ class UpdateDownloadWorker(QThread):
             self.download_done.emit(str(path))
         except Exception as exc:
             self.download_failed.emit(str(exc))
-
-
-def _mm_text(value: Any) -> str:
-    return _compact_number_text(value, 4)
-
-
-def _velocity_text(value: Any) -> str:
-    if value in ("", None):
-        return "기본값"
-    return f"{_compact_number_text(value, 2)} mm/s"
-
-
-def _compact_number_text(value: Any, max_decimals: int) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if abs(number) < 10 ** (-(max_decimals + 1)):
-        number = 0.0
-    text = f"{number:.{max_decimals}f}".rstrip("0").rstrip(".")
-    return text or "0"

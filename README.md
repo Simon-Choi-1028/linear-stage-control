@@ -284,6 +284,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
 ```
 
 `build_installer.ps1`는 slim installer를 기본으로 만들며, 이전 offline build의 pylon Runtime payload가 `dist`에 남아 있으면 실수로 1GB 이상 설치본이 만들어지지 않도록 중단합니다. offline installer를 의도적으로 만들 때는 `packaging\build_release_installers.ps1`를 사용합니다.
+slim build는 Qt QML/Quick/PDF/VirtualKeyboard, Qt translations, pypylon DataProcessing처럼 현재 GUI 촬영 흐름에서 사용하지 않는 payload를 제거한 뒤 packaged smoke test로 검증합니다.
 
 설치 프로그램 결과:
 

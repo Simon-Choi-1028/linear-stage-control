@@ -4,10 +4,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -17,6 +16,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .gui_support import apply_button_icon as _apply_button_icon
+from .text_formatting import um_text as _um_text
 
 
 class ImagePreviewLabel(QLabel):
@@ -384,17 +386,6 @@ class ErrorChartWidget(QWidget):
         painter.end()
 
 
-def _apply_button_icon(
-    button: QPushButton,
-    standard_pixmap: QStyle.StandardPixmap,
-    tooltip: str,
-    icon_size: int = 18,
-) -> None:
-    button.setIcon(QApplication.style().standardIcon(standard_pixmap))
-    button.setIconSize(QSize(icon_size, icon_size))
-    button.setToolTip(tooltip)
-
-
 def _pixmap_from_image_path(path: Path) -> QPixmap:
     image = Image.open(path).convert("RGB")
     data = image.tobytes("raw", "RGB")
@@ -427,14 +418,3 @@ def _record_float(record: dict[str, Any], key: str, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _um_text(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if abs(number) < 0.01:
-        number = 0.0
-    text = f"{number:.2f}".rstrip("0").rstrip(".")
-    return text or "0"

@@ -25,6 +25,7 @@ from linear_stage_control.scan import (
     total_capture_count,
 )
 from linear_stage_control.stage import ZaberXYStage, stage_settings_from_config
+from linear_stage_control.text_formatting import mm_text as _mm_text
 
 
 def main() -> None:
@@ -183,17 +184,6 @@ def _now() -> str:
     from linear_stage_control.camera import iso_timestamp
 
     return iso_timestamp()
-
-
-def _mm_text(value: object) -> str:
-    if value in ("", None):
-        return ""
-    number = float(value)
-    if abs(number) < 0.0001:
-        number = 0.0
-    text = f"{number:.4f}".rstrip("0").rstrip(".")
-    return text or "0"
-
 
 if __name__ == "__main__":
     main()

@@ -27,6 +27,7 @@
 - 제조사 고정 스펙처럼 사용자가 자주 조작하지 않는 정보는 메인 제어 패널에 상시 노출하지 않는다. 필요 시 `오차` 탭의 `스펙 보기` 같은 상세 버튼으로 확인하게 한다.
 - 배포는 PyInstaller one-folder portable 빌드와 online/slim installer를 기본으로 한다. Basler pylon Runtime은 기본 Setup에 묶지 않고, Runtime이 없는 PC에서는 앱에서 설치 안내/다운로드 버튼을 제공한다. 현장 PC가 인터넷 없이 설치되어야 할 때만 별도 offline installer에 pylon Runtime installer를 포함한다.
 - slim installer를 만들 때는 이전 offline build의 pylon Runtime payload가 `dist`에 남아 있는지 먼저 확인한다. `build_installer.ps1`는 `-IncludePylonRuntime` 없이 Runtime payload가 감지되면 중단해 accidental 1GB+ setup 생성을 막는다.
+- PyInstaller slim build 후에는 사용하지 않는 Qt QML/Quick/PDF/VirtualKeyboard 파일, Qt translations, pypylon DataProcessing 바이너리를 prune한다. 단, `LinearStageControl.exe --smoke-test`를 prune 이후 반드시 실행해 누락된 DLL을 즉시 잡는다.
 - 릴리즈에는 기본 업데이트 채널인 `LinearStageControlSetup.exe`, 선택용 `LinearStageControlSetup-Offline.exe`, `update_manifest.json`을 함께 올린다. manifest의 top-level `asset_name`과 `sha256`은 항상 online/slim Setup을 가리키게 둔다.
 - dual installer 릴리즈 빌드에서는 online/slim 패키지에서 `--smoke-test`를 수행하고, offline 패키지는 동일 앱 코드에 Basler pylon Runtime installer payload만 추가하므로 별도 smoke를 반복하지 않는다.
 - GitHub Release 업데이트는 `update_manifest.json`의 SHA256과 Setup asset을 함께 검증한다. 검증 실패 시 설치 파일을 실행하지 않는다.

@@ -26,6 +26,7 @@
 - X/Y 축이 같은 Zaber device/axis 주소를 가리키는 설정은 안전하지 않으므로 run 전에 오류로 차단한다. 저장 폴더는 run 시작 전에 생성 가능 여부를 확인해 데이터셋 기록 실패를 앞단에서 줄인다.
 - 제조사 고정 스펙처럼 사용자가 자주 조작하지 않는 정보는 메인 제어 패널에 상시 노출하지 않는다. 필요 시 `오차` 탭의 `스펙 보기` 같은 상세 버튼으로 확인하게 한다.
 - 배포는 PyInstaller one-folder portable 빌드와 online/slim installer를 기본으로 한다. Basler pylon Runtime은 기본 Setup에 묶지 않고, Runtime이 없는 PC에서는 앱에서 설치 안내/다운로드 버튼을 제공한다. 현장 PC가 인터넷 없이 설치되어야 할 때만 별도 offline installer에 pylon Runtime installer를 포함한다.
+- slim installer를 만들 때는 이전 offline build의 pylon Runtime payload가 `dist`에 남아 있는지 먼저 확인한다. `build_installer.ps1`는 `-IncludePylonRuntime` 없이 Runtime payload가 감지되면 중단해 accidental 1GB+ setup 생성을 막는다.
 - 릴리즈에는 기본 업데이트 채널인 `LinearStageControlSetup.exe`, 선택용 `LinearStageControlSetup-Offline.exe`, `update_manifest.json`을 함께 올린다. manifest의 top-level `asset_name`과 `sha256`은 항상 online/slim Setup을 가리키게 둔다.
 - dual installer 릴리즈 빌드에서는 online/slim 패키지에서 `--smoke-test`를 수행하고, offline 패키지는 동일 앱 코드에 Basler pylon Runtime installer payload만 추가하므로 별도 smoke를 반복하지 않는다.
 - GitHub Release 업데이트는 `update_manifest.json`의 SHA256과 Setup asset을 함께 검증한다. 검증 실패 시 설치 파일을 실행하지 않는다.
@@ -36,6 +37,7 @@
 - packaged exe의 `--smoke-test`는 import 직후 종료하지 않는다. GUI를 device scan 없이 초기화했다가 닫아 pypylon, PySide6, Zaber native DLL, bundled data 누락을 빌드 직후 잡는다. CI/백그라운드 빌드에서는 `QT_QPA_PLATFORM=offscreen`으로 실행하고, PyInstaller windowed bootloader가 Python 진입 전에서 멈추지 않도록 smoke process는 `WindowStyle Normal`로 시작한다.
 - Basler 카메라는 특정 ace 2 모델에만 고정하지 않는다. serial/user name이 없으면 model/device class 필터를 선택적으로 쓰고, `pixel_format`이 실패하면 `pixel_format_candidates` 순서로 fallback한다. `Auto`는 카메라 현재 픽셀 포맷을 유지한다.
 - `gui_app.py`는 화면 구성과 이벤트 처리 중심으로 유지하고, 장시간 실행되는 acquisition/camera discovery thread는 별도 모듈에 둔다. 하드웨어 제어 loop가 커질 때는 UI 파일에 직접 누적하지 않는다.
+- Live/image preview 렌더링처럼 NumPy/QImage/QPixmap 변환, crop, overlay drawing이 커지는 코드는 `preview_rendering.py`처럼 render-only 모듈로 분리한다. UI class에는 상태 전환과 사용자 이벤트만 남겨 GUI 파일 비대화를 늦춘다.
 - Optical calibration 오차 표시는 Zaber 210 mm LDM/X-LDM-AE crossed XY 스테이지 제조사 스펙을 고정값으로 사용한다. 사용자 입력형 `오차 예산`을 두지 않는다. 단축 정확도 1.00 um, 반복 정밀도 0.08 um, 수평 런아웃 5.00 um을 합산해 `xy_axis_worst_case_um = 6.08 um`로 두고, XY 반경 기준은 `sqrt(2) * 6.08 = 8.60 um`로 둔다. 수직 런아웃 8.00 um은 Z/초점 참고값으로 별도 표시한다.
 - 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_stage_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
 - 각 사진에는 개별 `predicted_min_error_um`, `predicted_max_error_um`, X/Y 예측 범위를 저장하고, run 전체에는 GUI Error 탭에서 캔들차트와 최대/평균/제한 초과 개수를 표시한다.

@@ -1,6 +1,20 @@
+param(
+  [switch]$IncludePylonRuntime
+)
+
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
+
+function Get-ProjectVersion {
+  $VersionLine = Select-String -Path (Join-Path $Root "pyproject.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+  if ($VersionLine -and $VersionLine.Matches.Count) {
+    return $VersionLine.Matches[0].Groups[1].Value
+  }
+  return "0.0.0"
+}
+
+$Version = Get-ProjectVersion
 $InnoCandidates = @(
   "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
@@ -28,15 +42,26 @@ if (-not $Iscc) {
 
 $AppExe = Join-Path $Root "dist\LinearStageControl\LinearStageControl.exe"
 if (-not (Test-Path -LiteralPath $AppExe)) {
-  & (Join-Path $PSScriptRoot "build_windows.ps1")
+  $WindowsBuildArgs = @()
+  if ($IncludePylonRuntime) {
+    $WindowsBuildArgs += "-IncludePylonRuntime"
+  }
+  & (Join-Path $PSScriptRoot "build_windows.ps1") @WindowsBuildArgs
 }
 
-& $Iscc (Join-Path $PSScriptRoot "LinearStageControl.iss")
+$PylonRuntime = Join-Path $Root "dist\LinearStageControl\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"
+if ((Test-Path -LiteralPath $PylonRuntime) -and -not $IncludePylonRuntime) {
+  throw (
+    "pylon Runtime payload was found in dist, but this is a slim installer build. " +
+    "Run packaging\build_windows.ps1 without -IncludePylonRuntime first, " +
+    "or pass -IncludePylonRuntime to build an offline installer intentionally."
+  )
+}
+
+& $Iscc "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "LinearStageControl.iss")
 
 $SetupPath = Join-Path $Root "dist\LinearStageControlSetup.exe"
 if (Test-Path -LiteralPath $SetupPath) {
-  $VersionLine = Select-String -Path (Join-Path $PSScriptRoot "LinearStageControl.iss") -Pattern '#define MyAppVersion "([^"]+)"' | Select-Object -First 1
-  $Version = if ($VersionLine -and $VersionLine.Matches.Count) { $VersionLine.Matches[0].Groups[1].Value } else { "0.0.0" }
   $Hash = (Get-FileHash -Path $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
   $Size = (Get-Item -LiteralPath $SetupPath).Length
   $Manifest = [ordered]@{

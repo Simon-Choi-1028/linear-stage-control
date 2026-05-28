@@ -11,7 +11,11 @@ from linear_stage_control.camera import BaslerCamera, camera_settings_from_confi
 from linear_stage_control.config import load_config
 from linear_stage_control.dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
 from linear_stage_control.error_model import error_budget_from_config, estimate_position_error_um
-from linear_stage_control.position_validation import format_issue_list, validate_scan_points
+from linear_stage_control.position_validation import (
+    disabled_axis_variation_errors,
+    format_issue_list,
+    validate_scan_points,
+)
 from linear_stage_control.scan import (
     ScanPoint,
     default_capture_count_from_config,
@@ -42,15 +46,28 @@ def main() -> None:
         console.print(f"[yellow]Position warning:[/yellow] {warning}")
     if validation.errors:
         raise SystemExit(format_issue_list("Position list has errors.", validation.errors))
+
+    stage_settings = stage_settings_from_config(config)
+    axis_errors = disabled_axis_variation_errors(
+        points,
+        x_active=stage_settings.x.enabled,
+        y_active=stage_settings.y.enabled,
+    )
+    if axis_errors:
+        raise SystemExit(
+            format_issue_list("Stage axis settings conflict with the position list.", axis_errors)
+        )
+
     if args.dry_run:
         _print_points(console, points)
         return
 
     dataset_settings = dataset_settings_from_config(config, args.output)
-    stage_settings = stage_settings_from_config(config)
     camera_settings = camera_settings_from_config(config)
     error_budget = error_budget_from_config(config)
     default_capture_count = default_capture_count_from_config(config)
+    x_active = stage_settings.x.enabled
+    y_active = stage_settings.y.enabled
 
     with (
         DatasetRun(dataset_settings, config, points, config_path) as dataset,
@@ -64,6 +81,8 @@ def main() -> None:
         total = total_capture_count(points, default_capture_count)
         for point in points:
             record = base_capture_record(dataset.run_id, point)
+            record["axis_x_active"] = x_active
+            record["axis_y_active"] = y_active
             try:
                 capture_count = effective_capture_count(point, default_capture_count)
                 move_velocity = effective_move_velocity_mm_s(point, stage_settings.move_velocity_mm_s)
@@ -78,15 +97,23 @@ def main() -> None:
                 )
                 record["move_completed_at"] = _now()
                 actual_x_mm, actual_y_mm = stage.position_mm()
-                record["actual_x_mm"] = actual_x_mm
-                record["actual_y_mm"] = actual_y_mm
-                record["error_x_mm"] = actual_x_mm - point.x_mm
-                record["error_y_mm"] = actual_y_mm - point.y_mm
+                error_x_mm = (
+                    actual_x_mm - point.x_mm if x_active and actual_x_mm is not None else None
+                )
+                error_y_mm = (
+                    actual_y_mm - point.y_mm if y_active and actual_y_mm is not None else None
+                )
+                record["actual_x_mm"] = actual_x_mm if actual_x_mm is not None else ""
+                record["actual_y_mm"] = actual_y_mm if actual_y_mm is not None else ""
+                record["error_x_mm"] = error_x_mm if error_x_mm is not None else ""
+                record["error_y_mm"] = error_y_mm if error_y_mm is not None else ""
                 record.update(
                     estimate_position_error_um(
-                        float(record["error_x_mm"]),
-                        float(record["error_y_mm"]),
+                        error_x_mm,
+                        error_y_mm,
                         error_budget,
+                        x_active=x_active,
+                        y_active=y_active,
                     ).as_record()
                 )
 
@@ -97,8 +124,8 @@ def main() -> None:
                     capture_record = dict(record)
                     capture_record["capture_index"] = capture_index
                     image_timestamp = safe_timestamp()
-                    image_path = dataset.image_path(point, image_timestamp)
-                    npy_path = dataset.npy_path(point, image_timestamp)
+                    image_path = dataset.image_path(point, image_timestamp, capture_index)
+                    npy_path = dataset.npy_path(point, image_timestamp, capture_index)
                     capture = camera.capture_original_to(image_path, npy_path=npy_path)
 
                     capture_record.update(
@@ -109,6 +136,7 @@ def main() -> None:
                             "camera_timestamp_ns": capture.camera_timestamp_ns,
                             "block_id": capture.block_id,
                             "image_path": str(capture.image_path.relative_to(dataset.run_dir)),
+                            "image_filename": capture.image_path.name,
                             "npy_path": str(capture.npy_path.relative_to(dataset.run_dir))
                             if capture.npy_path
                             else "",
@@ -157,7 +185,9 @@ def _now() -> str:
     return iso_timestamp()
 
 
-def _mm_text(value: float) -> str:
+def _mm_text(value: object) -> str:
+    if value in ("", None):
+        return ""
     number = float(value)
     if abs(number) < 0.0001:
         number = 0.0

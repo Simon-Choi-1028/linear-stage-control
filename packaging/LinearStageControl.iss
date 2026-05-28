@@ -1,5 +1,7 @@
 #define MyAppName "Linear Stage Control"
-#define MyAppVersion "0.1.3"
+#ifndef MyAppVersion
+#define MyAppVersion "0.1.4"
+#endif
 #define MyAppPublisher "Linear Stage Control"
 #define MyAppExeName "LinearStageControl.exe"
 #define PylonRuntimeFile "..\dist\LinearStageControl\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"

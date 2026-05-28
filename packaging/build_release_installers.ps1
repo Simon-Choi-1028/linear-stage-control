@@ -12,6 +12,14 @@ $OnlineNamedSetup = Join-Path $Root "dist\LinearStageControlSetup-Online.exe"
 $OfflineSetup = Join-Path $Root "dist\LinearStageControlSetup-Offline.exe"
 $ManifestPath = Join-Path $Root "dist\update_manifest.json"
 
+function Get-ProjectVersion {
+  $VersionLine = Select-String -Path (Join-Path $Root "pyproject.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+  if ($VersionLine -and $VersionLine.Matches.Count) {
+    return $VersionLine.Matches[0].Groups[1].Value
+  }
+  return "0.0.0"
+}
+
 function Get-InstallerInfo {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -53,11 +61,14 @@ function Invoke-WindowsBuild {
   }
 
   & (Join-Path $PSScriptRoot "build_windows.ps1") @buildArgs
-  & (Join-Path $PSScriptRoot "build_installer.ps1")
+  $installerArgs = @()
+  if ($IncludePylonRuntime) {
+    $installerArgs += "-IncludePylonRuntime"
+  }
+  & (Join-Path $PSScriptRoot "build_installer.ps1") @installerArgs
 }
 
-$versionLine = Select-String -Path (Join-Path $PSScriptRoot "LinearStageControl.iss") -Pattern '#define MyAppVersion "([^"]+)"' | Select-Object -First 1
-$version = if ($versionLine -and $versionLine.Matches.Count) { $versionLine.Matches[0].Groups[1].Value } else { "0.0.0" }
+$version = Get-ProjectVersion
 
 Write-Host "Building online installer for v$version"
 Invoke-WindowsBuild

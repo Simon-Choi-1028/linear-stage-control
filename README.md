@@ -1,11 +1,43 @@
-# Basler ace 2 + Zaber XY 스테이지 캡처
+<p align="center">
+  <a href="https://www.baslerweb.com/en-us/software/pylon-software-suite/" title="Basler pylon Software Suite">
+    <img src="https://www.baslerweb.com/favicon.ico" width="36" height="36" alt="Basler">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://www.zaber.com/software" title="Zaber Software">
+    <img src="https://www.zaber.com/favicon.ico" width="36" height="36" alt="Zaber">
+  </a>
+</p>
 
-## 배포 버전
+<h1 align="center">Basler ace 2 + Zaber XY Stage Control</h1>
 
-- Current release: `v0.1.2`
-- Windows installer: `LinearStageControlSetup.exe`
-- SHA256: release asset의 `update_manifest.json`에서 확인
+<p align="center">
+  Basler ace 2 카메라와 Zaber Ultra Precision Linear Motor XY 스테이지를 연동하는 optical calibration capture GUI
+</p>
+
+<p align="center">
+  <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest">
+    <img src="https://img.shields.io/github/v/release/Simon-Choi-1028/linear-stage-control?label=release" alt="latest release">
+  </a>
+  <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup.exe">
+    <img src="https://img.shields.io/badge/download-online%20setup-2f8f68" alt="download online setup">
+  </a>
+  <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup-Offline.exe">
+    <img src="https://img.shields.io/badge/download-offline%20setup-5b6ee1" alt="download offline setup">
+  </a>
+</p>
+
+## 빠른 다운로드
+
+| 구분 | 다운로드 | 용도 | 포함 항목 |
+| --- | --- | --- | --- |
+| 온라인 설치본 | [LinearStageControlSetup.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup.exe) | 인터넷 연결이 가능한 PC의 기본 설치 | 앱, Zaber Motion Library, Zaber Device Database |
+| 오프라인 설치본 | [LinearStageControlSetup-Offline.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup-Offline.exe) | 현장 PC가 인터넷 접근이 어렵거나 pylon Runtime을 미리 묶어야 할 때 | 온라인 설치본 + Basler pylon Runtime installer |
+| 검증 manifest | [update_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/update_manifest.json) | 자동 업데이트 SHA256 검증 | 설치 파일 hash, 크기, 채널 정보 |
+
+- Current release: `v0.1.3`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
+- Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
+- Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
 
 Basler ace 2 `a2A2464-115g5mBAS` 카메라와 Zaber XY 스테이지를 연동해, 사전에 입력한 위치마다 이동 완료 후 카메라 캡처를 수행하고 데이터셋으로 저장하는 기본 환경입니다.
 
@@ -248,10 +280,19 @@ powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
 dist/LinearStageControlSetup.exe
 ```
 
-기본 빌드는 slim installer입니다. `sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있어도 기본 Setup에는 포함하지 않으며, 새 PC에 pylon Runtime이 없으면 앱에서 장비 연결 실패 안내와 다운로드 버튼을 표시합니다. 오프라인 설치 파일까지 묶어야 하는 경우에만 아래처럼 실행합니다.
+기본 빌드는 online/slim installer입니다. `sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있어도 기본 Setup에는 포함하지 않으며, 새 PC에 pylon Runtime이 없으면 앱에서 장비 연결 실패 안내와 다운로드 버튼을 표시합니다. 릴리즈용 온라인/오프라인 설치본을 둘 다 만들 때는 아래 명령을 사용합니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -IncludePylonRuntime
+powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1
 ```
 
-앱의 `업데이트 확인` 버튼은 public GitHub Release의 latest 버전을 확인합니다. Release에는 `LinearStageControlSetup.exe`와 `update_manifest.json`이 함께 있어야 하며, 앱은 Setup을 다운로드한 뒤 SHA256 검증이 통과할 때만 설치 파일을 실행합니다.
+릴리즈 빌드 결과:
+
+```text
+dist/LinearStageControlSetup.exe
+dist/LinearStageControlSetup-Online.exe
+dist/LinearStageControlSetup-Offline.exe
+dist/update_manifest.json
+```
+
+`LinearStageControlSetup.exe`는 자동 업데이트가 사용하는 기본 온라인 설치본입니다. `LinearStageControlSetup-Offline.exe`는 Basler pylon Runtime installer까지 묶은 현장용 설치본입니다. 앱의 `업데이트 확인` 버튼은 public GitHub Release의 latest 버전을 확인하며, Release에는 기본 Setup과 `update_manifest.json`이 함께 있어야 합니다. 앱은 Setup을 다운로드한 뒤 SHA256 검증이 통과할 때만 설치 파일을 실행합니다.

@@ -18,7 +18,17 @@ if (-not (Test-Path -LiteralPath ".venv")) {
 & .\.venv\Scripts\python.exe -m pip install --no-build-isolation -e .
 
 $distTarget = Join-Path $Root "dist\LinearStageControl"
-Get-Process -Name "LinearStageControl" -ErrorAction SilentlyContinue | Stop-Process -Force
+$runningApps = Get-Process -Name "LinearStageControl" -ErrorAction SilentlyContinue
+if ($runningApps) {
+  $runningApps | Stop-Process -Force
+  foreach ($process in $runningApps) {
+    try {
+      $process.WaitForExit(10000) | Out-Null
+    } catch {
+      Write-Warning "Could not wait for LinearStageControl process $($process.Id) to exit: $($_.Exception.Message)"
+    }
+  }
+}
 if (Test-Path -LiteralPath $distTarget) {
   Remove-Item -LiteralPath $distTarget -Recurse -Force
 }
@@ -99,9 +109,13 @@ foreach ($relativeTarget in $pruneTargets) {
 $appExe = Join-Path $distTarget "LinearStageControl.exe"
 if (-not $SkipSmoke) {
   Write-Host "Running packaged smoke test: $appExe --smoke-test"
-  $smoke = Start-Process -FilePath $appExe -ArgumentList "--smoke-test" -Wait -PassThru -WindowStyle Hidden
-  if ($smoke.ExitCode -ne 0) {
-    throw "Packaged smoke test failed with exit code $($smoke.ExitCode)"
+  $smokeTrace = Join-Path $Root "dist\smoke-test.log"
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run_packaged_smoke.ps1") -AppExe $appExe -TracePath $smokeTrace -TimeoutMs 120000
+  if ($LASTEXITCODE -eq 124) {
+    throw "Packaged smoke test timed out after 120 seconds. Trace: $smokeTrace"
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "Packaged smoke test failed with exit code $LASTEXITCODE. Trace: $smokeTrace"
   }
 }
 

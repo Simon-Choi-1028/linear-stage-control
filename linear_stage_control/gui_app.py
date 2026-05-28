@@ -4,6 +4,8 @@ import csv
 import math
 import os
 import sys
+import threading
+import time
 import webbrowser
 from copy import deepcopy
 from dataclasses import dataclass
@@ -2597,19 +2599,47 @@ def bundled_resource(name: str) -> Path:
     return base / name
 
 
+def _smoke_trace(message: str) -> None:
+    trace_path = os.environ.get("LINEAR_STAGE_SMOKE_TRACE")
+    if not trace_path:
+        return
+    try:
+        with Path(trace_path).open("a", encoding="utf-8") as trace_file:
+            trace_file.write(f"{time.time():.3f} {message}\n")
+    except OSError:
+        pass
+
+
+def _start_smoke_watchdog(timeout_s: float = 20.0) -> None:
+    def _watchdog() -> None:
+        time.sleep(timeout_s)
+        _smoke_trace("timeout")
+        os._exit(2)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+
+
 def main() -> int:
     smoke_test = any(arg.lower() in {"--smoke", "--smoke-test"} for arg in sys.argv[1:]) or os.environ.get(
         "LINEAR_STAGE_SMOKE_TEST"
     ) == "1"
 
+    if smoke_test:
+        _start_smoke_watchdog()
+        _smoke_trace("start")
+
     app = QApplication(sys.argv)
     _apply_default_font()
     if smoke_test:
+        _smoke_trace("qapplication_ready")
         window = MainWindow(start_device_scan=False)
-        window.show()
+        _smoke_trace("window_ready")
         app.processEvents()
         window.close()
+        window.deleteLater()
         app.processEvents()
+        app.quit()
+        _smoke_trace("exit")
         os._exit(0)
 
     window = MainWindow()

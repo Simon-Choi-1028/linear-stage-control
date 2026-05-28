@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.3 - 2026-05-28
+
+- Added a release build workflow that produces both online/slim and offline/pylon-bundled installers.
+- Expanded `update_manifest.json` with channel-aware installer metadata while keeping the online Setup as the updater default.
+- Reworked the README opening section with direct installer downloads and official Basler/Zaber software links.
+- Hardened packaged smoke testing by running it in a fresh PowerShell process with an explicit trace file.
+
 ## v0.1.2 - 2026-05-28
 
 - Added an official Zaber SDK download helper for the Motion Library wheel and Device Database.

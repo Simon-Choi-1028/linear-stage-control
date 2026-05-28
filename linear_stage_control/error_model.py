@@ -57,15 +57,15 @@ class ErrorBudgetSettings:
 
 @dataclass(frozen=True)
 class ErrorEstimate:
-    measured_error_x_um: float
-    measured_error_y_um: float
+    measured_error_x_um: float | None
+    measured_error_y_um: float | None
     measured_radial_error_um: float
     predicted_min_error_um: float
     predicted_max_error_um: float
-    predicted_x_min_um: float
-    predicted_x_max_um: float
-    predicted_y_min_um: float
-    predicted_y_max_um: float
+    predicted_x_min_um: float | None
+    predicted_x_max_um: float | None
+    predicted_y_min_um: float | None
+    predicted_y_max_um: float | None
     configured_budget_um: float
     max_allowed_um: float
 
@@ -73,7 +73,7 @@ class ErrorEstimate:
     def within_threshold(self) -> bool:
         return self.predicted_max_error_um <= self.max_allowed_um
 
-    def as_record(self) -> dict[str, float | bool]:
+    def as_record(self) -> dict[str, float | bool | None]:
         return {
             "measured_error_x_um": self.measured_error_x_um,
             "measured_error_y_um": self.measured_error_y_um,
@@ -121,14 +121,24 @@ def fixed_calibration_record() -> dict[str, Any]:
 
 
 def estimate_position_error_um(
-    error_x_mm: float,
-    error_y_mm: float,
+    error_x_mm: float | None,
+    error_y_mm: float | None,
     budget: ErrorBudgetSettings,
+    *,
+    x_active: bool = True,
+    y_active: bool = True,
 ) -> ErrorEstimate:
-    error_x_um = error_x_mm * 1000.0
-    error_y_um = error_y_mm * 1000.0
-    radial_um = math.hypot(error_x_um, error_y_um)
-    configured_budget_um = budget.configured_worst_case_um
+    if not x_active and not y_active:
+        raise ValueError("At least one axis must be active to estimate position error.")
+
+    error_x_um = error_x_mm * 1000.0 if x_active and error_x_mm is not None else None
+    error_y_um = error_y_mm * 1000.0 if y_active and error_y_mm is not None else None
+    radial_um = math.hypot(*(value for value in (error_x_um, error_y_um) if value is not None))
+    active_axis_count = int(x_active) + int(y_active)
+    configured_budget_um = (
+        budget.configured_worst_case_um if active_axis_count == 2 else budget.axis_worst_case_um
+    )
+    max_allowed_um = budget.max_allowed_um if active_axis_count == 2 else budget.axis_worst_case_um
     predicted_min_um = max(0.0, radial_um - configured_budget_um)
     predicted_max_um = max(radial_um, configured_budget_um)
     axis_budget_um = budget.axis_worst_case_um
@@ -138,10 +148,10 @@ def estimate_position_error_um(
         measured_radial_error_um=radial_um,
         predicted_min_error_um=predicted_min_um,
         predicted_max_error_um=predicted_max_um,
-        predicted_x_min_um=error_x_um - axis_budget_um,
-        predicted_x_max_um=error_x_um + axis_budget_um,
-        predicted_y_min_um=error_y_um - axis_budget_um,
-        predicted_y_max_um=error_y_um + axis_budget_um,
+        predicted_x_min_um=(error_x_um - axis_budget_um) if error_x_um is not None else None,
+        predicted_x_max_um=(error_x_um + axis_budget_um) if error_x_um is not None else None,
+        predicted_y_min_um=(error_y_um - axis_budget_um) if error_y_um is not None else None,
+        predicted_y_max_um=(error_y_um + axis_budget_um) if error_y_um is not None else None,
         configured_budget_um=configured_budget_um,
-        max_allowed_um=budget.max_allowed_um,
+        max_allowed_um=max_allowed_um,
     )

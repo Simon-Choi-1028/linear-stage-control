@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from serial.tools import list_ports
 from zaber_motion import Units
@@ -12,6 +13,7 @@ from zaber_motion.ascii import Axis, Connection
 class AxisAddress:
     device_index: int
     axis_number: int = 1
+    enabled: bool = True
 
 
 @dataclass
@@ -23,7 +25,11 @@ class StageSettings:
     settle_s: float = 0.2
     move_velocity_mm_s: float | None = None
     x: AxisAddress = AxisAddress(device_index=0, axis_number=1)
-    y: AxisAddress = AxisAddress(device_index=1, axis_number=1)
+    y: AxisAddress = AxisAddress(device_index=0, axis_number=2)
+
+
+class StageMoveCancelled(RuntimeError):
+    """Raised when a stage move is stopped through the owning worker."""
 
 
 def stage_settings_from_config(config: dict[str, Any]) -> StageSettings:
@@ -37,7 +43,7 @@ def stage_settings_from_config(config: dict[str, Any]) -> StageSettings:
         settle_s=float(stage.get("settle_s", 0.2)),
         move_velocity_mm_s=_optional_float(stage.get("move_velocity_mm_s")),
         x=_axis_address(axes, "x", default_device_index=0),
-        y=_axis_address(axes, "y", default_device_index=1),
+        y=_axis_address(axes, "y", default_device_index=0, default_axis_number=2),
     )
 
 
@@ -77,6 +83,8 @@ class ZaberXYStage:
         )
         self.x_axis = self._resolve_axis(self.settings.x)
         self.y_axis = self._resolve_axis(self.settings.y)
+        if not self._axes():
+            raise RuntimeError("At least one Zaber axis must be enabled.")
         return self
 
     def close(self) -> None:
@@ -97,36 +105,38 @@ class ZaberXYStage:
         x_mm: float,
         y_mm: float,
         velocity_mm_s: float | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
-        x_axis, y_axis = self._require_axes()
-        velocity = float(velocity_mm_s or 0)
-        x_axis.move_absolute(
-            x_mm,
-            Units.LENGTH_MILLIMETRES,
-            wait_until_idle=False,
-            velocity=velocity,
-            velocity_unit=Units.VELOCITY_MILLIMETRES_PER_SECOND,
-        )
-        y_axis.move_absolute(
-            y_mm,
-            Units.LENGTH_MILLIMETRES,
-            wait_until_idle=False,
-            velocity=velocity,
-            velocity_unit=Units.VELOCITY_MILLIMETRES_PER_SECOND,
-        )
-        x_axis.wait_until_idle()
-        y_axis.wait_until_idle()
+        active_moves: list[Axis] = []
+        move_kwargs = _move_kwargs(velocity_mm_s)
+        if self.settings.x.enabled:
+            x_axis = self._require_axis(self.x_axis, "X")
+            x_axis.move_absolute(x_mm, Units.LENGTH_MILLIMETRES, **move_kwargs)
+            active_moves.append(x_axis)
+        if self.settings.y.enabled:
+            y_axis = self._require_axis(self.y_axis, "Y")
+            y_axis.move_absolute(y_mm, Units.LENGTH_MILLIMETRES, **move_kwargs)
+            active_moves.append(y_axis)
+        if not active_moves:
+            raise RuntimeError("At least one Zaber axis must be enabled before moving.")
+        self._wait_until_idle(active_moves, cancel_requested)
 
-    def position_mm(self) -> tuple[float, float]:
-        x_axis, y_axis = self._require_axes()
-        return (
-            x_axis.get_position(Units.LENGTH_MILLIMETRES),
-            y_axis.get_position(Units.LENGTH_MILLIMETRES),
+    def position_mm(self) -> tuple[float | None, float | None]:
+        x_position = (
+            self._require_axis(self.x_axis, "X").get_position(Units.LENGTH_MILLIMETRES)
+            if self.settings.x.enabled
+            else None
         )
+        y_position = (
+            self._require_axis(self.y_axis, "Y").get_position(Units.LENGTH_MILLIMETRES)
+            if self.settings.y.enabled
+            else None
+        )
+        return x_position, y_position
 
-    def stop(self) -> None:
+    def stop(self, wait_until_idle: bool = False) -> None:
         for axis in self._axes():
-            axis.stop()
+            axis.stop(wait_until_idle=wait_until_idle)
 
     def device_summary(self) -> list[dict[str, Any]]:
         return [
@@ -139,7 +149,9 @@ class ZaberXYStage:
             for index, device in enumerate(self.devices)
         ]
 
-    def _resolve_axis(self, address: AxisAddress) -> Axis:
+    def _resolve_axis(self, address: AxisAddress) -> Axis | None:
+        if not address.enabled:
+            return None
         if address.device_index < 0 or address.device_index >= len(self.devices):
             raise RuntimeError(
                 f"Zaber device index {address.device_index} was requested, "
@@ -147,24 +159,48 @@ class ZaberXYStage:
             )
         return self.devices[address.device_index].get_axis(address.axis_number)
 
-    def _require_axes(self) -> tuple[Axis, Axis]:
-        if self.x_axis is None or self.y_axis is None:
-            raise RuntimeError("Stage is not open.")
-        return self.x_axis, self.y_axis
+    @staticmethod
+    def _require_axis(axis: Axis | None, name: str) -> Axis:
+        if axis is None:
+            raise RuntimeError(f"{name} axis is not available.")
+        return axis
 
-    def _axes(self) -> tuple[Axis, Axis]:
-        return self._require_axes()
+    def _axes(self) -> tuple[Axis, ...]:
+        axes: list[Axis] = []
+        if self.settings.x.enabled and self.x_axis is not None:
+            axes.append(self.x_axis)
+        if self.settings.y.enabled and self.y_axis is not None:
+            axes.append(self.y_axis)
+        return tuple(axes)
+
+    def _wait_until_idle(
+        self,
+        axes: list[Axis],
+        cancel_requested: Callable[[], bool] | None,
+    ) -> None:
+        while True:
+            busy_axes = [axis for axis in axes if axis.is_busy()]
+            if not busy_axes:
+                return
+            if cancel_requested is not None and cancel_requested():
+                self.stop(wait_until_idle=False)
+                while any(axis.is_busy() for axis in axes):
+                    time.sleep(0.05)
+                raise StageMoveCancelled("Stage move was cancelled.")
+            time.sleep(0.05)
 
 
 def _axis_address(
     axes: dict[str, Any],
     name: str,
     default_device_index: int,
+    default_axis_number: int = 1,
 ) -> AxisAddress:
     axis = axes.get(name, {})
     return AxisAddress(
         device_index=int(axis.get("device_index", default_device_index)),
-        axis_number=int(axis.get("axis_number", 1)),
+        axis_number=int(axis.get("axis_number", default_axis_number)),
+        enabled=bool(axis.get("enabled", True)),
     )
 
 
@@ -172,3 +208,11 @@ def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _move_kwargs(velocity_mm_s: float | None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"wait_until_idle": False}
+    if velocity_mm_s is not None:
+        kwargs["velocity"] = float(velocity_mm_s)
+        kwargs["velocity_unit"] = Units.VELOCITY_MILLIMETRES_PER_SECOND
+    return kwargs

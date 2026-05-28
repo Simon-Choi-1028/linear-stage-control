@@ -2,9 +2,9 @@
 
 ## 배포 버전
 
-- Current release: `v0.1.0`
+- Current release: `v0.1.1`
 - Windows installer: `LinearStageControlSetup.exe`
-- SHA256: `1E2071C0EC100E0DEE41CF16FDAB61BB59465C88151D7C250AF31F96C6F6EF1C`
+- SHA256: release asset의 `update_manifest.json`에서 확인
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 
 Basler ace 2 `a2A2464-115g5mBAS` 카메라와 Zaber XY 스테이지를 연동해, 사전에 입력한 위치마다 이동 완료 후 카메라 캡처를 수행하고 데이터셋으로 저장하는 기본 환경입니다.
@@ -23,8 +23,8 @@ Basler ace 2 `a2A2464-115g5mBAS` 카메라와 Zaber XY 스테이지를 연동해
 - Python 3.13 가상환경: `.venv`
 - Basler Python SDK: `pypylon==26.4.1`
 - Zaber Motion Library: `zaber-motion==9.3.0`
-- Basler pylon runtime installer: `sdk_downloads/installers/pylon_Runtime_26.04.1.exe`
-- 이 PC에는 `C:\Program Files\Basler\pylon`에 pylon `26.04.1.18174` 런타임이 설치되어 있습니다.
+- Basler pylon Runtime은 기본 slim installer에 포함하지 않습니다. 앱 실행 후 장비 연결 실패 시 pylon Runtime 다운로드 안내 버튼을 사용합니다.
+- 오프라인 배포가 필요할 때만 `packaging\build_windows.ps1 -IncludePylonRuntime`으로 Runtime 포함 빌드를 만듭니다.
 
 ## 기본 명령
 
@@ -63,6 +63,10 @@ GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접
 주요 조작 버튼과 값 입력칸에는 툴팁을 붙여 파일 열기/저장, 장비 새로고침, CSV import/export, 실행/중지, 전체화면 확대, 각 파라미터의 의미와 기본값을 빠르게 확인할 수 있게 했습니다.
 
 `장비` 영역의 `자동검색` 버튼을 누르면 LAN/GigE Basler 카메라를 한 번 검색합니다. 검색 상태는 별도 배지로 `탐색중`, `성공`, `실패`가 표시되고 상태별 색상으로 구분됩니다. `a2A2464-115g5mBAS`처럼 LAN/GigE 포트에 연결되는 카메라가 감지되면 `카메라` 드롭다운에 모델명, serial, IP, device class가 추가되어 선택할 수 있습니다. GUI가 주기적으로 카메라 검색을 반복하지 않으므로 촬영 중 pypylon 장치 열기와 충돌할 가능성을 줄입니다.
+
+v0.1.1부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 10 FPS Live preview가 자동으로 시작됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+
+Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
 
 ## Calibration Error
 
@@ -186,11 +190,21 @@ camera:
   trigger_source: Software
   exposure_us: 5000
   timeout_ms: 5000
+  live_preview:
+    enabled: true
+    fps: 10
 
 stage:
   serial_port: COM3
   settle_s: 0.2
   move_velocity_mm_s:
+  axes:
+    x: {enabled: true, device_index: 0, axis_number: 1}
+    y: {enabled: true, device_index: 0, axis_number: 2}
+
+updates:
+  enabled: true
+  repo: Simon-Choi-1028/linear-stage-control
 ```
 
 `a2A2464-115g5mBAS`는 LAN/GigE 카메라이므로 NIC IP 대역, jumbo frame, packet size 설정이 중요합니다. pylon IP Configurator와 GigE Configurator는 `C:\Program Files\Basler\pylon` 아래에 설치되어 있습니다.
@@ -225,4 +239,10 @@ powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
 dist/LinearStageControlSetup.exe
 ```
 
-`sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있으면 빌드 폴더와 설치 프로그램에 함께 포함됩니다. 깨끗한 clone처럼 해당 파일이 없을 때는 경고만 출력하고 앱 빌드는 계속 진행됩니다. 이 경우 새 PC에서 Basler 카메라를 쓰려면 Basler pylon Runtime을 별도로 설치해야 합니다. 포함된 설치 파일을 수동 실행해야 할 때는 앱 설치 폴더의 `_internal/sdk_downloads/installers/pylon_Runtime_26.04.1.exe`를 실행하면 됩니다.
+기본 빌드는 slim installer입니다. `sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있어도 기본 Setup에는 포함하지 않으며, 새 PC에 pylon Runtime이 없으면 앱에서 장비 연결 실패 안내와 다운로드 버튼을 표시합니다. 오프라인 설치 파일까지 묶어야 하는 경우에만 아래처럼 실행합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -IncludePylonRuntime
+```
+
+앱의 `업데이트 확인` 버튼은 public GitHub Release의 latest 버전을 확인합니다. Release에는 `LinearStageControlSetup.exe`와 `update_manifest.json`이 함께 있어야 하며, 앱은 Setup을 다운로드한 뒤 SHA256 검증이 통과할 때만 설치 파일을 실행합니다.

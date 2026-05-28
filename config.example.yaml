@@ -21,6 +21,10 @@ camera:
   trigger_mode: Off
   output_pixel_format: Mono8
   timeout_ms: 5000
+  pylon_runtime_url: https://www.baslerweb.com/en/downloads/software-downloads/
+  live_preview:
+    enabled: true
+    fps: 10
 
 stage:
   serial_port: COM3
@@ -34,11 +38,17 @@ stage:
     # For one 2-axis controller, set both device_index values to 0 and use
     # axis_number 1 for X, axis_number 2 for Y.
     x:
+      enabled: true
       device_index: 0
       axis_number: 1
     y:
-      device_index: 1
-      axis_number: 1
+      enabled: true
+      device_index: 0
+      axis_number: 2
+
+updates:
+  enabled: true
+  repo: Simon-Choi-1028/linear-stage-control
 
 dataset:
   output_root: "%USERPROFILE%/Documents/LinearStageControl/datasets"

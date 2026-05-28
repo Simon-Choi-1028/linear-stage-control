@@ -152,6 +152,22 @@ def validate_scan_points(points: list[ScanPoint]) -> PositionValidationResult:
     return PositionValidationResult(errors, warnings, cell_errors, cell_warnings)
 
 
+def disabled_axis_variation_errors(
+    points: list[ScanPoint],
+    *,
+    x_active: bool,
+    y_active: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if not x_active and _distinct_axis_values(points, "x_mm") > 1:
+        errors.append("X축이 비활성화되어 있지만 위치 목록에 서로 다른 X 값이 있습니다.")
+    if not y_active and _distinct_axis_values(points, "y_mm") > 1:
+        errors.append("Y축이 비활성화되어 있지만 위치 목록에 서로 다른 Y 값이 있습니다.")
+    if not x_active and not y_active:
+        errors.append("X/Y 중 최소 하나의 스테이지 축은 활성화해야 합니다.")
+    return errors
+
+
 def short_issue_text(issues: list[str]) -> str:
     if not issues:
         return ""
@@ -257,3 +273,7 @@ def _parse_optional_int_cell(
         cell_errors[(row, column)] = detail
         return None
     return value
+
+
+def _distinct_axis_values(points: list[ScanPoint], attribute: str) -> int:
+    return len({round(float(getattr(point, attribute)), 6) for point in points})

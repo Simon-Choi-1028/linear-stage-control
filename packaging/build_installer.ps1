@@ -32,3 +32,20 @@ if (-not (Test-Path -LiteralPath $AppExe)) {
 }
 
 & $Iscc (Join-Path $PSScriptRoot "LinearStageControl.iss")
+
+$SetupPath = Join-Path $Root "dist\LinearStageControlSetup.exe"
+if (Test-Path -LiteralPath $SetupPath) {
+  $VersionLine = Select-String -Path (Join-Path $PSScriptRoot "LinearStageControl.iss") -Pattern '#define MyAppVersion "([^"]+)"' | Select-Object -First 1
+  $Version = if ($VersionLine -and $VersionLine.Matches.Count) { $VersionLine.Matches[0].Groups[1].Value } else { "0.0.0" }
+  $Hash = (Get-FileHash -Path $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $Size = (Get-Item -LiteralPath $SetupPath).Length
+  $Manifest = [ordered]@{
+    version = "v$Version"
+    asset_name = "LinearStageControlSetup.exe"
+    sha256 = $Hash
+    size_bytes = $Size
+  }
+  $ManifestPath = Join-Path $Root "dist\update_manifest.json"
+  $Manifest | ConvertTo-Json | Set-Content -Path $ManifestPath -Encoding UTF8
+  Write-Host "Wrote update manifest: $ManifestPath"
+}

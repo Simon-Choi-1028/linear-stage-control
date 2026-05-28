@@ -4,11 +4,13 @@ import csv
 import math
 import os
 import sys
+import webbrowser
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 from PIL import Image
 from PySide6.QtCore import QSize, Qt
@@ -53,13 +55,20 @@ from .error_model import (
     error_budget_from_config,
     fixed_calibration_record,
 )
-from .gui_workers import AcquisitionWorker, CameraDiscoveryWorker
+from .gui_workers import (
+    AcquisitionWorker,
+    CameraDiscoveryWorker,
+    LivePreviewWorker,
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+)
 from .gui_widgets import ErrorChartWidget, FullscreenImageWindow, ImagePreviewLabel, ParameterAdjustRow
 from .position_validation import (
     POSITION_MAX_MM,
     POSITION_MIN_MM,
     PositionInputRow,
     PositionValidationResult,
+    disabled_axis_variation_errors,
     format_issue_list,
     parse_position_rows,
     short_issue_text,
@@ -74,6 +83,8 @@ from .scan import (
     total_capture_count,
 )
 from .stage import list_serial_ports
+from .updater import UpdateInfo, update_settings_from_config
+from . import __version__
 
 
 APP_TITLE = "XY 스테이지 캡처"
@@ -97,8 +108,13 @@ class MainWindow(QMainWindow):
         self.config: dict[str, Any] = {}
         self.worker: AcquisitionWorker | None = None
         self.camera_scan_worker: CameraDiscoveryWorker | None = None
+        self.live_worker: LivePreviewWorker | None = None
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_download_worker: UpdateDownloadWorker | None = None
+        self.latest_update_info: UpdateInfo | None = None
         self.current_run_dir: Path | None = None
         self.current_image_path: Path | None = None
+        self.preview_mode = "capture"
         self.image_viewer: FullscreenImageWindow | None = None
         self.error_records: list[dict[str, Any]] = []
         self._camera_signature: tuple[str, ...] = ()
@@ -110,12 +126,17 @@ class MainWindow(QMainWindow):
         self._load_initial_config()
         if start_device_scan:
             self.refresh_devices()
+            self.check_for_updates(silent=True)
         else:
             self._set_camera_scan_state("idle", "대기", "스모크 테스트 모드")
 
     def closeEvent(self, event: object) -> None:
+        self.stop_live_preview(wait_ms=1500)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_scan_worker.wait(2000)
+        for worker in (self.update_check_worker, self.update_download_worker):
+            if worker is not None and worker.isRunning():
+                worker.wait(1000)
         super().closeEvent(event)
 
     def resizeEvent(self, event: object) -> None:
@@ -130,15 +151,21 @@ class MainWindow(QMainWindow):
         self.save_config_button = QPushButton("설정 저장")
         self.refresh_button = QPushButton("장비 새로고침")
         self.open_dataset_button = QPushButton("데이터셋 열기")
+        self.update_button = QPushButton("업데이트 확인")
+        self.update_status_label = QLabel(f"v{__version__}")
+        self.update_status_label.setObjectName("updateStatus")
         self.open_dataset_button.setEnabled(False)
         _apply_button_icon(self.load_config_button, QStyle.SP_DialogOpenButton, "YAML 설정 파일 불러오기")
         _apply_button_icon(self.save_config_button, QStyle.SP_DialogSaveButton, "현재 설정 저장")
         _apply_button_icon(self.refresh_button, QStyle.SP_BrowserReload, "카메라와 스테이지 포트 새로고침")
         _apply_button_icon(self.open_dataset_button, QStyle.SP_DirOpenIcon, "최근 데이터셋 폴더 열기")
+        _apply_button_icon(self.update_button, QStyle.SP_ArrowUp, "GitHub Release에서 새 버전을 확인합니다.")
         toolbar_layout.addWidget(self.load_config_button)
         toolbar_layout.addWidget(self.save_config_button)
         toolbar_layout.addWidget(self.refresh_button)
         toolbar_layout.addStretch(1)
+        toolbar_layout.addWidget(self.update_status_label)
+        toolbar_layout.addWidget(self.update_button)
         toolbar_layout.addWidget(self.open_dataset_button)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
@@ -166,6 +193,7 @@ class MainWindow(QMainWindow):
         self.load_config_button.clicked.connect(self.load_config_dialog)
         self.save_config_button.clicked.connect(self.save_config_dialog)
         self.refresh_button.clicked.connect(self.refresh_devices)
+        self.update_button.clicked.connect(lambda: self.check_for_updates(silent=False))
         self.open_dataset_button.clicked.connect(self.open_current_dataset)
         self.update_responsive_layout()
 
@@ -218,12 +246,22 @@ class MainWindow(QMainWindow):
             QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(QSize(18, 18))
         )
         self.camera_status_icon.setVisible(False)
+        self.pylon_runtime_button = QPushButton("pylon Runtime 받기")
+        self.pylon_runtime_button.setVisible(False)
+        self.x_axis_enabled_check = QCheckBox("X축 사용")
+        self.y_axis_enabled_check = QCheckBox("Y축 사용")
+        self.x_axis_enabled_check.setChecked(True)
+        self.y_axis_enabled_check.setChecked(True)
         self.camera_combo.setToolTip("촬영에 사용할 Basler 카메라입니다. 기본값: 자동 선택")
         self.stage_port_combo.setToolTip("Zaber 스테이지가 연결된 COM 포트입니다. 기본값: COM3")
         self.camera_scan_button.setToolTip("LAN/GigE Basler 카메라를 한 번 검색합니다. 반복 검색은 수행하지 않습니다.")
         self.camera_scan_state_label.setToolTip("카메라 자동검색 상태입니다: 대기, 탐색중, 성공, 실패")
         self.camera_status_label.setToolTip("마지막 Basler 카메라 검색 결과와 선택된 장비를 표시합니다.")
         _apply_button_icon(self.camera_scan_button, QStyle.SP_BrowserReload, "LAN Basler 카메라 자동검색 실행")
+        self.pylon_runtime_button.setToolTip("pylon Runtime이 없을 때 Basler 공식 다운로드 페이지를 엽니다.")
+        self.x_axis_enabled_check.setToolTip("X축 장치가 연결된 경우 켭니다. 끄면 X 좌표가 run 전체에서 고정되어야 합니다.")
+        self.y_axis_enabled_check.setToolTip("Y축 장치가 연결된 경우 켭니다. 끄면 Y 좌표가 run 전체에서 고정되어야 합니다.")
+        _apply_button_icon(self.pylon_runtime_button, QStyle.SP_DialogHelpButton, "Basler pylon Runtime 다운로드 안내")
         camera_scan_row = QWidget()
         camera_scan_layout = QHBoxLayout(camera_scan_row)
         camera_scan_layout.setContentsMargins(0, 0, 0, 0)
@@ -241,8 +279,20 @@ class MainWindow(QMainWindow):
         form.addRow("자동검색", camera_scan_row)
         form.addRow("검색 결과", camera_status_row)
         form.addRow("스테이지 포트", self.stage_port_combo)
+        axis_row = QWidget()
+        axis_layout = QHBoxLayout(axis_row)
+        axis_layout.setContentsMargins(0, 0, 0, 0)
+        axis_layout.setSpacing(12)
+        axis_layout.addWidget(self.x_axis_enabled_check)
+        axis_layout.addWidget(self.y_axis_enabled_check)
+        axis_layout.addStretch(1)
+        form.addRow("축 사용", axis_row)
+        form.addRow("pylon", self.pylon_runtime_button)
         self.camera_scan_button.clicked.connect(lambda: self.start_camera_scan("manual"))
         self.camera_combo.activated.connect(self.on_camera_combo_activated)
+        self.pylon_runtime_button.clicked.connect(self.open_pylon_runtime_download)
+        self.x_axis_enabled_check.stateChanged.connect(self.refresh_position_feedback)
+        self.y_axis_enabled_check.stateChanged.connect(self.refresh_position_feedback)
         return group
 
     def _build_settings_group(self) -> QGroupBox:
@@ -558,8 +608,19 @@ class MainWindow(QMainWindow):
         _apply_button_icon(self.fullscreen_button, QStyle.SP_TitleBarMaxButton, "이미지를 전체화면 확대 창으로 열기")
         self.fullscreen_button.setEnabled(False)
         self.fullscreen_button.clicked.connect(self.open_fullscreen_image)
+        self.live_button = QPushButton("Live 보기")
+        self.live_stop_button = QPushButton("Live 정지")
+        self.live_status_label = QLabel("Live 대기")
+        self.live_status_label.setObjectName("liveStatus")
+        _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
+        _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
+        self.live_button.clicked.connect(self.show_live_preview)
+        self.live_stop_button.clicked.connect(lambda: self.stop_live_preview(wait_ms=1500))
         preview_info_row = QHBoxLayout()
         preview_info_row.addWidget(self.preview_info_label, 1)
+        preview_info_row.addWidget(self.live_status_label)
+        preview_info_row.addWidget(self.live_button)
+        preview_info_row.addWidget(self.live_stop_button)
         preview_info_row.addWidget(self.fullscreen_button)
 
         self.preview_metrics_table = QTableWidget(1, 11)
@@ -885,6 +946,9 @@ class MainWindow(QMainWindow):
         self.software_trigger_check.setChecked(bool(camera.get("use_software_trigger", True)))
         self.save_numpy_check.setChecked(bool(dataset.get("save_numpy", False)))
         self.skip_home_check.setChecked(False)
+        axes = stage.get("axes", {})
+        self.x_axis_enabled_check.setChecked(bool((axes.get("x", {}) or {}).get("enabled", True)))
+        self.y_axis_enabled_check.setChecked(bool((axes.get("y", {}) or {}).get("enabled", True)))
         metadata_default = (
             DEFAULT_METADATA_FORMATS
             if bool(dataset.get("write_jsonl", True))
@@ -963,6 +1027,9 @@ class MainWindow(QMainWindow):
             names = ", ".join(_camera_display_name(camera) for camera in cameras) or "없음"
             self.log(f"Basler 카메라 감지: {names}")
 
+        if count and self.live_preview_enabled():
+            self.start_live_preview()
+
     def populate_camera_combo(self, cameras: list[dict[str, str]]) -> str:
         current_camera_serial = self.camera_combo.currentData()
         desired_serial = str(current_camera_serial or self._preferred_camera_serial or "")
@@ -1008,10 +1075,194 @@ class MainWindow(QMainWindow):
         self.camera_status_label.style().polish(self.camera_status_label)
         self.camera_status_icon.setVisible(state == "failure")
         self.camera_status_label.setText(detail)
+        self.pylon_runtime_button.setVisible(state == "failure" and "pylon" in detail.lower())
 
     def on_camera_combo_activated(self, index: int) -> None:
         self._camera_user_touched = True
         self._preferred_camera_serial = str(self.camera_combo.itemData(index) or "")
+        if self.live_preview_enabled():
+            self.start_live_preview()
+
+    def open_pylon_runtime_download(self) -> None:
+        url = str(self.config.get("camera", {}).get("pylon_runtime_url") or "https://www.baslerweb.com/en/downloads/software-downloads/")
+        webbrowser.open(url)
+
+    def live_preview_enabled(self) -> bool:
+        live = self.config.get("camera", {}).get("live_preview", {})
+        return bool(live.get("enabled", True))
+
+    def live_preview_fps(self) -> int:
+        live = self.config.get("camera", {}).get("live_preview", {})
+        try:
+            return max(1, min(60, int(live.get("fps", 10) or 10)))
+        except (TypeError, ValueError):
+            return 10
+
+    def build_live_config(self) -> dict[str, Any]:
+        config = deepcopy(self.config)
+        camera = config.setdefault("camera", {})
+        camera["serial_number"] = self.camera_combo.currentData() or None
+        camera["pixel_format"] = self.pixel_format_combo.currentText()
+        camera["exposure_us"] = self.exposure_spin.value()
+        camera["use_software_trigger"] = False
+        camera["trigger_mode"] = "Off"
+        camera["timeout_ms"] = 1000
+        return config
+
+    def show_live_preview(self) -> None:
+        self.preview_mode = "live"
+        self.current_image_path = None
+        self.fullscreen_button.setEnabled(False)
+        if self.live_worker is None or not self.live_worker.isRunning():
+            self.start_live_preview()
+        else:
+            self.live_status_label.setText("Live 표시 중")
+
+    def start_live_preview(self) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            return
+        if self.camera_combo.count() <= 1:
+            self.live_status_label.setText("Live 대기")
+            return
+        self.stop_live_preview(wait_ms=800, update_label=False)
+        self.preview_mode = "live"
+        self.current_image_path = None
+        self.fullscreen_button.setEnabled(False)
+        self.live_status_label.setText("Live 시작 중")
+        self.live_worker = LivePreviewWorker(self.build_live_config(), fps=self.live_preview_fps())
+        self.live_worker.frame_ready.connect(self.on_live_frame)
+        self.live_worker.status_changed.connect(self.live_status_label.setText)
+        self.live_worker.live_failed.connect(self.on_live_failed)
+        self.live_worker.finished.connect(self.on_live_finished)
+        self.live_worker.start()
+
+    def stop_live_preview(self, wait_ms: int = 0, update_label: bool = True) -> None:
+        if self.live_worker is None:
+            if update_label and hasattr(self, "live_status_label"):
+                self.live_status_label.setText("Live 정지")
+            return
+        worker = self.live_worker
+        worker.request_stop()
+        if wait_ms > 0:
+            worker.wait(wait_ms)
+        if not worker.isRunning():
+            self.live_worker = None
+        if update_label and hasattr(self, "live_status_label"):
+            self.live_status_label.setText("Live 정지")
+
+    def on_live_frame(self, array: object, metadata: dict[str, Any]) -> None:
+        if self.preview_mode != "live":
+            return
+        pixmap = _pixmap_from_array(
+            array,
+            QSize(
+                max(100, self.preview_label.width() - 24),
+                max(100, self.preview_label.height() - 24),
+            ),
+        )
+        self.preview_label.setPixmap(pixmap)
+        self.live_status_label.setText(f"Live {self.live_preview_fps()} FPS")
+        timestamp = metadata.get("completed_at") or metadata.get("captured_at") or ""
+        self.preview_info_label.setText(f"Live preview 표시 중 {timestamp}".strip())
+
+    def on_live_failed(self, message: str) -> None:
+        self.live_status_label.setText("Live 오류")
+        self.preview_label.setText(f"Live preview 오류\n{message}")
+        self.log(f"Live preview 오류: {message}")
+
+    def on_live_finished(self) -> None:
+        self.live_worker = None
+
+    def check_for_updates(self, silent: bool = False) -> None:
+        settings = update_settings_from_config(self.config)
+        if not settings.enabled:
+            self.update_status_label.setText("업데이트 꺼짐")
+            if not silent:
+                QMessageBox.information(self, "업데이트", "설정에서 업데이트 확인이 꺼져 있습니다.")
+            return
+        if self.update_check_worker is not None and self.update_check_worker.isRunning():
+            return
+        self.update_status_label.setText("업데이트 확인 중")
+        self.update_button.setEnabled(False)
+        self.update_check_worker = UpdateCheckWorker(settings.repo, __version__)
+        self.update_check_worker.update_available.connect(lambda update: self.on_update_available(update, silent))
+        self.update_check_worker.update_not_available.connect(lambda version: self.on_update_not_available(version, silent))
+        self.update_check_worker.update_failed.connect(lambda message: self.on_update_failed(message, silent))
+        self.update_check_worker.finished.connect(self.on_update_check_finished)
+        self.update_check_worker.start()
+
+    def on_update_available(self, update: UpdateInfo, silent: bool) -> None:
+        self.latest_update_info = update
+        self.update_status_label.setText(f"{update.version} 사용 가능")
+        if silent:
+            return
+        if not update.can_auto_install:
+            QMessageBox.information(
+                self,
+                "업데이트",
+                "새 버전이 있지만 검증 가능한 설치 파일 manifest가 없습니다. Release 페이지를 엽니다.",
+            )
+            if update.html_url:
+                webbrowser.open(update.html_url)
+            return
+        reply = QMessageBox.question(
+            self,
+            "업데이트",
+            f"새 버전 {update.version}이 있습니다.\n설치 파일을 다운로드하고 SHA256 검증 후 실행할까요?",
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.start_update_download(update)
+
+    def on_update_not_available(self, version: str, silent: bool) -> None:
+        self.latest_update_info = None
+        self.update_status_label.setText(f"최신 v{version}")
+        if not silent:
+            QMessageBox.information(self, "업데이트", f"현재 버전 v{version}이 최신입니다.")
+
+    def on_update_failed(self, message: str, silent: bool) -> None:
+        self.update_status_label.setText("업데이트 확인 실패")
+        self.log(f"업데이트 확인 실패: {message}")
+        if not silent:
+            QMessageBox.warning(self, "업데이트 확인 실패", message)
+
+    def on_update_check_finished(self) -> None:
+        self.update_check_worker = None
+        self.update_button.setEnabled(True)
+
+    def start_update_download(self, update: UpdateInfo) -> None:
+        if self.update_download_worker is not None and self.update_download_worker.isRunning():
+            return
+        file_name = update.setup_asset_name or "LinearStageControlSetup.exe"
+        output_path = Path(os.environ.get("TEMP", ".")) / "LinearStageControl" / file_name
+        self.update_status_label.setText("업데이트 다운로드 중")
+        self.update_button.setEnabled(False)
+        self.update_download_worker = UpdateDownloadWorker(update, output_path)
+        self.update_download_worker.progress_changed.connect(self.on_update_download_progress)
+        self.update_download_worker.download_done.connect(self.on_update_download_done)
+        self.update_download_worker.download_failed.connect(self.on_update_download_failed)
+        self.update_download_worker.finished.connect(self.on_update_download_finished)
+        self.update_download_worker.start()
+
+    def on_update_download_progress(self, received: int, total: int) -> None:
+        if total > 0:
+            percent = received * 100 / total
+            self.update_status_label.setText(f"다운로드 {percent:.0f}%")
+        else:
+            self.update_status_label.setText(f"다운로드 {_number_text(received / (1024 * 1024))} MB")
+
+    def on_update_download_done(self, path: str) -> None:
+        self.update_status_label.setText("업데이트 실행")
+        QMessageBox.information(self, "업데이트", "검증이 완료되었습니다. 설치 프로그램을 실행하고 앱을 종료합니다.")
+        os.startfile(path)
+        QApplication.quit()
+
+    def on_update_download_failed(self, message: str) -> None:
+        self.update_status_label.setText("업데이트 실패")
+        QMessageBox.warning(self, "업데이트 실패", message)
+
+    def on_update_download_finished(self) -> None:
+        self.update_download_worker = None
+        self.update_button.setEnabled(True)
 
     def browse_output_root(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", self.output_root_edit.text())
@@ -1482,10 +1733,22 @@ class MainWindow(QMainWindow):
         camera.setdefault("trigger_selector", "FrameStart")
         camera.setdefault("trigger_source", "Software")
         camera.setdefault("timeout_ms", 5000)
+        live_preview = camera.setdefault("live_preview", {})
+        live_preview.setdefault("enabled", True)
+        live_preview.setdefault("fps", 10)
 
         stage["serial_port"] = self.stage_port_combo.currentData() or self.stage_port_combo.currentText().split(" - ")[0]
         stage["settle_s"] = self.settle_spin.value() / 1000.0
         stage["move_velocity_mm_s"] = _optional_float_text(self.velocity_edit.text())
+        axes = stage.setdefault("axes", {})
+        x_axis = axes.setdefault("x", {})
+        y_axis = axes.setdefault("y", {})
+        x_axis.setdefault("device_index", 0)
+        x_axis.setdefault("axis_number", 1)
+        y_axis.setdefault("device_index", 0)
+        y_axis.setdefault("axis_number", 2)
+        x_axis["enabled"] = self.x_axis_enabled_check.isChecked()
+        y_axis["enabled"] = self.y_axis_enabled_check.isChecked()
 
         dataset["output_root"] = self.output_root_edit.text() or "output/datasets"
         dataset["image_format"] = "tiff"
@@ -1494,6 +1757,9 @@ class MainWindow(QMainWindow):
         dataset["summary_formats"] = self._checked_formats(self.summary_format_checks)
         dataset["write_jsonl"] = "jsonl" in dataset["metadata_formats"]
 
+        updates = config.setdefault("updates", {})
+        updates.setdefault("enabled", True)
+        updates.setdefault("repo", "Simon-Choi-1028/linear-stage-control")
         config["calibration"] = fixed_calibration_record()
 
         resolved_points = points if points is not None else self.read_positions()
@@ -1585,6 +1851,23 @@ class MainWindow(QMainWindow):
             )
 
         issues.append(self._axis_mapping_issue(stage))
+        x_active, y_active = _axis_activity_from_stage_config(stage)
+        axis_variation_errors = disabled_axis_variation_errors(
+            points,
+            x_active=x_active,
+            y_active=y_active,
+        )
+        if axis_variation_errors:
+            for error in axis_variation_errors:
+                issues.append(PreflightIssue("단일축 운용", "오류", error))
+        else:
+            mode = "XY 2축" if x_active and y_active else ("X축 단독" if x_active else "Y축 단독")
+            inactive_note = ""
+            if not x_active:
+                inactive_note = " | X actual/error는 빈 값으로 저장"
+            if not y_active:
+                inactive_note = " | Y actual/error는 빈 값으로 저장"
+            issues.append(PreflightIssue("축 활성화", "통과", f"{mode} 운용{inactive_note}"))
 
         dataset = config.get("dataset", {})
         output_root = str(dataset.get("output_root") or "").strip()
@@ -1634,6 +1917,13 @@ class MainWindow(QMainWindow):
                 f"Zaber 210 mm 고정 스펙 | XY worst-case {_um_text(ZABER_LDM210_XY_SPECS.radial_xy_worst_case_um)} um",
             )
         )
+        update_settings = update_settings_from_config(config)
+        if not update_settings.enabled:
+            issues.append(PreflightIssue("업데이트", "경고", "업데이트 확인이 설정에서 꺼져 있습니다."))
+        elif self.latest_update_info is not None:
+            issues.append(PreflightIssue("업데이트", "경고", f"{self.latest_update_info.version} 설치 가능"))
+        else:
+            issues.append(PreflightIssue("업데이트", "통과", f"repo: {update_settings.repo}"))
         return issues
 
     def _axis_mapping_issue(self, stage: dict[str, Any]) -> PreflightIssue:
@@ -1641,22 +1931,26 @@ class MainWindow(QMainWindow):
         try:
             x_axis = axes.get("x", {}) or {}
             y_axis = axes.get("y", {}) or {}
+            x_enabled = bool(x_axis.get("enabled", True))
+            y_enabled = bool(y_axis.get("enabled", True))
             x_address = (
                 int(x_axis.get("device_index", 0)),
                 int(x_axis.get("axis_number", 1)),
             )
             y_address = (
-                int(y_axis.get("device_index", 1)),
-                int(y_axis.get("axis_number", 1)),
+                int(y_axis.get("device_index", 0)),
+                int(y_axis.get("axis_number", 2)),
             )
         except (TypeError, ValueError) as exc:
             return PreflightIssue("축 매핑", "오류", f"X/Y 축 설정을 숫자로 해석할 수 없습니다: {exc}")
 
         detail = (
-            f"X device {x_address[0]} axis {x_address[1]} | "
-            f"Y device {y_address[0]} axis {y_address[1]}"
+            f"X {'ON' if x_enabled else 'OFF'} device {x_address[0]} axis {x_address[1]} | "
+            f"Y {'ON' if y_enabled else 'OFF'} device {y_address[0]} axis {y_address[1]}"
         )
-        if x_address == y_address:
+        if not x_enabled and not y_enabled:
+            return PreflightIssue("축 매핑", "오류", "X/Y 중 최소 하나의 축은 활성화해야 합니다.")
+        if x_enabled and y_enabled and x_address == y_address:
             return PreflightIssue("축 매핑", "오류", f"X/Y가 같은 축을 가리킵니다. {detail}")
         return PreflightIssue("축 매핑", "통과", detail)
 
@@ -1746,6 +2040,7 @@ class MainWindow(QMainWindow):
         if not self.show_preflight_dialog(points, config, validation):
             return
 
+        self.stop_live_preview(wait_ms=2000, update_label=True)
         self.captures_table.setRowCount(0)
         self.error_records = []
         self.update_error_summary()
@@ -1837,6 +2132,7 @@ class MainWindow(QMainWindow):
         self.set_run_status("오류 발생")
         self.log(f"오류: {message}")
         QMessageBox.critical(self, "실행 실패", message)
+        self.restart_live_preview_after_run()
 
     def on_run_done(self, run_dir: str, stopped: bool) -> None:
         self.start_button.setEnabled(True)
@@ -1850,6 +2146,11 @@ class MainWindow(QMainWindow):
         if self.run_status_label.text() != "오류 발생":
             self.set_run_status("중지됨" if stopped else "완료")
         self.log("촬영 중지됨" if stopped else "촬영 완료")
+        self.restart_live_preview_after_run()
+
+    def restart_live_preview_after_run(self) -> None:
+        if self.live_preview_enabled() and self.camera_combo.count() > 1:
+            self.start_live_preview()
 
     def preview_capture_row(self, row: int, column: int) -> None:
         item = self.captures_table.item(row, column) or self.captures_table.item(row, 0)
@@ -1864,6 +2165,7 @@ class MainWindow(QMainWindow):
 
     def show_image(self, path: Path) -> None:
         try:
+            self.preview_mode = "capture"
             self.current_image_path = path
             image = Image.open(path)
             image.thumbnail(
@@ -2140,6 +2442,13 @@ def _point_config_record(point: ScanPoint) -> dict[str, Any]:
     return record
 
 
+def _axis_activity_from_stage_config(stage: dict[str, Any]) -> tuple[bool, bool]:
+    axes = stage.get("axes", {})
+    x_axis = axes.get("x", {}) or {}
+    y_axis = axes.get("y", {}) or {}
+    return bool(x_axis.get("enabled", True)), bool(y_axis.get("enabled", True))
+
+
 def _status_text(value: Any) -> str:
     mapping = {
         "ok": "완료",
@@ -2173,6 +2482,55 @@ def _set_table_values(table: QTableWidget, values: list[str]) -> None:
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         item.setTextAlignment(Qt.AlignCenter)
         table.setItem(0, column, item)
+
+
+def _pixmap_from_array(array: object, target_size: QSize) -> QPixmap:
+    arr = np.asarray(array)
+    if arr.ndim == 2:
+        arr8 = _to_uint8(arr)
+        qimage = QImage(
+            arr8.data,
+            arr8.shape[1],
+            arr8.shape[0],
+            arr8.strides[0],
+            QImage.Format_Grayscale8,
+        ).copy()
+    elif arr.ndim == 3:
+        if arr.shape[2] == 1:
+            return _pixmap_from_array(arr[:, :, 0], target_size)
+        arr8 = _to_uint8(arr[:, :, :4])
+        if arr8.shape[2] >= 4:
+            qimage = QImage(
+                arr8.data,
+                arr8.shape[1],
+                arr8.shape[0],
+                arr8.strides[0],
+                QImage.Format_RGBA8888,
+            ).copy()
+        else:
+            qimage = QImage(
+                arr8.data,
+                arr8.shape[1],
+                arr8.shape[0],
+                arr8.strides[0],
+                QImage.Format_RGB888,
+            ).copy()
+    else:
+        raise ValueError(f"Unsupported live frame shape: {arr.shape}")
+    return QPixmap.fromImage(qimage).scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+def _to_uint8(array: np.ndarray) -> np.ndarray:
+    arr = np.asarray(array)
+    if arr.dtype == np.uint8:
+        return np.ascontiguousarray(arr)
+    arr_float = arr.astype(np.float32, copy=False)
+    max_value = float(np.nanmax(arr_float)) if arr_float.size else 0.0
+    min_value = float(np.nanmin(arr_float)) if arr_float.size else 0.0
+    if max_value <= min_value:
+        return np.zeros(arr.shape, dtype=np.uint8)
+    scaled = (arr_float - min_value) * (255.0 / (max_value - min_value))
+    return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
 
 
 def _apply_button_icon(

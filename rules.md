@@ -1,7 +1,8 @@
 # 개발 Rules
 
 - 스테이지와 카메라는 순차 제어한다. 한 포인트에서 `move_absolute_mm -> wait_until_idle -> settle_s 대기`가 끝난 뒤 해당 위치의 `capture_count`만큼 `capture_original_to`를 반복하고 다음 포인트로 이동한다.
-- Zaber X/Y 축 이동은 동시에 명령을 보내고 두 축 모두 idle 상태가 될 때까지 기다린다. 불필요한 축별 직렬 대기를 줄이면서도 캡처 전 위치 안정성을 보장한다.
+- Zaber 이동은 acquisition worker가 소유한 단일 serial connection 안에서만 실행한다. 이동은 `wait_until_idle=False`로 시작하고 `is_busy()` polling 중 stop 플래그를 감지하면 같은 connection에서 `axis.stop(wait_until_idle=False)`를 호출한다.
+- X/Y 축은 각각 활성화/비활성화할 수 있다. 비활성 축에는 resolve/home/move/position 명령을 보내지 않고, 비활성 축 좌표가 run 안에서 여러 값이면 preflight 오류로 차단한다.
 - Basler ace 2 LAN/GigE 카메라는 기본적으로 software trigger 모드를 사용한다. `TriggerSelector=FrameStart`, `TriggerSource=Software`, `ExecuteSoftwareTrigger()` 흐름으로 캡처 시점을 명확히 남긴다.
 - 원본 보존은 변환 없는 `grab_result.GetArray().copy()`를 기준으로 한다. 저장 기본값은 lossless TIFF이며, 완전한 numpy 배열 재현이 필요할 때만 `dataset.save_numpy: true`를 켠다.
 - 데이터셋은 run 단위 timestamp 디렉터리로 격리한다. 각 run에는 `manifest.json`, `config.yaml` 스냅샷, `captures.csv`, 선택적 `captures.jsonl`, `images/`를 둔다.
@@ -22,7 +23,8 @@
 - 촬영 시작 전에는 preflight 점검 창을 띄운다. 위치 목록, Basler 카메라 감지, Zaber COM 포트, X/Y 축 매핑, 저장 폴더, 이동 속도, 촬영 설정, 고정 오차 기준을 확인하고 오류가 있으면 시작 버튼을 비활성화한다.
 - X/Y 축이 같은 Zaber device/axis 주소를 가리키는 설정은 안전하지 않으므로 run 전에 오류로 차단한다. 저장 폴더는 run 시작 전에 생성 가능 여부를 확인해 데이터셋 기록 실패를 앞단에서 줄인다.
 - 제조사 고정 스펙처럼 사용자가 자주 조작하지 않는 정보는 메인 제어 패널에 상시 노출하지 않는다. 필요 시 `오차` 탭의 `스펙 보기` 같은 상세 버튼으로 확인하게 한다.
-- 배포는 PyInstaller one-folder portable 빌드를 기본으로 한다. Basler pylon runtime처럼 드라이버 성격의 의존성은 앱에 정적으로 묶는 대신 installer 폴더에 함께 넣고 새 PC에서 별도로 설치한다.
+- 배포는 PyInstaller one-folder portable 빌드와 slim installer를 기본으로 한다. Basler pylon Runtime은 기본 Setup에 묶지 않고, Runtime이 없는 PC에서는 앱에서 설치 안내/다운로드 버튼을 제공한다.
+- GitHub Release 업데이트는 `update_manifest.json`의 SHA256과 Setup asset을 함께 검증한다. 검증 실패 시 설치 파일을 실행하지 않는다.
 - PyInstaller 빌드에서는 Zaber Motion Python 패키지와 별도로 `zaber_motion_bindings` 네이티브 DLL을 반드시 포함한다. `zaber-motion-core-windows-amd64.dll`이 `dist/LinearStageControl/_internal/zaber_motion_bindings/`에 없으면 frozen exe가 시작 시 import 단계에서 실패한다.
 - 데이터셋 메타데이터는 기본적으로 CSV, JSONL, JSON, TSV, YAML, XLSX를 생성한다. run 요약은 JSON, YAML, Markdown으로 저장해 실험 기록, 통계 분석, 논문 표 작성에 재사용할 수 있게 한다.
 - GUI와 CLI는 같은 `base_capture_record`, `DatasetRun`, 위치 파서, 위치 검증 모듈을 사용한다. 포맷이나 레코드 필드가 늘어날 때 중복 구현을 만들지 않는다.

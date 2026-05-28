@@ -7,7 +7,14 @@ from typing import Any
 
 import numpy as np
 from PIL import Image
-from pypylon import pylon
+
+try:
+    from pypylon import pylon
+except Exception as exc:  # pragma: no cover - exercised on runtime-missing PCs.
+    pylon = None
+    PYLON_IMPORT_ERROR: Exception | None = exc
+else:
+    PYLON_IMPORT_ERROR = None
 
 from .config import none_if_blank
 
@@ -94,6 +101,7 @@ class CaptureResult:
 
 
 def enumerate_cameras() -> list[dict[str, str]]:
+    require_pylon()
     devices = pylon.TlFactory.GetInstance().EnumerateDevices()
     return [_device_info_to_dict(device) for device in devices]
 
@@ -139,6 +147,7 @@ class BaslerCamera:
         self.close()
 
     def open(self) -> BaslerCamera:
+        require_pylon()
         device_info = self._select_device()
         self.camera = pylon.InstantCamera(
             pylon.TlFactory.GetInstance().CreateDevice(device_info)
@@ -258,6 +267,7 @@ class BaslerCamera:
                 self.camera.StopGrabbing()
 
     def _select_device(self) -> Any:
+        require_pylon()
         devices = list(pylon.TlFactory.GetInstance().EnumerateDevices())
         if not devices:
             raise RuntimeError("No Basler camera was detected.")
@@ -406,6 +416,7 @@ class BaslerCamera:
         return [str(item) for item in symbolics]
 
     def _output_pixel_type(self) -> int:
+        require_pylon()
         output_format = _normalise_pixel_format_name(self.settings.output_pixel_format)
         pylon_name = OUTPUT_PIXEL_TYPE_ALIASES.get(output_format, output_format)
         pixel_type = getattr(pylon, f"PixelType_{pylon_name}", None)
@@ -416,6 +427,17 @@ class BaslerCamera:
                 f"Supported values: {supported}"
             )
         return pixel_type
+
+
+def require_pylon() -> None:
+    if pylon is not None:
+        return
+    detail = f" ({PYLON_IMPORT_ERROR})" if PYLON_IMPORT_ERROR else ""
+    raise RuntimeError(
+        "Basler pylon Runtime 또는 pypylon 로딩에 실패했습니다. "
+        "Basler pylon Runtime을 설치한 뒤 앱을 다시 실행하세요."
+        f"{detail}"
+    )
 
 
 def _safe_device_value(device_info: Any, method_name: str) -> str | None:

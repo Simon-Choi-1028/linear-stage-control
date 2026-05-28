@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,8 @@ from .scan import (
     effective_move_velocity_mm_s,
     total_capture_count,
 )
-from .stage import ZaberXYStage, stage_settings_from_config
+from .stage import StageMoveCancelled, ZaberXYStage, stage_settings_from_config
+from .updater import UpdateInfo, download_file, fetch_latest_update, verify_file_sha256
 
 
 class AcquisitionWorker(QThread):
@@ -53,6 +55,8 @@ class AcquisitionWorker(QThread):
             stage_settings = stage_settings_from_config(self.config)
             camera_settings = camera_settings_from_config(self.config)
             error_budget = error_budget_from_config(self.config)
+            x_active = stage_settings.x.enabled
+            y_active = stage_settings.y.enabled
             self.status_changed.emit("데이터셋, 스테이지, 카메라 연결 중")
             self.log_message.emit("데이터셋, 스테이지, 카메라 연결 중")
 
@@ -82,6 +86,8 @@ class AcquisitionWorker(QThread):
                             point,
                             stage_settings.move_velocity_mm_s,
                         )
+                        record["axis_x_active"] = x_active
+                        record["axis_y_active"] = y_active
                         record["capture_count"] = capture_count
                         record["point_move_velocity_mm_s"] = point.move_velocity_mm_s or ""
                         record["effective_move_velocity_mm_s"] = move_velocity or ""
@@ -98,25 +104,33 @@ class AcquisitionWorker(QThread):
                             point.x_mm,
                             point.y_mm,
                             velocity_mm_s=move_velocity,
+                            cancel_requested=lambda: self._stop_requested,
                         )
                         record["move_completed_at"] = iso_timestamp()
 
                         self.status_changed.emit(f"{completed}/{total} 위치 확인 및 오차 계산 중")
                         actual_x_mm, actual_y_mm = stage.position_mm()
-                        record["actual_x_mm"] = actual_x_mm
-                        record["actual_y_mm"] = actual_y_mm
-                        record["error_x_mm"] = actual_x_mm - point.x_mm
-                        record["error_y_mm"] = actual_y_mm - point.y_mm
+                        error_x_mm = actual_x_mm - point.x_mm if x_active and actual_x_mm is not None else None
+                        error_y_mm = actual_y_mm - point.y_mm if y_active and actual_y_mm is not None else None
+                        record["actual_x_mm"] = actual_x_mm if actual_x_mm is not None else ""
+                        record["actual_y_mm"] = actual_y_mm if actual_y_mm is not None else ""
+                        record["error_x_mm"] = error_x_mm if error_x_mm is not None else ""
+                        record["error_y_mm"] = error_y_mm if error_y_mm is not None else ""
                         record.update(
                             estimate_position_error_um(
-                                float(record["error_x_mm"]),
-                                float(record["error_y_mm"]),
+                                error_x_mm,
+                                error_y_mm,
                                 error_budget,
+                                x_active=x_active,
+                                y_active=y_active,
                             ).as_record()
                         )
 
                         self.status_changed.emit(f"{completed}/{total} 안정화 대기 중")
-                        self.msleep(max(0, int(stage_settings.settle_s * 1000)))
+                        self._sleep_interruptible(max(0, int(stage_settings.settle_s * 1000)))
+                        if self._stop_requested:
+                            stopped = True
+                            break
                         record["settle_completed_at"] = iso_timestamp()
 
                         for capture_index in range(1, capture_count + 1):
@@ -157,6 +171,13 @@ class AcquisitionWorker(QThread):
                             completed += 1
                             self.progress_changed.emit(completed, total)
                             self.status_changed.emit(f"{completed}/{total} 저장 완료")
+                    except StageMoveCancelled:
+                        stopped = True
+                        record["status"] = "stopped"
+                        record["error_message"] = "사용자 중지 요청으로 이동을 취소했습니다."
+                        dataset.write_capture(record)
+                        self.capture_done.emit(record)
+                        break
                     except Exception as exc:
                         record["status"] = "error"
                         record["error_message"] = str(exc)
@@ -176,6 +197,50 @@ class AcquisitionWorker(QThread):
                 self.run_done.emit(run_dir, True)
 
 
+    def _sleep_interruptible(self, duration_ms: int) -> None:
+        remaining_ms = max(0, duration_ms)
+        while remaining_ms > 0 and not self._stop_requested:
+            step_ms = min(remaining_ms, 50)
+            self.msleep(step_ms)
+            remaining_ms -= step_ms
+
+
+class LivePreviewWorker(QThread):
+    frame_ready = Signal(object, dict)
+    status_changed = Signal(str)
+    live_failed = Signal(str)
+
+    def __init__(self, config: dict[str, Any], fps: int = 10):
+        super().__init__()
+        self.config = deepcopy(config)
+        self.fps = max(1, min(60, int(fps or 10)))
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def run(self) -> None:
+        try:
+            preview_config = deepcopy(self.config)
+            camera_config = preview_config.setdefault("camera", {})
+            camera_config["use_software_trigger"] = False
+            camera_config["trigger_mode"] = "Off"
+            camera_config["timeout_ms"] = int(camera_config.get("timeout_ms", 1000) or 1000)
+            settings = camera_settings_from_config(preview_config)
+            frame_delay_ms = max(1, int(1000 / self.fps))
+            with BaslerCamera(settings) as camera:
+                self.status_changed.emit(f"Live preview running ({self.fps} FPS)")
+                while not self._stop_requested:
+                    array, metadata = camera.grab_original_array(timeout_ms=settings.timeout_ms)
+                    if self._stop_requested:
+                        break
+                    self.frame_ready.emit(array, metadata)
+                    self.msleep(frame_delay_ms)
+        except Exception as exc:
+            if not self._stop_requested:
+                self.live_failed.emit(str(exc))
+
+
 class CameraDiscoveryWorker(QThread):
     cameras_found = Signal(list, str)
     scan_failed = Signal(str, str)
@@ -190,6 +255,50 @@ class CameraDiscoveryWorker(QThread):
             self.cameras_found.emit(cameras, self.reason)
         except Exception as exc:
             self.scan_failed.emit(str(exc), self.reason)
+
+
+class UpdateCheckWorker(QThread):
+    update_available = Signal(object)
+    update_not_available = Signal(str)
+    update_failed = Signal(str)
+
+    def __init__(self, repo: str, current_version: str):
+        super().__init__()
+        self.repo = repo
+        self.current_version = current_version
+
+    def run(self) -> None:
+        try:
+            update = fetch_latest_update(self.repo, self.current_version)
+            if update is None:
+                self.update_not_available.emit(self.current_version)
+            else:
+                self.update_available.emit(update)
+        except Exception as exc:
+            self.update_failed.emit(str(exc))
+
+
+class UpdateDownloadWorker(QThread):
+    progress_changed = Signal(int, int)
+    download_done = Signal(str)
+    download_failed = Signal(str)
+
+    def __init__(self, update: UpdateInfo, output_path: Path):
+        super().__init__()
+        self.update = update
+        self.output_path = output_path
+
+    def run(self) -> None:
+        try:
+            def progress(received: int, total: int | None) -> None:
+                self.progress_changed.emit(received, total or 0)
+
+            path = download_file(self.update.setup_url, self.output_path, progress_callback=progress)
+            if not self.update.sha256 or not verify_file_sha256(path, self.update.sha256):
+                raise RuntimeError("다운로드한 설치 파일의 SHA256 검증에 실패했습니다.")
+            self.download_done.emit(str(path))
+        except Exception as exc:
+            self.download_failed.emit(str(exc))
 
 
 def _mm_text(value: Any) -> str:

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.2 - 2026-05-28
+
+- Added an official Zaber SDK download helper for the Motion Library wheel and Device Database.
+- Bundled the official Zaber Device Database when available and configured `Library.set_device_db_source(FILE, ...)` before device detection.
+- Documented the Zaber SDK cache and offline Device DB path for field builds.
+
 ## v0.1.1 - 2026-05-28
 
 - Packaged smoke tests now import and initialise the GUI instead of exiting early, so missing bundled dependencies are detected during build.

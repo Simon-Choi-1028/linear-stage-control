@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import time
+import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from serial.tools import list_ports
-from zaber_motion import Units
+from zaber_motion import DeviceDbSourceType, Library, Units
 from zaber_motion.ascii import Axis, Connection
 
 
@@ -24,6 +27,8 @@ class StageSettings:
     home_on_start: bool = True
     settle_s: float = 0.2
     move_velocity_mm_s: float | None = None
+    device_db_path: str | None = None
+    use_bundled_device_db: bool = True
     x: AxisAddress = AxisAddress(device_index=0, axis_number=1)
     y: AxisAddress = AxisAddress(device_index=0, axis_number=2)
 
@@ -42,6 +47,8 @@ def stage_settings_from_config(config: dict[str, Any]) -> StageSettings:
         home_on_start=bool(stage.get("home_on_start", True)),
         settle_s=float(stage.get("settle_s", 0.2)),
         move_velocity_mm_s=_optional_float(stage.get("move_velocity_mm_s")),
+        device_db_path=_optional_str(stage.get("device_db_path")),
+        use_bundled_device_db=bool(stage.get("use_bundled_device_db", True)),
         x=_axis_address(axes, "x", default_device_index=0),
         y=_axis_address(axes, "y", default_device_index=0, default_axis_number=2),
     )
@@ -73,6 +80,7 @@ class ZaberXYStage:
         self.close()
 
     def open(self) -> ZaberXYStage:
+        configure_zaber_device_database(self.settings)
         self.connection = Connection.open_serial_port(
             self.settings.serial_port,
             baud_rate=self.settings.baud_rate,
@@ -210,9 +218,43 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _move_kwargs(velocity_mm_s: float | None) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"wait_until_idle": False}
     if velocity_mm_s is not None:
         kwargs["velocity"] = float(velocity_mm_s)
         kwargs["velocity_unit"] = Units.VELOCITY_MILLIMETRES_PER_SECOND
     return kwargs
+
+
+def configure_zaber_device_database(settings: StageSettings) -> Path | None:
+    device_db_path = _resolve_device_db_path(settings)
+    if device_db_path is None:
+        return None
+    Library.set_device_db_source(DeviceDbSourceType.FILE, str(device_db_path))
+    return device_db_path
+
+
+def _resolve_device_db_path(settings: StageSettings) -> Path | None:
+    candidates: list[Path] = []
+    if settings.device_db_path:
+        candidates.append(Path(os.path.expandvars(os.path.expanduser(settings.device_db_path))))
+    if settings.use_bundled_device_db:
+        relative_path = Path("sdk_downloads") / "zaber" / "devices-public-v2.sqlite.lzma"
+        candidates.extend(
+            [
+                Path.cwd() / relative_path,
+                Path(getattr(sys, "_MEIPASS", Path.cwd())) / relative_path,
+                Path(sys.executable).resolve().parent / "_internal" / relative_path,
+            ]
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None

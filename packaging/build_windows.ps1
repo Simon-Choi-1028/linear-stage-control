@@ -1,6 +1,7 @@
 param(
   [switch]$SkipSmoke,
-  [switch]$IncludePylonRuntime
+  [switch]$IncludePylonRuntime,
+  [switch]$SkipZaberSdkDownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,13 +42,20 @@ $dataFiles = @(
   @{ Source = "positions.example.csv"; Target = "."; Required = $true },
   @{ Source = "README.md"; Target = "."; Required = $true },
   @{ Source = "rules.md"; Target = "."; Required = $true },
-  @{ Source = "sdk_downloads\README.md"; Target = "sdk_downloads"; Required = $false }
+  @{ Source = "sdk_downloads\README.md"; Target = "sdk_downloads"; Required = $false },
+  @{ Source = "sdk_downloads\zaber\devices-public-v2.sqlite.lzma"; Target = "sdk_downloads\zaber"; Required = $false }
 )
 
 if ($IncludePylonRuntime) {
   $dataFiles += @{ Source = "sdk_downloads\installers\pylon_Runtime_26.04.1.exe"; Target = "sdk_downloads\installers"; Required = $false }
 } else {
   Write-Host "Slim build: pylon Runtime installer is not bundled. Use -IncludePylonRuntime for an offline installer."
+}
+
+$zaberDeviceDb = Join-Path $Root "sdk_downloads\zaber\devices-public-v2.sqlite.lzma"
+if (-not (Test-Path -LiteralPath $zaberDeviceDb) -and -not $SkipZaberSdkDownload) {
+  Write-Host "Zaber Device Database is missing; downloading official SDK artifacts."
+  & (Join-Path $PSScriptRoot "download_zaber_sdk.ps1") -SkipWheel
 }
 
 foreach ($item in $dataFiles) {

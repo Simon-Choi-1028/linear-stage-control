@@ -2,7 +2,7 @@
 
 ## 배포 버전
 
-- Current release: `v0.1.1`
+- Current release: `v0.1.2`
 - Windows installer: `LinearStageControlSetup.exe`
 - SHA256: release asset의 `update_manifest.json`에서 확인
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
@@ -23,6 +23,7 @@ Basler ace 2 `a2A2464-115g5mBAS` 카메라와 Zaber XY 스테이지를 연동해
 - Python 3.13 가상환경: `.venv`
 - Basler Python SDK: `pypylon==26.4.1`
 - Zaber Motion Library: `zaber-motion==9.3.0`
+- Zaber official Device Database: `sdk_downloads/zaber/devices-public-v2.sqlite.lzma`
 - Basler pylon Runtime은 기본 slim installer에 포함하지 않습니다. 앱 실행 후 장비 연결 실패 시 pylon Runtime 다운로드 안내 버튼을 사용합니다.
 - 오프라인 배포가 필요할 때만 `packaging\build_windows.ps1 -IncludePylonRuntime`으로 Runtime 포함 빌드를 만듭니다.
 
@@ -198,6 +199,8 @@ stage:
   serial_port: COM3
   settle_s: 0.2
   move_velocity_mm_s:
+  use_bundled_device_db: true
+  device_db_path:
   axes:
     x: {enabled: true, device_index: 0, axis_number: 1}
     y: {enabled: true, device_index: 0, axis_number: 2}
@@ -217,6 +220,12 @@ Python이 없는 다른 PC에서 실행할 수 있도록 PyInstaller portable �
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+```
+
+Zaber 공식 Motion Library wheel과 Device Database를 명시적으로 내려받아 로컬 SDK cache를 만들려면 아래 명령을 먼저 실행합니다. 기본 build는 Device DB가 없을 때 이 다운로드를 자동으로 시도합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\download_zaber_sdk.ps1
 ```
 
 빌드가 끝나면 `LinearStageControl.exe --smoke-test`를 실행해 PyInstaller 패키지 안의 Python 모듈, pypylon, Zaber native DLL 로딩을 실제로 확인합니다. 이 검증을 임시로 건너뛰려면 `-SkipSmoke`를 붙입니다.

@@ -15,7 +15,7 @@ from linear_stage_control.dataset_exports import (
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
 from linear_stage_control.position_validation import disabled_axis_variation_errors
 from linear_stage_control.scan import linear_path_points_by_spacing, points_from_records
-from linear_stage_control.stage import stage_settings_from_config
+from linear_stage_control.stage import configure_zaber_device_database, stage_settings_from_config
 from linear_stage_control.updater import is_newer_version, sha256_file, verify_file_sha256
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -115,6 +115,11 @@ class StageAxisSettingsTests(unittest.TestCase):
 
         self.assertTrue(disabled_axis_variation_errors(points, x_active=False, y_active=True))
         self.assertFalse(disabled_axis_variation_errors(points, x_active=True, y_active=False))
+
+    def test_zaber_device_database_path_is_optional(self) -> None:
+        settings = stage_settings_from_config({"stage": {"use_bundled_device_db": False}})
+
+        self.assertIsNone(configure_zaber_device_database(settings))
 
 
 class ErrorModelTests(unittest.TestCase):

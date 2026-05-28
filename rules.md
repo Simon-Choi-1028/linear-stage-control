@@ -26,6 +26,7 @@
 - 배포는 PyInstaller one-folder portable 빌드와 slim installer를 기본으로 한다. Basler pylon Runtime은 기본 Setup에 묶지 않고, Runtime이 없는 PC에서는 앱에서 설치 안내/다운로드 버튼을 제공한다.
 - GitHub Release 업데이트는 `update_manifest.json`의 SHA256과 Setup asset을 함께 검증한다. 검증 실패 시 설치 파일을 실행하지 않는다.
 - PyInstaller 빌드에서는 Zaber Motion Python 패키지와 별도로 `zaber_motion_bindings` 네이티브 DLL을 반드시 포함한다. `zaber-motion-core-windows-amd64.dll`이 `dist/LinearStageControl/_internal/zaber_motion_bindings/`에 없으면 frozen exe가 시작 시 import 단계에서 실패한다.
+- 공식 Zaber Device Database(`devices-public-v2.sqlite.lzma`)가 있으면 빌드에 포함하고, 스테이지 연결 전에 `Library.set_device_db_source(DeviceDbSourceType.FILE, ...)`로 지정한다. 현장 PC가 인터넷이 없어도 장치 식별 의존성을 줄이기 위함이다.
 - 데이터셋 메타데이터는 기본적으로 CSV, JSONL, JSON, TSV, YAML, XLSX를 생성한다. run 요약은 JSON, YAML, Markdown으로 저장해 실험 기록, 통계 분석, 논문 표 작성에 재사용할 수 있게 한다.
 - GUI와 CLI는 같은 `base_capture_record`, `DatasetRun`, 위치 파서, 위치 검증 모듈을 사용한다. 포맷이나 레코드 필드가 늘어날 때 중복 구현을 만들지 않는다.
 - packaged exe의 `--smoke-test`는 import 직후 종료하지 않는다. GUI를 device scan 없이 초기화했다가 닫아 pypylon, PySide6, Zaber native DLL, bundled data 누락을 빌드 직후 잡는다.

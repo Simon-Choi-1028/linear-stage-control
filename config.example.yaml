@@ -33,6 +33,10 @@ stage:
   home_on_start: true
   settle_s: 0.2
   move_velocity_mm_s:
+  # Uses the official Zaber Device Database bundle when present.
+  use_bundled_device_db: true
+  # Optional override for an explicit device DB file path.
+  device_db_path:
   axes:
     # device_index is zero-based in the order returned by Zaber detection.
     # For one 2-axis controller, set both device_index values to 0 and use

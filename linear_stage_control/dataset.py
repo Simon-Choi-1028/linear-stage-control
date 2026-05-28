@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from .dataset_exports import (
     write_summary_yaml,
 )
 from .scan import ScanPoint
+from . import __version__
 
 
 @dataclass(frozen=True)
@@ -102,7 +104,8 @@ class DatasetRun:
             "yaml": self.run_dir / "summary.yaml",
             "md": self.run_dir / "summary.md",
         }
-        self.manifest_path = self.run_dir / "manifest.json"
+        self.manifest_path = self.run_dir / "dataset_manifest.json"
+        self.legacy_manifest_path = self.run_dir / "manifest.json"
         self.config_snapshot_path = self.run_dir / "config.yaml"
         self.records: list[dict[str, Any]] = []
         self._csv_file: Any = None
@@ -195,27 +198,55 @@ class DatasetRun:
         manifest = {
             "run_id": self.run_id,
             "status": status,
+            "app_version": __version__,
             "created_at": self.run_id,
             "updated_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "config_path": str(self.config_path),
             "dataset": asdict(self.settings) | {"output_root": str(self.settings.output_root)},
             "point_count": len(self.points),
+            "record_count": len(self.records),
             "metadata_files": {
-                key: str(path.relative_to(self.run_dir))
+                key: _relative_manifest_path(path, self.run_dir)
                 for key, path in self.metadata_paths.items()
                 if path.exists()
             },
             "summary_files": {
-                key: str(path.relative_to(self.run_dir))
+                key: _relative_manifest_path(path, self.run_dir)
                 for key, path in self.summary_paths.items()
                 if path.exists()
             },
-            "config_snapshot": str(self.config_snapshot_path.relative_to(self.run_dir)),
+            "config_snapshot": _relative_manifest_path(self.config_snapshot_path, self.run_dir),
         }
-        self.manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        if status != "running":
+            manifest["files"] = self._file_manifest_entries()
+        manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2)
+        self.manifest_path.write_text(manifest_text, encoding="utf-8")
+        self.legacy_manifest_path.write_text(manifest_text, encoding="utf-8")
+
+    def _file_manifest_entries(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        candidates: list[tuple[str, Path]] = [("config", self.config_snapshot_path)]
+        candidates.extend(("image", path) for path in sorted(self.images_dir.glob("*")) if path.is_file())
+        if self.arrays_dir.exists():
+            candidates.extend(("array", path) for path in sorted(self.arrays_dir.glob("*")) if path.is_file())
+        candidates.extend(("metadata", path) for path in self.metadata_paths.values() if path.exists())
+        candidates.extend(("summary", path) for path in self.summary_paths.values() if path.exists())
+
+        seen: set[Path] = set()
+        for role, path in candidates:
+            resolved = path.resolve()
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            entries.append(
+                {
+                    "path": _relative_manifest_path(path, self.run_dir),
+                    "role": role,
+                    "size_bytes": path.stat().st_size,
+                    "sha256": _sha256_file(path),
+                }
+            )
+        return entries
 
 
 CAPTURE_FIELDS = [
@@ -352,3 +383,15 @@ def _normalise_image_format(value: Any) -> str:
             f"Unsupported image_format: {value}. Use a lossless format: {allowed_text}."
         )
     return image_format
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _relative_manifest_path(path: Path, base: Path) -> str:
+    return path.relative_to(base).as_posix()

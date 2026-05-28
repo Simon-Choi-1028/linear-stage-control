@@ -73,9 +73,11 @@ python scripts\launch_gui.py
 python scripts/list_devices.py
 python scripts/xy_scan_capture.py --config config.yaml --dry-run
 python scripts/xy_scan_capture.py --config config.yaml
+python scripts/capture_manual_screenshots.py
 ```
 
 장비 연결 후 `python scripts/list_devices.py`에서 Basler 카메라와 Zaber COM 포트가 보이는지 먼저 확인하세요.
+매뉴얼용 UI 이미지는 `python scripts/capture_manual_screenshots.py`로 `%USERPROFILE%/Downloads/LinearStageControl_UI_Screenshots/`에 일괄 저장할 수 있습니다.
 
 ## GUI
 
@@ -105,7 +107,11 @@ GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접
 
 `장비` 영역의 `자동검색` 버튼을 누르면 LAN/GigE Basler 카메라를 한 번 검색합니다. 검색 상태는 별도 배지로 `탐색중`, `성공`, `실패`가 표시되고 상태별 색상으로 구분됩니다. `a2A2464-115g5mBAS`처럼 LAN/GigE 포트에 연결되는 카메라가 감지되면 `카메라` 드롭다운에 모델명, serial, IP, device class가 추가되어 선택할 수 있습니다. GUI가 주기적으로 카메라 검색을 반복하지 않으므로 촬영 중 pypylon 장치 열기와 충돌할 가능성을 줄입니다.
 
-v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, `Live 크기` 슬라이더로 미리보기 화면 높이를 50-200% 범위에서 조정할 수 있습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+`수동 스테이지` 영역에서는 촬영 run을 시작하기 전에 현재 위치 읽기, 활성 축 원점 복귀, 절대 좌표 이동, X/Y jog 이동, 수동 정지를 실행할 수 있습니다. 촬영 run 중에는 별도 serial connection 충돌을 막기 위해 수동 명령 버튼이 비활성화됩니다.
+
+오른쪽 `진단` 탭은 pypylon import, Basler 카메라 탐색, Zaber COM 포트, Zaber Device Database, 저장 폴더 쓰기 권한, GitHub 업데이트 접근성을 한 번에 점검합니다. 현장 PC에서 live가 뜨지 않거나 장비 연결이 애매할 때 먼저 실행해 결과를 로그와 표로 확인하면 됩니다.
+
+v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 오류가 났을 때는 `Live 재연결`과 `카메라 재검색`으로 빠르게 복구를 시도할 수 있습니다. `Live 크기` 슬라이더로 미리보기 화면 높이를 50-200% 범위에서 조정할 수 있습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
 
 Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
 
@@ -190,6 +196,7 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
 
 ```text
 %USERPROFILE%/Documents/LinearStageControl/datasets/20260526T142233_123456+0900/
+  dataset_manifest.json
   manifest.json
   config.yaml
   captures.csv
@@ -202,10 +209,10 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
   summary.yaml
   summary.md
   images/
-    000000_..._x0.000000_y0.000000_origin.tiff
+    sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap001.tiff
 ```
 
-`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 이미지 파일명은 기본적으로 `{label_or_point}_x{X}mm_y{Y}mm_{timestamp}_cap{capture_index:03d}.tiff` 형태라 파일명만 봐도 촬영 위치와 시간을 확인할 수 있습니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다.
+`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 이미지 파일명은 기본적으로 `{label_or_point}_x{X}mm_y{Y}mm_{timestamp}_cap{capture_index:03d}.tiff` 형태라 파일명만 봐도 촬영 위치와 시간을 확인할 수 있습니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다. `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 크기와 SHA256 hash가 저장됩니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
 
 ## 원본 이미지
 
@@ -307,3 +314,5 @@ dist/update_manifest.json
 ```
 
 `LinearStageControlSetup.exe`는 자동 업데이트가 사용하는 기본 온라인 설치본입니다. `LinearStageControlSetup-Offline.exe`는 Basler pylon Runtime installer까지 묶은 현장용 설치본입니다. 앱의 `업데이트 확인` 버튼은 public GitHub Release의 latest 버전을 확인하며, Release에는 기본 Setup과 `update_manifest.json`이 함께 있어야 합니다. 앱은 Setup을 다운로드한 뒤 SHA256 검증이 통과할 때만 설치 파일을 실행합니다.
+
+GitHub Release 업로드는 사용자가 릴리즈를 승인한 뒤에만 실행하세요. 설치본을 빌드한 다음 `packaging\release_github.ps1 -Tag vX.Y.Z`를 사용하면 `LinearStageControlSetup.exe`, 선택적 offline installer, `update_manifest.json`을 GitHub Release asset으로 올릴 수 있습니다.

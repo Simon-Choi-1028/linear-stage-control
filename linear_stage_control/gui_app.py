@@ -60,7 +60,9 @@ from .error_model import (
 from .gui_workers import (
     AcquisitionWorker,
     CameraDiscoveryWorker,
+    DiagnosticsWorker,
     LivePreviewWorker,
+    ManualStageWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
@@ -157,6 +159,8 @@ class MainWindow(QMainWindow):
         self.worker: AcquisitionWorker | None = None
         self.camera_scan_worker: CameraDiscoveryWorker | None = None
         self.live_worker: LivePreviewWorker | None = None
+        self.diagnostics_worker: DiagnosticsWorker | None = None
+        self.manual_stage_worker: ManualStageWorker | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
         self.latest_update_info: UpdateInfo | None = None
@@ -187,6 +191,11 @@ class MainWindow(QMainWindow):
         self.stop_live_preview(wait_ms=1500)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_scan_worker.wait(2000)
+        for worker in (self.diagnostics_worker, self.manual_stage_worker):
+            if worker is not None and worker.isRunning():
+                if hasattr(worker, "request_stop"):
+                    worker.request_stop()
+                worker.wait(1500)
         for worker in (self.update_check_worker, self.update_download_worker):
             if worker is not None and worker.isRunning():
                 worker.wait(1000)
@@ -357,6 +366,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         layout.addWidget(self._build_device_group())
+        layout.addWidget(self._build_manual_stage_group())
         layout.addWidget(self._build_settings_group())
         layout.addWidget(self._build_positions_group(), 1)
         layout.addWidget(self._build_run_group())
@@ -428,6 +438,76 @@ class MainWindow(QMainWindow):
         self.pylon_runtime_button.clicked.connect(self.open_pylon_runtime_download)
         self.x_axis_enabled_check.stateChanged.connect(self.refresh_position_feedback)
         self.y_axis_enabled_check.stateChanged.connect(self.refresh_position_feedback)
+        return group
+
+    def _build_manual_stage_group(self) -> QGroupBox:
+        group = QGroupBox("수동 스테이지")
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+
+        self.manual_x_edit = QLineEdit("0")
+        self.manual_y_edit = QLineEdit("0")
+        self.manual_velocity_edit = QLineEdit()
+        self.manual_velocity_edit.setPlaceholderText("기본 속도")
+        _set_placeholder_color(self.manual_velocity_edit)
+        self.manual_step_spin = QDoubleSpinBox()
+        self.manual_step_spin.setRange(0.001, POSITION_MAX_MM - POSITION_MIN_MM)
+        self.manual_step_spin.setDecimals(3)
+        self.manual_step_spin.setSingleStep(0.1)
+        self.manual_step_spin.setValue(1.0)
+        self.manual_step_spin.setSuffix(" mm")
+        self.manual_position_button = QPushButton("위치 읽기")
+        self.manual_home_button = QPushButton("원점")
+        self.manual_move_button = QPushButton("이동")
+        self.manual_stop_button = QPushButton("정지")
+        self.manual_x_minus_button = QPushButton("X-")
+        self.manual_x_plus_button = QPushButton("X+")
+        self.manual_y_minus_button = QPushButton("Y-")
+        self.manual_y_plus_button = QPushButton("Y+")
+        self.manual_stage_status_label = QLabel("대기 중")
+        self.manual_stage_status_label.setObjectName("manualStageStatus")
+        self.manual_stage_status_label.setWordWrap(True)
+
+        self.manual_x_edit.setToolTip("수동 절대 이동 목표 X 좌표입니다. X축 비활성 시 이동 명령에 사용되지 않습니다.")
+        self.manual_y_edit.setToolTip("수동 절대 이동 목표 Y 좌표입니다. Y축 비활성 시 이동 명령에 사용되지 않습니다.")
+        self.manual_velocity_edit.setToolTip("수동 이동 속도입니다. 비우면 촬영 설정의 이동속도, 그것도 비어 있으면 장비 기본 속도를 사용합니다.")
+        self.manual_step_spin.setToolTip("X+/X-/Y+/Y- 버튼으로 이동할 상대 거리입니다.")
+        _apply_button_icon(self.manual_position_button, QStyle.SP_BrowserReload, "현재 Zaber 위치 읽기")
+        _apply_button_icon(self.manual_home_button, QStyle.SP_DialogResetButton, "활성 축 원점 복귀")
+        _apply_button_icon(self.manual_move_button, QStyle.SP_ArrowForward, "입력한 X/Y 목표 좌표로 이동")
+        _apply_button_icon(self.manual_stop_button, QStyle.SP_MediaStop, "현재 수동 이동 정지 요청")
+        _apply_button_icon(self.manual_x_minus_button, QStyle.SP_ArrowLeft, "X축 음의 방향으로 jog 이동")
+        _apply_button_icon(self.manual_x_plus_button, QStyle.SP_ArrowRight, "X축 양의 방향으로 jog 이동")
+        _apply_button_icon(self.manual_y_minus_button, QStyle.SP_ArrowDown, "Y축 음의 방향으로 jog 이동")
+        _apply_button_icon(self.manual_y_plus_button, QStyle.SP_ArrowUp, "Y축 양의 방향으로 jog 이동")
+
+        layout.addWidget(QLabel("X mm"), 0, 0)
+        layout.addWidget(self.manual_x_edit, 0, 1)
+        layout.addWidget(QLabel("Y mm"), 0, 2)
+        layout.addWidget(self.manual_y_edit, 0, 3)
+        layout.addWidget(QLabel("속도"), 1, 0)
+        layout.addWidget(self.manual_velocity_edit, 1, 1)
+        layout.addWidget(QLabel("Jog"), 1, 2)
+        layout.addWidget(self.manual_step_spin, 1, 3)
+        layout.addWidget(self.manual_position_button, 2, 0)
+        layout.addWidget(self.manual_home_button, 2, 1)
+        layout.addWidget(self.manual_move_button, 2, 2)
+        layout.addWidget(self.manual_stop_button, 2, 3)
+        layout.addWidget(self.manual_x_minus_button, 3, 0)
+        layout.addWidget(self.manual_x_plus_button, 3, 1)
+        layout.addWidget(self.manual_y_minus_button, 3, 2)
+        layout.addWidget(self.manual_y_plus_button, 3, 3)
+        layout.addWidget(self.manual_stage_status_label, 4, 0, 1, 4)
+
+        self.manual_position_button.clicked.connect(self.read_manual_stage_position)
+        self.manual_home_button.clicked.connect(self.home_manual_stage)
+        self.manual_move_button.clicked.connect(self.move_manual_stage_absolute)
+        self.manual_stop_button.clicked.connect(self.stop_manual_stage)
+        self.manual_x_minus_button.clicked.connect(lambda: self.jog_manual_stage(-self.manual_step_spin.value(), 0.0))
+        self.manual_x_plus_button.clicked.connect(lambda: self.jog_manual_stage(self.manual_step_spin.value(), 0.0))
+        self.manual_y_minus_button.clicked.connect(lambda: self.jog_manual_stage(0.0, -self.manual_step_spin.value()))
+        self.manual_y_plus_button.clicked.connect(lambda: self.jog_manual_stage(0.0, self.manual_step_spin.value()))
         return group
 
     def _build_settings_group(self) -> QGroupBox:
@@ -819,6 +899,8 @@ class MainWindow(QMainWindow):
         self.fullscreen_button.clicked.connect(self.open_fullscreen_image)
         self.live_button = QPushButton("Live 보기")
         self.live_stop_button = QPushButton("Live 정지")
+        self.live_retry_button = QPushButton("Live 재연결")
+        self.live_scan_button = QPushButton("카메라 재검색")
         self.live_status_label = QLabel("Live 대기")
         self.live_status_label.setObjectName("liveStatus")
         self.live_size_label = QLabel("100%")
@@ -834,8 +916,12 @@ class MainWindow(QMainWindow):
         self.live_size_reset_button.setToolTip("Live 화면 크기를 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
+        _apply_button_icon(self.live_retry_button, QStyle.SP_BrowserReload, "현재 선택한 카메라로 Live preview를 다시 연결합니다.")
+        _apply_button_icon(self.live_scan_button, QStyle.SP_FileDialogContentsView, "Basler 카메라를 재검색한 뒤 Live preview를 다시 시도합니다.")
         self.live_button.clicked.connect(self.show_live_preview)
         self.live_stop_button.clicked.connect(lambda: self.stop_live_preview(wait_ms=1500))
+        self.live_retry_button.clicked.connect(self.restart_live_preview_from_button)
+        self.live_scan_button.clicked.connect(lambda: self.start_camera_scan("live_recover"))
         _apply_button_icon(self.live_size_reset_button, QStyle.SP_BrowserReload, "Live 화면 크기 100%")
         self.live_size_slider.valueChanged.connect(self.set_live_preview_scale)
         self.live_size_reset_button.clicked.connect(lambda: self.live_size_slider.setValue(100))
@@ -844,6 +930,8 @@ class MainWindow(QMainWindow):
         preview_info_row.addWidget(self.live_status_label)
         preview_info_row.addWidget(self.live_button)
         preview_info_row.addWidget(self.live_stop_button)
+        preview_info_row.addWidget(self.live_retry_button)
+        preview_info_row.addWidget(self.live_scan_button)
         preview_info_row.addWidget(self.fullscreen_button)
 
         live_size_row = QHBoxLayout()
@@ -911,7 +999,8 @@ class MainWindow(QMainWindow):
         self.preview_metrics_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self._set_preview_metric_values(["-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"])
 
-        tabs = QTabWidget()
+        self.preview_tabs = QTabWidget()
+        tabs = self.preview_tabs
         captures_tab = QWidget()
         captures_layout = QVBoxLayout(captures_tab)
         self.captures_table = QTableWidget(0, 13)
@@ -981,6 +1070,7 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(captures_tab, "촬영 목록")
         tabs.addTab(error_tab, "오차")
+        tabs.addTab(self._build_diagnostics_tab(), "진단")
         tabs.addTab(log_tab, "로그")
 
         layout.addWidget(self.preview_label, 3)
@@ -990,6 +1080,41 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.preview_metrics_table)
         layout.addWidget(tabs, 2)
         return panel
+
+    def _build_diagnostics_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        top_row = QHBoxLayout()
+        self.run_diagnostics_button = QPushButton("진단 실행")
+        self.diagnostics_refresh_button = QPushButton("장비 새로고침")
+        self.diagnostics_status_label = QLabel("진단 전")
+        self.diagnostics_status_label.setObjectName("manualStageStatus")
+        _apply_button_icon(self.run_diagnostics_button, QStyle.SP_MessageBoxInformation, "pylon, Basler, Zaber, 저장 폴더, 업데이트 접근성을 점검합니다.")
+        _apply_button_icon(self.diagnostics_refresh_button, QStyle.SP_BrowserReload, "카메라와 COM 포트 목록을 새로고침합니다.")
+        self.run_diagnostics_button.clicked.connect(self.run_diagnostics)
+        self.diagnostics_refresh_button.clicked.connect(self.refresh_devices)
+        top_row.addWidget(self.run_diagnostics_button)
+        top_row.addWidget(self.diagnostics_refresh_button)
+        top_row.addWidget(self.diagnostics_status_label, 1)
+
+        self.diagnostics_table = QTableWidget(0, 3)
+        self.diagnostics_table.setObjectName("diagnosticsTable")
+        self.diagnostics_table.setHorizontalHeaderLabels(["항목", "상태", "내용"])
+        self.diagnostics_table.verticalHeader().setVisible(False)
+        self.diagnostics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.diagnostics_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.diagnostics_table.setFocusPolicy(Qt.NoFocus)
+        self.diagnostics_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.diagnostics_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.diagnostics_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+
+        hint = QLabel("현장 PC에서 연결 문제를 재현할 때 먼저 실행할 점검입니다. 결과는 로그에도 남습니다.")
+        hint.setObjectName("previewInfo")
+        hint.setWordWrap(True)
+        layout.addLayout(top_row)
+        layout.addWidget(hint)
+        layout.addWidget(self.diagnostics_table, 1)
+        return tab
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -1085,13 +1210,13 @@ class MainWindow(QMainWindow):
             QLabel#cameraStatus[state="searching"] { color: #24568f; font-weight: 600; }
             QLabel#cameraStatus[state="success"] { color: #1f5f43; font-weight: 600; }
             QLabel#cameraStatus[state="failure"] { color: #7a2420; font-weight: 700; }
-            QLineEdit, QComboBox, QSpinBox, QTableWidget, QPlainTextEdit {
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTableWidget, QPlainTextEdit {
                 background: #ffffff;
                 border: 1px solid #cfd5dc;
                 border-radius: 4px;
                 padding: 4px;
             }
-            QLineEdit:disabled, QSpinBox:disabled {
+            QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
                 background: #eceff1;
                 color: #6f7983;
             }
@@ -1109,13 +1234,13 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
                 border: 1px solid #2a3036;
             }
-            QTableWidget#errorSummary, QTableWidget#previewMetrics, QTableWidget#stageSpecs, QTableWidget#preflightTable {
+            QTableWidget#errorSummary, QTableWidget#previewMetrics, QTableWidget#stageSpecs, QTableWidget#preflightTable, QTableWidget#diagnosticsTable {
                 background: #ffffff;
                 border: 1px solid #cfd5dc;
                 border-radius: 5px;
                 gridline-color: #d7dde3;
             }
-            QTableWidget#errorSummary::item, QTableWidget#previewMetrics::item, QTableWidget#stageSpecs::item, QTableWidget#preflightTable::item {
+            QTableWidget#errorSummary::item, QTableWidget#previewMetrics::item, QTableWidget#stageSpecs::item, QTableWidget#preflightTable::item, QTableWidget#diagnosticsTable::item {
                 padding: 6px;
                 font-weight: 600;
             }
@@ -1159,6 +1284,13 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
                 padding: 7px;
                 font-weight: 600;
+            }
+            QLabel#manualStageStatus {
+                background: #ffffff;
+                border: 1px solid #cfd5dc;
+                border-radius: 5px;
+                padding: 7px;
+                color: #4f5963;
             }
             QLabel#progressDetail {
                 color: #4f5963;
@@ -1405,6 +1537,15 @@ class MainWindow(QMainWindow):
         else:
             self.live_status_label.setText("Live 표시 중")
 
+    def restart_live_preview_from_button(self) -> None:
+        self.preview_mode = "live"
+        self.stop_live_preview(wait_ms=1500, update_label=False)
+        if self.camera_combo.count() <= 1:
+            self.live_status_label.setText("카메라 재검색 중")
+            self.start_camera_scan("live_recover")
+            return
+        self.start_live_preview()
+
     def start_live_preview(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             return
@@ -1454,6 +1595,8 @@ class MainWindow(QMainWindow):
     def on_live_failed(self, message: str) -> None:
         self.live_status_label.setText("Live 오류")
         self.preview_label.setText(f"Live preview 오류\n{message}")
+        if "pylon" in message.lower():
+            self.pylon_runtime_button.setVisible(True)
         self.log(f"Live preview 오류: {message}")
 
     def on_live_finished(self) -> None:
@@ -1549,6 +1692,57 @@ class MainWindow(QMainWindow):
     def on_update_download_finished(self) -> None:
         self.update_download_worker = None
         self.update_button.setEnabled(True)
+
+    def run_diagnostics(self) -> None:
+        if self.diagnostics_worker is not None and self.diagnostics_worker.isRunning():
+            return
+        try:
+            config = self.build_config([])
+        except Exception:
+            config = deepcopy(self.config)
+        output_root = self.output_root_edit.text() if hasattr(self, "output_root_edit") else "output/datasets"
+        self.diagnostics_table.setRowCount(0)
+        self.diagnostics_status_label.setText("진단 실행 중")
+        self.run_diagnostics_button.setEnabled(False)
+        self.diagnostics_worker = DiagnosticsWorker(config, output_root, __version__)
+        self.diagnostics_worker.diagnostics_done.connect(self.on_diagnostics_done)
+        self.diagnostics_worker.diagnostics_failed.connect(self.on_diagnostics_failed)
+        self.diagnostics_worker.finished.connect(self.on_diagnostics_finished)
+        self.diagnostics_worker.start()
+
+    def on_diagnostics_done(self, results: object) -> None:
+        result_list = list(results)
+        self.diagnostics_table.setRowCount(len(result_list))
+        for row, result in enumerate(result_list):
+            values = [result.item, result.status, result.detail]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if column == 1:
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setBackground(_preflight_status_color(str(value)))
+                self.diagnostics_table.setItem(row, column, item)
+        error_count = sum(1 for result in result_list if result.status == "오류")
+        warning_count = sum(1 for result in result_list if result.status == "경고")
+        self.diagnostics_status_label.setText(f"오류 {error_count} / 경고 {warning_count}")
+        for result in result_list:
+            self.log(f"진단 | {result.item}: {result.status} | {result.detail}")
+
+    def on_diagnostics_failed(self, message: str) -> None:
+        self.diagnostics_table.setRowCount(1)
+        for column, value in enumerate(["진단 실행", "오류", message]):
+            item = QTableWidgetItem(value)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            if column == 1:
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setBackground(_preflight_status_color("오류"))
+            self.diagnostics_table.setItem(0, column, item)
+        self.diagnostics_status_label.setText("진단 실패")
+        self.log(f"진단 실패: {message}")
+
+    def on_diagnostics_finished(self) -> None:
+        self.diagnostics_worker = None
+        self.run_diagnostics_button.setEnabled(True)
 
     def browse_output_root(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", self.output_root_edit.text())
@@ -1871,6 +2065,134 @@ class MainWindow(QMainWindow):
                     }
                 )
         self.log(f"위치 목록 저장됨: {path}")
+
+    def read_manual_stage_position(self) -> None:
+        self.start_manual_stage_action("position")
+
+    def home_manual_stage(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "원점 복귀",
+            "활성화된 Zaber 축을 원점 복귀할까요?",
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.start_manual_stage_action("home")
+
+    def move_manual_stage_absolute(self) -> None:
+        try:
+            x_mm, y_mm = self._manual_target_values()
+        except ValueError as exc:
+            QMessageBox.warning(self, "수동 이동 입력 오류", str(exc))
+            return
+        self.start_manual_stage_action("move", x_mm=x_mm, y_mm=y_mm)
+
+    def jog_manual_stage(self, dx_mm: float, dy_mm: float) -> None:
+        try:
+            x_mm, y_mm = self._manual_target_values()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Jog 입력 오류", str(exc))
+            return
+        if self.x_axis_enabled_check.isChecked():
+            x_mm += dx_mm
+        if self.y_axis_enabled_check.isChecked():
+            y_mm += dy_mm
+        self.manual_x_edit.setText(_number_text(x_mm))
+        self.manual_y_edit.setText(_number_text(y_mm))
+        self.start_manual_stage_action("move", x_mm=x_mm, y_mm=y_mm)
+
+    def stop_manual_stage(self) -> None:
+        if self.manual_stage_worker is not None and self.manual_stage_worker.isRunning():
+            self.manual_stage_worker.request_stop()
+            self.manual_stage_status_label.setText("정지 요청됨")
+            return
+        self.start_manual_stage_action("stop")
+
+    def start_manual_stage_action(
+        self,
+        action: str,
+        *,
+        x_mm: float | None = None,
+        y_mm: float | None = None,
+    ) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "수동 스테이지", "촬영 run 중에는 수동 스테이지 명령을 보낼 수 없습니다.")
+            return
+        if self.manual_stage_worker is not None and self.manual_stage_worker.isRunning():
+            self.manual_stage_status_label.setText("이전 수동 명령 정리 중")
+            return
+        try:
+            config = self.build_config([])
+            velocity = self._manual_velocity_value(config)
+        except Exception as exc:
+            QMessageBox.warning(self, "수동 스테이지 설정 오류", str(exc))
+            return
+        self.manual_stage_status_label.setText("명령 준비 중")
+        self._set_manual_stage_enabled(False)
+        self.manual_stop_button.setEnabled(True)
+        self.manual_stage_worker = ManualStageWorker(
+            config,
+            action,
+            x_mm=x_mm,
+            y_mm=y_mm,
+            velocity_mm_s=velocity,
+        )
+        self.manual_stage_worker.status_changed.connect(self.manual_stage_status_label.setText)
+        self.manual_stage_worker.position_done.connect(self.on_manual_stage_position)
+        self.manual_stage_worker.action_done.connect(self.on_manual_stage_done)
+        self.manual_stage_worker.action_failed.connect(self.on_manual_stage_failed)
+        self.manual_stage_worker.finished.connect(self.on_manual_stage_finished)
+        self.manual_stage_worker.start()
+
+    def on_manual_stage_position(self, position: object) -> None:
+        try:
+            x_mm, y_mm = position
+        except (TypeError, ValueError):
+            return
+        if x_mm is not None:
+            self.manual_x_edit.setText(_number_text(x_mm))
+        if y_mm is not None:
+            self.manual_y_edit.setText(_number_text(y_mm))
+
+    def on_manual_stage_done(self, message: str) -> None:
+        self.manual_stage_status_label.setText(message)
+        self.log(f"수동 스테이지: {message}")
+
+    def on_manual_stage_failed(self, message: str) -> None:
+        self.manual_stage_status_label.setText("수동 명령 실패")
+        self.log(f"수동 스테이지 오류: {message}")
+        QMessageBox.warning(self, "수동 스테이지 오류", message)
+
+    def on_manual_stage_finished(self) -> None:
+        self.manual_stage_worker = None
+        self._set_manual_stage_enabled(True)
+
+    def _set_manual_stage_enabled(self, enabled: bool) -> None:
+        for button in (
+            self.manual_position_button,
+            self.manual_home_button,
+            self.manual_move_button,
+            self.manual_stop_button,
+            self.manual_x_minus_button,
+            self.manual_x_plus_button,
+            self.manual_y_minus_button,
+            self.manual_y_plus_button,
+        ):
+            button.setEnabled(enabled)
+
+    def _manual_target_values(self) -> tuple[float, float]:
+        x_value = _optional_float_text(self.manual_x_edit.text())
+        y_value = _optional_float_text(self.manual_y_edit.text())
+        if self.x_axis_enabled_check.isChecked() and x_value is None:
+            raise ValueError("X축이 활성화되어 있으면 X mm 값을 입력해야 합니다.")
+        if self.y_axis_enabled_check.isChecked() and y_value is None:
+            raise ValueError("Y축이 활성화되어 있으면 Y mm 값을 입력해야 합니다.")
+        return float(x_value or 0.0), float(y_value or 0.0)
+
+    def _manual_velocity_value(self, config: dict[str, Any]) -> float | None:
+        velocity = _optional_float_text(self.manual_velocity_edit.text())
+        if velocity is not None:
+            return velocity
+        return _optional_float_text(self.velocity_edit.text()) or config.get("stage", {}).get("move_velocity_mm_s")
 
     def build_config(self, points: list[ScanPoint] | None = None) -> dict[str, Any]:
         config = deepcopy(self.config)
@@ -2216,6 +2538,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.refresh_button.setEnabled(False)
         self.camera_scan_button.setEnabled(False)
+        self._set_manual_stage_enabled(False)
+        self.manual_stop_button.setEnabled(False)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_status_label.setText("카메라 검색 종료 대기 중...")
             self.camera_scan_worker.wait(2000)
@@ -2292,6 +2616,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.refresh_button.setEnabled(True)
         self.camera_scan_button.setEnabled(True)
+        self._set_manual_stage_enabled(True)
         self.set_run_status("오류 발생")
         self.log(f"오류: {message}")
         QMessageBox.critical(self, "실행 실패", message)
@@ -2303,6 +2628,7 @@ class MainWindow(QMainWindow):
         self.refresh_button.setEnabled(True)
         self.worker = None
         self.camera_scan_button.setEnabled(True)
+        self._set_manual_stage_enabled(True)
         if run_dir:
             self.current_run_dir = Path(run_dir)
             self.open_dataset_button.setEnabled(True)

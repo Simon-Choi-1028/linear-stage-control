@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QSize
@@ -9,7 +12,7 @@ from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from linear_stage_control.camera import PYLON_IMPORT_ERROR, BaslerCamera, camera_settings_from_config
-from linear_stage_control.dataset import point_name
+from linear_stage_control.dataset import DatasetRun, DatasetSettings, base_capture_record, point_name
 from linear_stage_control.dataset_exports import (
     DEFAULT_METADATA_FORMATS,
     SUPPORTED_METADATA_FORMATS,
@@ -217,6 +220,21 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(window.live_size_label.text(), "100%")
         window.close()
 
+    def test_diagnostics_tab_and_manual_stage_controls_exist(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        app.processEvents()
+
+        tab_names = [window.preview_tabs.tabText(index) for index in range(window.preview_tabs.count())]
+        self.assertIn("진단", tab_names)
+        self.assertEqual(window.manual_stage_status_label.text(), "대기 중")
+        window.manual_x_edit.setText("1.5")
+        window.manual_y_edit.setText("-2.0")
+        self.assertEqual(window._manual_target_values(), (1.5, -2.0))
+        window.close()
+
     def test_preview_zoom_grid_and_cross_render_without_hardware(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
@@ -298,6 +316,58 @@ class DatasetNamingTests(unittest.TestCase):
             name,
             "sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap007",
         )
+
+    def test_dataset_manifest_includes_version_record_count_and_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            point = points_from_records([{"label": "sample a", "x_mm": "0.5", "y_mm": "-1.25"}])[0]
+            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+
+            with DatasetRun(settings, {"dataset": {}}, [point], "config.yaml") as dataset:
+                image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
+                image_path.write_bytes(b"fake image bytes")
+                record = base_capture_record(dataset.run_id, point)
+                record.update(
+                    {
+                        "status": "ok",
+                        "capture_index": 1,
+                        "capture_count": 1,
+                        "image_path": str(image_path.relative_to(dataset.run_dir)),
+                        "image_filename": image_path.name,
+                    }
+                )
+                dataset.write_capture(record)
+                run_dir = dataset.run_dir
+
+            manifest_path = run_dir / "dataset_manifest.json"
+            legacy_manifest_path = run_dir / "manifest.json"
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(legacy_manifest_path.exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["record_count"], 1)
+            self.assertIn("app_version", manifest)
+            image_entries = [entry for entry in manifest["files"] if entry["role"] == "image"]
+            self.assertEqual(len(image_entries), 1)
+            self.assertEqual(image_entries[0]["path"], f"images/{image_path.name}")
+            self.assertEqual(image_entries[0]["sha256"], sha256_file(image_path))
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_collect_diagnostics_runs_without_hardware_checks(self) -> None:
+        from linear_stage_control.diagnostics import collect_diagnostics
+
+        with tempfile.TemporaryDirectory() as directory:
+            results = collect_diagnostics(
+                {"stage": {"serial_port": "COM_TEST"}, "updates": {"enabled": False}},
+                output_root=directory,
+                check_camera=False,
+                check_updates=False,
+            )
+
+        items = {result.item for result in results}
+        self.assertIn("Basler pylon/Python", items)
+        self.assertIn("Zaber COM 포트", items)
+        self.assertIn("저장 폴더 권한", items)
 
 
 if __name__ == "__main__":

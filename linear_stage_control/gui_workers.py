@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, Signal
 
 from .camera import BaslerCamera, camera_settings_from_config, enumerate_cameras, iso_timestamp
 from .dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
+from .diagnostics import collect_diagnostics
 from .error_model import error_budget_from_config, estimate_position_error_um
 from .scan import (
     ScanPoint,
@@ -307,3 +308,91 @@ class UpdateDownloadWorker(QThread):
             self.download_done.emit(str(path))
         except Exception as exc:
             self.download_failed.emit(str(exc))
+
+
+class DiagnosticsWorker(QThread):
+    diagnostics_done = Signal(object)
+    diagnostics_failed = Signal(str)
+
+    def __init__(self, config: dict[str, Any], output_root: str, current_version: str):
+        super().__init__()
+        self.config = deepcopy(config)
+        self.output_root = output_root
+        self.current_version = current_version
+
+    def run(self) -> None:
+        try:
+            results = collect_diagnostics(
+                self.config,
+                output_root=self.output_root,
+                current_version=self.current_version,
+            )
+            self.diagnostics_done.emit(results)
+        except Exception as exc:
+            self.diagnostics_failed.emit(str(exc))
+
+
+class ManualStageWorker(QThread):
+    status_changed = Signal(str)
+    position_done = Signal(object)
+    action_done = Signal(str)
+    action_failed = Signal(str)
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        action: str,
+        *,
+        x_mm: float | None = None,
+        y_mm: float | None = None,
+        velocity_mm_s: float | None = None,
+    ):
+        super().__init__()
+        self.config = deepcopy(config)
+        self.action = action
+        self.x_mm = x_mm
+        self.y_mm = y_mm
+        self.velocity_mm_s = velocity_mm_s
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def run(self) -> None:
+        try:
+            settings = stage_settings_from_config(self.config)
+            with ZaberXYStage(settings) as stage:
+                if self.action == "position":
+                    self.status_changed.emit("현재 위치 읽는 중")
+                    self.position_done.emit(stage.position_mm())
+                    self.action_done.emit("현재 위치 확인 완료")
+                    return
+                if self.action == "home":
+                    self.status_changed.emit("원점 복귀 중")
+                    stage.home()
+                    self.position_done.emit(stage.position_mm())
+                    self.action_done.emit("원점 복귀 완료")
+                    return
+                if self.action == "stop":
+                    self.status_changed.emit("스테이지 정지 명령 전송")
+                    stage.stop(wait_until_idle=False)
+                    self.action_done.emit("정지 명령 전송 완료")
+                    return
+                if self.action == "move":
+                    if self.x_mm is None or self.y_mm is None:
+                        raise ValueError("Manual move requires X/Y targets.")
+                    self.status_changed.emit(
+                        f"수동 이동 중 | X={_mm_text(self.x_mm)}, Y={_mm_text(self.y_mm)}"
+                    )
+                    stage.move_absolute_mm(
+                        self.x_mm,
+                        self.y_mm,
+                        velocity_mm_s=self.velocity_mm_s,
+                        cancel_requested=lambda: self._stop_requested,
+                    )
+                    self.position_done.emit(stage.position_mm())
+                    self.action_done.emit("수동 이동 완료")
+                    return
+                raise ValueError(f"Unknown manual stage action: {self.action}")
+        except Exception as exc:
+            self.action_failed.emit(str(exc))

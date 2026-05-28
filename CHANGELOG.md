@@ -5,6 +5,7 @@
 - Added ms/s GUI input for stage settle time while keeping `stage.settle_s` as the canonical config value.
 - Expanded optional Basler GenICam camera parameters for gain, frame rate, ROI, gamma, black level, binning, and decimation.
 - Reworked live preview to use a continuous `GrabStrategy_LatestImageOnly` session instead of repeated single-frame grabs.
+- Added a 50-200% live preview size slider with one-click reset.
 - Added a 2D linear path minimap with distance, point count, and expected capture summary.
 - Changed image filenames to include label/point, X/Y position, timestamp, and capture index, and added `image_filename` metadata.
 

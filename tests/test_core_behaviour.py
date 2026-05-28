@@ -200,6 +200,23 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertFalse(window.preview_label.pixmap().isNull())
         window.close()
 
+    def test_live_preview_size_slider_changes_preview_height(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        base_height = window.preview_label.minimumHeight()
+        window.live_size_slider.setValue(150)
+        app.processEvents()
+
+        self.assertEqual(window.live_size_label.text(), "150%")
+        self.assertGreater(window.preview_label.minimumHeight(), base_height)
+
+        window.live_size_reset_button.click()
+        app.processEvents()
+        self.assertEqual(window.live_size_label.text(), "100%")
+        window.close()
+
     def test_linear_path_preview_widget_renders_without_hardware(self) -> None:
         from linear_stage_control.gui_widgets import LinearPathPreviewWidget
 

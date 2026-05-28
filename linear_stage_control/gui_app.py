@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QSlider,
     QSpinBox,
     QStyle,
     QTableWidget,
@@ -144,6 +145,7 @@ class MainWindow(QMainWindow):
         self._preferred_camera_serial = ""
         self._camera_user_touched = False
         self._layout_is_narrow: bool | None = None
+        self.preview_base_min_height = 360
         self._build_ui()
         self._apply_style()
         self._load_initial_config()
@@ -230,13 +232,31 @@ class MainWindow(QMainWindow):
         if is_narrow:
             self.main_splitter.setOrientation(Qt.Vertical)
             self.control_scroll.setMinimumWidth(0)
-            self.preview_label.setMinimumHeight(260)
+            self._set_preview_base_height(260)
             self.main_splitter.setSizes([380, 560])
         else:
             self.main_splitter.setOrientation(Qt.Horizontal)
             self.control_scroll.setMinimumWidth(420)
-            self.preview_label.setMinimumHeight(360)
+            self._set_preview_base_height(360)
             self.main_splitter.setSizes([470, max(650, self.width() - 470)])
+
+    def _set_preview_base_height(self, height: int) -> None:
+        self.preview_base_min_height = int(height)
+        self._apply_preview_height()
+
+    def set_live_preview_scale(self, value: int) -> None:
+        scale = int(value)
+        if hasattr(self, "live_size_label"):
+            self.live_size_label.setText(f"{scale}%")
+        self._apply_preview_height()
+
+    def _apply_preview_height(self) -> None:
+        if not hasattr(self, "preview_label"):
+            return
+        scale = self.live_size_slider.value() if hasattr(self, "live_size_slider") else 100
+        height = max(160, int(self.preview_base_min_height * scale / 100))
+        self.preview_label.setMinimumHeight(height)
+        self.preview_label.setMaximumHeight(height)
 
     def _build_control_panel(self) -> QWidget:
         panel = QWidget()
@@ -708,16 +728,37 @@ class MainWindow(QMainWindow):
         self.live_stop_button = QPushButton("Live 정지")
         self.live_status_label = QLabel("Live 대기")
         self.live_status_label.setObjectName("liveStatus")
+        self.live_size_label = QLabel("100%")
+        self.live_size_label.setMinimumWidth(42)
+        self.live_size_label.setAlignment(Qt.AlignCenter)
+        self.live_size_slider = QSlider(Qt.Horizontal)
+        self.live_size_slider.setRange(50, 200)
+        self.live_size_slider.setValue(100)
+        self.live_size_slider.setFixedWidth(140)
+        self.live_size_slider.setToolTip("Live 화면 크기 비율입니다. 기본값: 100%")
+        self.live_size_reset_button = QPushButton("100%")
+        self.live_size_reset_button.setMinimumWidth(58)
+        self.live_size_reset_button.setToolTip("Live 화면 크기를 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
         self.live_button.clicked.connect(self.show_live_preview)
         self.live_stop_button.clicked.connect(lambda: self.stop_live_preview(wait_ms=1500))
+        _apply_button_icon(self.live_size_reset_button, QStyle.SP_BrowserReload, "Live 화면 크기 100%")
+        self.live_size_slider.valueChanged.connect(self.set_live_preview_scale)
+        self.live_size_reset_button.clicked.connect(lambda: self.live_size_slider.setValue(100))
         preview_info_row = QHBoxLayout()
         preview_info_row.addWidget(self.preview_info_label, 1)
         preview_info_row.addWidget(self.live_status_label)
         preview_info_row.addWidget(self.live_button)
         preview_info_row.addWidget(self.live_stop_button)
         preview_info_row.addWidget(self.fullscreen_button)
+
+        live_size_row = QHBoxLayout()
+        live_size_row.addStretch(1)
+        live_size_row.addWidget(QLabel("Live 크기"))
+        live_size_row.addWidget(self.live_size_slider)
+        live_size_row.addWidget(self.live_size_label)
+        live_size_row.addWidget(self.live_size_reset_button)
 
         self.preview_metrics_table = QTableWidget(1, 11)
         self.preview_metrics_table.setObjectName("previewMetrics")
@@ -821,6 +862,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.preview_label, 3)
         layout.addLayout(preview_info_row)
+        layout.addLayout(live_size_row)
         layout.addWidget(self.preview_metrics_table)
         layout.addWidget(tabs, 2)
         return panel

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 
 
@@ -82,29 +82,37 @@ def preview_crop_rect(
 
 def draw_preview_overlays(pixmap: QPixmap, show_grid: bool, show_cross: bool) -> None:
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.Antialiasing, False)
     width = pixmap.width()
     height = pixmap.height()
+    x_positions: set[int] = set()
+    y_positions: set[int] = set()
     if show_grid:
-        shadow_pen = QPen(QColor(0, 0, 0, 120), 2)
-        line_pen = QPen(QColor(255, 255, 255, 185), 1)
-        for index in range(1, 4):
-            x = round(width * index / 4)
-            y = round(height * index / 4)
-            for pen in (shadow_pen, line_pen):
-                painter.setPen(pen)
-                painter.drawLine(x, 0, x, height)
-                painter.drawLine(0, y, width, y)
+        x_positions.update(_overlay_positions(width, divisions=4))
+        y_positions.update(_overlay_positions(height, divisions=4))
     if show_cross:
-        center_x = round(width / 2)
-        center_y = round(height / 2)
-        for pen in (QPen(QColor(0, 0, 0, 160), 3), QPen(QColor("#ff3b30"), 1)):
-            painter.setPen(pen)
-            painter.drawLine(center_x, 0, center_x, height)
-            painter.drawLine(0, center_y, width, center_y)
-        painter.setPen(QPen(QColor("#ff3b30"), 2))
-        painter.drawEllipse(QPointF(center_x, center_y), 5, 5)
+        x_positions.add(round(width / 2))
+        y_positions.add(round(height / 2))
+    pen = QPen(QColor(255, 255, 255, 190), 1, Qt.SolidLine)
+    pen.setCosmetic(True)
+    painter.setPen(pen)
+    for x in sorted(_clamped_positions(x_positions, width)):
+        painter.drawLine(x, 0, x, max(0, height - 1))
+    for y in sorted(_clamped_positions(y_positions, height)):
+        painter.drawLine(0, y, max(0, width - 1), y)
     painter.end()
+
+
+def _overlay_positions(length: int, divisions: int) -> set[int]:
+    if length <= 1 or divisions <= 1:
+        return set()
+    return {round(length * index / divisions) for index in range(1, divisions)}
+
+
+def _clamped_positions(positions: set[int], length: int) -> set[int]:
+    if length <= 0:
+        return set()
+    return {min(length - 1, max(0, position)) for position in positions}
 
 
 def _to_uint8(array: np.ndarray) -> np.ndarray:

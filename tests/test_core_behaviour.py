@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from linear_stage_control.camera import PYLON_IMPORT_ERROR, BaslerCamera, camera_settings_from_config
@@ -244,6 +244,29 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(window.preview_center_x, 0.0)
         self.assertLessEqual(window.preview_center_x, 1.0)
         window.close()
+
+    def test_preview_overlay_uses_thin_white_guides(self) -> None:
+        from linear_stage_control.preview_rendering import draw_preview_overlays
+
+        app = QApplication.instance() or QApplication([])
+        pixmap = QPixmap(80, 80)
+        pixmap.fill(QColor("#000000"))
+
+        draw_preview_overlays(pixmap, show_grid=True, show_cross=True)
+        app.processEvents()
+
+        image = pixmap.toImage()
+        for position in (20, 40, 60):
+            vertical = image.pixelColor(position, 8)
+            horizontal = image.pixelColor(8, position)
+            self.assertGreater(vertical.red(), 100)
+            self.assertGreater(horizontal.red(), 100)
+            self.assertLess(abs(vertical.red() - vertical.green()), 3)
+            self.assertLess(abs(horizontal.red() - horizontal.green()), 3)
+
+        center = image.pixelColor(40, 40)
+        self.assertLess(abs(center.red() - center.green()), 3)
+        self.assertLess(abs(center.red() - center.blue()), 3)
 
     def test_linear_path_preview_widget_renders_without_hardware(self) -> None:
         from linear_stage_control.gui_widgets import LinearPathPreviewWidget

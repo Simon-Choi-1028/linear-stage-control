@@ -58,27 +58,50 @@ function Remove-DistPylonRuntimePayload {
   Write-Host "Removed offline pylon Runtime payload from dist after offline installer build."
 }
 
-function Invoke-WindowsBuild {
+function Assert-DistPylonRuntimePayload {
+  param(
+    [switch]$ShouldExist
+  )
+
+  $payload = Join-Path $Root "dist\LinearStageControl\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"
+  $exists = Test-Path -LiteralPath $payload
+  if ($ShouldExist -and -not $exists) {
+    throw "Offline build did not include the Basler pylon Runtime payload: $payload"
+  }
+  if (-not $ShouldExist -and $exists) {
+    throw "Slim online build unexpectedly includes the Basler pylon Runtime payload: $payload"
+  }
+}
+
+function Invoke-WindowsPackageBuild {
   param(
     [switch]$IncludePylonRuntime,
     [switch]$ForceSkipSmoke
   )
 
-  $buildArgs = @()
+  $buildArgs = @{}
   if ($IncludePylonRuntime) {
-    $buildArgs += "-IncludePylonRuntime"
+    $buildArgs.IncludePylonRuntime = $true
   }
   if ($SkipSmoke -or $ForceSkipSmoke) {
-    $buildArgs += "-SkipSmoke"
+    $buildArgs.SkipSmoke = $true
   }
   if ($SkipZaberSdkDownload) {
-    $buildArgs += "-SkipZaberSdkDownload"
+    $buildArgs.SkipZaberSdkDownload = $true
   }
 
   & (Join-Path $PSScriptRoot "build_windows.ps1") @buildArgs
-  $installerArgs = @()
+  Assert-DistPylonRuntimePayload -ShouldExist:$IncludePylonRuntime
+}
+
+function Invoke-InstallerBuild {
+  param(
+    [switch]$IncludePylonRuntime
+  )
+
+  $installerArgs = @{}
   if ($IncludePylonRuntime) {
-    $installerArgs += "-IncludePylonRuntime"
+    $installerArgs.IncludePylonRuntime = $true
   }
   & (Join-Path $PSScriptRoot "build_installer.ps1") @installerArgs
 }
@@ -86,7 +109,8 @@ function Invoke-WindowsBuild {
 $version = Get-ProjectVersion
 
 Write-Host "Building online installer for v$version"
-Invoke-WindowsBuild
+Invoke-WindowsPackageBuild
+Invoke-InstallerBuild
 Copy-Item -LiteralPath $OnlineSetup -Destination $OnlineNamedSetup -Force
 $onlineInfo = Get-InstallerInfo `
   -Path $OnlineSetup `
@@ -103,7 +127,8 @@ if (-not $SkipOffline) {
 
   Write-Host "Building offline installer for v$version"
   Write-Host "Offline build reuses the online smoke result because only the pylon Runtime installer payload changes."
-  Invoke-WindowsBuild -IncludePylonRuntime -ForceSkipSmoke
+  Invoke-WindowsPackageBuild -IncludePylonRuntime -ForceSkipSmoke
+  Invoke-InstallerBuild -IncludePylonRuntime
   Copy-Item -LiteralPath $OnlineSetup -Destination $OfflineSetup -Force
   $offlineInfo = Get-InstallerInfo `
     -Path $OfflineSetup `
@@ -112,6 +137,7 @@ if (-not $SkipOffline) {
     -Description "Offline installer with the Basler pylon Runtime installer bundled."
 
   Remove-DistPylonRuntimePayload
+  Assert-DistPylonRuntimePayload
   Copy-Item -LiteralPath $OnlineNamedSetup -Destination $OnlineSetup -Force
 }
 

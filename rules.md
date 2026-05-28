@@ -4,13 +4,14 @@
 - Zaber 이동은 acquisition worker가 소유한 단일 serial connection 안에서만 실행한다. 이동은 `wait_until_idle=False`로 시작하고 `is_busy()` polling 중 stop 플래그를 감지하면 같은 connection에서 `axis.stop(wait_until_idle=False)`를 호출한다.
 - X/Y 축은 각각 활성화/비활성화할 수 있다. 비활성 축에는 resolve/home/move/position 명령을 보내지 않고, 비활성 축 좌표가 run 안에서 여러 값이면 preflight 오류로 차단한다.
 - Basler ace 2 LAN/GigE 카메라는 기본적으로 software trigger 모드를 사용한다. `TriggerSelector=FrameStart`, `TriggerSource=Software`, `ExecuteSoftwareTrigger()` 흐름으로 캡처 시점을 명확히 남긴다.
+- Basler live preview는 capture용 single grab과 분리해 `TriggerMode Off` continuous grabbing 세션으로 운용한다. Live worker는 `GrabStrategy_LatestImageOnly`를 우선 사용하고, 촬영 run 시작 전에는 live 세션을 정지해 카메라 점유 충돌을 막는다.
 - 원본 보존은 변환 없는 `grab_result.GetArray().copy()`를 기준으로 한다. 저장 기본값은 lossless TIFF이며, 완전한 numpy 배열 재현이 필요할 때만 `dataset.save_numpy: true`를 켠다.
 - 데이터셋은 run 단위 timestamp 디렉터리로 격리한다. 각 run에는 `manifest.json`, `config.yaml` 스냅샷, `captures.csv`, 선택적 `captures.jsonl`, `images/`를 둔다.
 - 각 캡처 레코드에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡처 순번, 이동/settle/capture timestamp, 카메라 timestamp, 이미지 경로를 모두 기록한다.
 - 위치 입력은 `scan.positions` 또는 `scan.positions_file`을 우선한다. `scan.linear_path`는 명시적으로 설정된 선형 연속 경로 fallback이고, grid scan은 테스트나 균일 스캔이 필요할 때의 최종 fallback으로만 둔다. 파일 입력은 CSV, TSV, TXT, JSON, JSONL, YAML, XLSX를 지원하고, `label/name/id`, `x/x_mm/X mm/target_x_mm`, `y/y_mm/Y mm/target_y_mm`, `velocity/move_velocity_mm_s/speed_mm_s`, `capture_count/captures/frames`처럼 흔한 컬럼명 변형을 허용한다.
 - GUI 위치 입력은 Zaber 210 mm 이동 범위 기준 `0-210 mm`를 즉시 검사한다. 범위를 벗어난 좌표는 오류로 표시하고 촬영 run 시작을 막는다. 위치별 이동속도는 비워 두거나 0보다 커야 하며, 위치별 캡쳐 수는 비워 두거나 1 이상 정수여야 한다. 중복 좌표, 빈 라벨, 매우 큰 위치 목록은 경고로 표시한다.
 - 위치 파일 파싱 오류는 행 번호와 원인을 함께 제시한다. 빈 파일, X/Y 컬럼 누락, 숫자 변환 실패, 지원하지 않는 확장자는 장비 동작 전에 차단한다.
-- 파일명에는 index, timestamp, X/Y 위치, label을 넣되 label은 파일명 안전 문자로 정규화한다.
+- 파일명에는 label 또는 point id, X/Y 위치, timestamp, capture index를 넣되 label은 파일명 안전 문자로 정규화한다. 기본 형식은 `{label_or_point}_x{X}mm_y{Y}mm_{timestamp}_cap{capture_index:03d}`로 유지한다.
 - GUI는 장비 제어 루프를 Qt worker thread에서 실행한다. 메인 UI thread는 위치 편집, 진행률, 로그, 이미지 미리보기만 담당한다.
 - GUI의 Basler LAN/GigE 카메라 자동 검색은 사용자가 `자동검색`을 누를 때 짧은 Qt worker thread로 단발 실행한다. 주기 타이머로 반복 검색하지 않고, `탐색중/성공/실패` 상태 배지를 색상으로 구분해 pypylon 장치 열기/트리거 흐름과 충돌할 가능성을 줄인다.
 - GUI 화면 문구는 한국어를 기본으로 한다. 촬영 중에는 연결, 원점 복귀, 이동, 안정화, 촬영, 저장 단계를 별도 상태 라벨에 표시해 사용자가 현재 진행 위치를 알 수 있게 한다.

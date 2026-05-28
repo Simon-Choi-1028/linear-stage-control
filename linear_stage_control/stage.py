@@ -45,13 +45,21 @@ def stage_settings_from_config(config: dict[str, Any]) -> StageSettings:
         baud_rate=int(stage.get("baud_rate", 115200)),
         identify_devices=bool(stage.get("identify_devices", True)),
         home_on_start=bool(stage.get("home_on_start", True)),
-        settle_s=float(stage.get("settle_s", 0.2)),
+        settle_s=_settle_seconds(stage),
         move_velocity_mm_s=_optional_float(stage.get("move_velocity_mm_s")),
         device_db_path=_optional_str(stage.get("device_db_path")),
         use_bundled_device_db=bool(stage.get("use_bundled_device_db", True)),
         x=_axis_address(axes, "x", default_device_index=0),
         y=_axis_address(axes, "y", default_device_index=0, default_axis_number=2),
     )
+
+
+def _settle_seconds(stage: dict[str, Any]) -> float:
+    if stage.get("settle_s") not in (None, ""):
+        return float(stage.get("settle_s", 0.2))
+    if stage.get("settle_ms") not in (None, ""):
+        return float(stage["settle_ms"]) / 1000.0
+    return 0.2
 
 
 def list_serial_ports() -> list[dict[str, str]]:

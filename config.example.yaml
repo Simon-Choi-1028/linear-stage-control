@@ -13,6 +13,18 @@ camera:
   pixel_format_candidates: [Mono8, Mono10, Mono12, Mono16, BayerRG8, BayerGB8, BayerGR8, BayerBG8, RGB8, BGR8]
   exposure_us: 5000
   gain: 0
+  # Optional GenICam parameters. Leave blank to keep the camera's current value.
+  acquisition_frame_rate:
+  width:
+  height:
+  offset_x:
+  offset_y:
+  gamma:
+  black_level:
+  binning_x:
+  binning_y:
+  decimation_x:
+  decimation_y:
   # true = configure FrameStart software trigger and call ExecuteSoftwareTrigger.
   # false = grab one frame with TriggerMode Off.
   use_software_trigger: true
@@ -31,7 +43,9 @@ stage:
   baud_rate: 115200
   identify_devices: true
   home_on_start: true
+  # settle_s is the saved canonical value. settle_ms is accepted only as an input alias.
   settle_s: 0.2
+  # settle_ms: 200
   move_velocity_mm_s:
   # Uses the official Zaber Device Database bundle when present.
   use_bundled_device_db: true

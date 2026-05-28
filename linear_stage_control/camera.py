@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
@@ -54,6 +54,17 @@ class CameraSettings:
     pixel_format_candidates: tuple[str, ...] = DEFAULT_PIXEL_FORMAT_CANDIDATES
     exposure_us: float | None = None
     gain: float | None = None
+    acquisition_frame_rate: float | None = None
+    width: int | None = None
+    height: int | None = None
+    offset_x: int | None = None
+    offset_y: int | None = None
+    gamma: float | None = None
+    black_level: float | None = None
+    binning_x: int | None = None
+    binning_y: int | None = None
+    decimation_x: int | None = None
+    decimation_y: int | None = None
     trigger_mode: str | None = "Off"
     trigger_selector: str = "FrameStart"
     trigger_source: str = "Software"
@@ -74,8 +85,19 @@ def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
             camera.get("pixel_format_candidates"),
             DEFAULT_PIXEL_FORMAT_CANDIDATES,
         ),
-        exposure_us=camera.get("exposure_us"),
-        gain=camera.get("gain"),
+        exposure_us=_optional_float(camera.get("exposure_us")),
+        gain=_optional_float(camera.get("gain")),
+        acquisition_frame_rate=_optional_float(camera.get("acquisition_frame_rate")),
+        width=_optional_int(camera.get("width")),
+        height=_optional_int(camera.get("height")),
+        offset_x=_optional_int(camera.get("offset_x")),
+        offset_y=_optional_int(camera.get("offset_y")),
+        gamma=_optional_float(camera.get("gamma")),
+        black_level=_optional_float(camera.get("black_level")),
+        binning_x=_optional_int(camera.get("binning_x")),
+        binning_y=_optional_int(camera.get("binning_y")),
+        decimation_x=_optional_int(camera.get("decimation_x")),
+        decimation_y=_optional_int(camera.get("decimation_y")),
         trigger_mode=none_if_blank(camera.get("trigger_mode", "Off")),
         trigger_selector=str(camera.get("trigger_selector", "FrameStart")),
         trigger_source=str(camera.get("trigger_source", "Software")),
@@ -250,18 +272,50 @@ class BaslerCamera:
                         f"{grab_result.ErrorDescription}"
                     )
                 array = grab_result.GetArray().copy()
-                metadata = {
-                    "captured_at": captured_at,
-                    "completed_at": completed_at,
-                    "pixel_type": _grab_value(grab_result, "PixelType"),
-                    "width": _grab_int(grab_result, "Width"),
-                    "height": _grab_int(grab_result, "Height"),
-                    "camera_timestamp_ns": _grab_int(grab_result, "TimeStamp"),
-                    "block_id": _grab_int(grab_result, "BlockID"),
-                }
+                metadata = _grab_metadata(grab_result, captured_at, completed_at)
                 return array, metadata
             finally:
                 grab_result.Release()
+        finally:
+            if self.camera is not None and self.camera.IsGrabbing():
+                self.camera.StopGrabbing()
+
+    def live_original_arrays(
+        self,
+        timeout_ms: int | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> Any:
+        if self.camera is None:
+            raise RuntimeError("Camera is not open.")
+
+        timeout = timeout_ms or self.settings.timeout_ms
+        strategy = getattr(pylon, "GrabStrategy_LatestImageOnly", None)
+        if strategy is None:
+            self.camera.StartGrabbing()
+        else:
+            self.camera.StartGrabbing(strategy)
+        try:
+            while self.camera.IsGrabbing():
+                if stop_requested is not None and stop_requested():
+                    break
+                captured_at = iso_timestamp()
+                grab_result = self.camera.RetrieveResult(
+                    timeout, pylon.TimeoutHandling_ThrowException
+                )
+                completed_at = iso_timestamp()
+                try:
+                    if not grab_result.GrabSucceeded():
+                        raise RuntimeError(
+                            f"Live grab failed: {grab_result.ErrorCode} "
+                            f"{grab_result.ErrorDescription}"
+                        )
+                    yield grab_result.GetArray().copy(), _grab_metadata(
+                        grab_result,
+                        captured_at,
+                        completed_at,
+                    )
+                finally:
+                    grab_result.Release()
         finally:
             if self.camera is not None and self.camera.IsGrabbing():
                 self.camera.StopGrabbing()
@@ -336,6 +390,35 @@ class BaslerCamera:
                 float(self.settings.gain),
                 label="Gain",
             )
+        self._apply_optional_camera_parameters()
+
+    def _apply_optional_camera_parameters(self) -> None:
+        if self.settings.acquisition_frame_rate is not None:
+            self._set_first_available_feature(
+                ("AcquisitionFrameRateEnable",),
+                True,
+                warn_if_missing=False,
+            )
+            self._set_first_available_feature(
+                ("AcquisitionFrameRate", "AcquisitionFrameRateAbs"),
+                float(self.settings.acquisition_frame_rate),
+                label="AcquisitionFrameRate",
+            )
+        for feature_names, value, label in (
+            (("Width",), self.settings.width, "Width"),
+            (("Height",), self.settings.height, "Height"),
+            (("OffsetX",), self.settings.offset_x, "OffsetX"),
+            (("OffsetY",), self.settings.offset_y, "OffsetY"),
+            (("Gamma",), self.settings.gamma, "Gamma"),
+            (("BlackLevel", "BlackLevelRaw"), self.settings.black_level, "BlackLevel"),
+            (("BinningHorizontal", "BinningX"), self.settings.binning_x, "BinningX"),
+            (("BinningVertical", "BinningY"), self.settings.binning_y, "BinningY"),
+            (("DecimationHorizontal", "DecimationX"), self.settings.decimation_x, "DecimationX"),
+            (("DecimationVertical", "DecimationY"), self.settings.decimation_y, "DecimationY"),
+        ):
+            if value is None:
+                continue
+            self._set_first_available_feature(feature_names, value, label=label)
 
     def _apply_pixel_format(self) -> None:
         if self.camera is None:
@@ -480,6 +563,23 @@ def _dedupe_strings(values: list[Any]) -> list[str]:
     return result
 
 
+def _optional_float(value: Any) -> float | None:
+    text = none_if_blank(value)
+    if text is None:
+        return None
+    return float(text)
+
+
+def _optional_int(value: Any) -> int | None:
+    text = none_if_blank(value)
+    if text is None:
+        return None
+    number = float(text)
+    if not number.is_integer():
+        raise ValueError(f"Expected an integer camera parameter, got {value!r}.")
+    return int(number)
+
+
 def _normalise_pixel_format_name(value: Any) -> str:
     return str(value or "").strip().replace(" ", "")
 
@@ -531,3 +631,15 @@ def _grab_int(grab_result: Any, name: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _grab_metadata(grab_result: Any, captured_at: str, completed_at: str) -> dict[str, Any]:
+    return {
+        "captured_at": captured_at,
+        "completed_at": completed_at,
+        "pixel_type": _grab_value(grab_result, "PixelType"),
+        "width": _grab_int(grab_result, "Width"),
+        "height": _grab_int(grab_result, "Height"),
+        "camera_timestamp_ns": _grab_int(grab_result, "TimeStamp"),
+        "block_id": _grab_int(grab_result, "BlockID"),
+    }

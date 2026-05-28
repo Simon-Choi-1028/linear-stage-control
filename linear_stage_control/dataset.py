@@ -144,14 +144,14 @@ class DatasetRun:
             self._write_post_run_exports(status=status)
             self._write_manifest(status=status)
 
-    def image_path(self, point: ScanPoint, timestamp: str) -> Path:
+    def image_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path:
         suffix = self.settings.image_format
-        return self.images_dir / f"{point_name(point, timestamp)}.{suffix}"
+        return self.images_dir / f"{point_name(point, timestamp, capture_index)}.{suffix}"
 
-    def npy_path(self, point: ScanPoint, timestamp: str) -> Path | None:
+    def npy_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path | None:
         if not self.settings.save_numpy:
             return None
-        return self.arrays_dir / f"{point_name(point, timestamp)}.npy"
+        return self.arrays_dir / f"{point_name(point, timestamp, capture_index)}.npy"
 
     def write_capture(self, record: dict[str, Any]) -> None:
         clean_record = json_ready(record)
@@ -255,6 +255,7 @@ CAPTURE_FIELDS = [
     "camera_timestamp_ns",
     "block_id",
     "image_path",
+    "image_filename",
     "npy_path",
     "image_dtype",
     "image_shape",
@@ -301,6 +302,7 @@ def base_capture_record(run_id: str, point: ScanPoint) -> dict[str, Any]:
         "camera_timestamp_ns": "",
         "block_id": "",
         "image_path": "",
+        "image_filename": "",
         "npy_path": "",
         "image_dtype": "",
         "image_shape": "",
@@ -314,15 +316,21 @@ def safe_timestamp(value: datetime | None = None) -> str:
     return dt.strftime("%Y%m%dT%H%M%S_%f%z")
 
 
-def point_name(point: ScanPoint, timestamp: str) -> str:
-    label = sanitize_label(point.label)
-    label_part = f"_{label}" if label else ""
-    return f"{point.index:06d}_{timestamp}_x{point.x_mm:.6f}_y{point.y_mm:.6f}{label_part}"
+def point_name(point: ScanPoint, timestamp: str, capture_index: int = 1) -> str:
+    label = sanitize_label(point.label) or f"point{point.index:04d}"
+    return (
+        f"{label}_x{_filename_mm(point.x_mm)}mm_y{_filename_mm(point.y_mm)}mm_"
+        f"{timestamp}_cap{capture_index:03d}"
+    )
 
 
 def sanitize_label(label: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", label.strip())
     return normalized.strip("._")[:80]
+
+
+def _filename_mm(value: float) -> str:
+    return f"{float(value):.3f}"
 
 
 def _csv_value(value: Any) -> str:

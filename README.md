@@ -40,7 +40,8 @@
 | 오프라인 설치본 | [LinearStageControlSetup-Offline.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup-Offline.exe) | 현장 PC가 인터넷 접근이 어렵거나 pylon Runtime을 미리 묶어야 할 때 | 온라인 설치본 + Basler pylon Runtime installer |
 | 검증 manifest | [update_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/update_manifest.json) | 자동 업데이트 SHA256 검증 | 설치 파일 hash, 크기, 채널 정보 |
 
-- Current release: `v0.1.3`
+- Current public release: `v0.1.3`
+- Development version: `v0.1.4`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -97,13 +98,15 @@ GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접
 
 창 폭이 좁아지면 좌우 분할 레이아웃이 위아래 배치로 자동 전환되며, 왼쪽 제어 영역은 스크롤 가능합니다. 이미지 미리보기는 `전체화면 보기` 버튼 또는 이미지 더블클릭으로 확대 창을 열 수 있고, 확대 창에서는 화면 맞춤, 100%, 확대, 축소를 사용할 수 있습니다.
 
-노출, 안정화, 이동속도, 기본 캡쳐 수는 키보드로 직접 입력할 수 있는 값 입력칸을 유지하면서, 오른쪽에 빠른 증감 버튼을 둔 가로형 조정 UI를 사용합니다. 노출은 `-1000 -100 -10 +10 +100 +1000`, 안정화와 이동속도는 `-100 -10 -5 +5 +10 +100`, 기본 캡쳐 수는 `-100 -10 -1 +1 +10 +100` 단위로 조정할 수 있습니다.
+노출, 안정화, 이동속도, 기본 캡쳐 수는 키보드로 직접 입력할 수 있는 값 입력칸을 유지하면서, 오른쪽에 빠른 증감 버튼을 둔 가로형 조정 UI를 사용합니다. 안정화 시간은 GUI에서 `ms` 또는 `s` 단위로 입력할 수 있고, config에는 기존 호환을 위해 `stage.settle_s` 초 단위로 저장합니다. 노출은 `-1000 -100 -10 +10 +100 +1000`, 안정화와 이동속도는 `-100 -10 -5 +5 +10 +100`, 기본 캡쳐 수는 `-100 -10 -1 +1 +10 +100` 단위로 조정할 수 있습니다.
+
+`카메라 파라미터` 영역에서는 노출 외에 Gain, FrameRate, Width/Height, Offset X/Y, Gamma, Black Level, Binning X/Y, Decimation X/Y를 선택 입력할 수 있습니다. 빈 항목은 카메라 현재값을 유지하고, 연결된 Basler 모델이 지원하지 않는 GenICam 항목은 촬영 로그와 preflight 경고로 남깁니다.
 
 주요 조작 버튼과 값 입력칸에는 툴팁을 붙여 파일 열기/저장, 장비 새로고침, CSV import/export, 실행/중지, 전체화면 확대, 각 파라미터의 의미와 기본값을 빠르게 확인할 수 있게 했습니다.
 
 `장비` 영역의 `자동검색` 버튼을 누르면 LAN/GigE Basler 카메라를 한 번 검색합니다. 검색 상태는 별도 배지로 `탐색중`, `성공`, `실패`가 표시되고 상태별 색상으로 구분됩니다. `a2A2464-115g5mBAS`처럼 LAN/GigE 포트에 연결되는 카메라가 감지되면 `카메라` 드롭다운에 모델명, serial, IP, device class가 추가되어 선택할 수 있습니다. GUI가 주기적으로 카메라 검색을 반복하지 않으므로 촬영 중 pypylon 장치 열기와 충돌할 가능성을 줄입니다.
 
-v0.1.1부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 10 FPS Live preview가 자동으로 시작됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
 
 Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
 
@@ -176,7 +179,7 @@ scan:
   positions_file: positions.example.csv
 ```
 
-GUI의 `선형 경로` 버튼은 시작 X/Y, 끝 X/Y를 받아 직선 보간 위치 목록을 생성합니다. 생성 기준은 `간격 mm/캡쳐` 또는 `위치 수` 중 선택할 수 있습니다. 간격 기준은 경로를 따라 지정한 mm마다 한 위치를 만들고 끝점은 항상 포함합니다. 생성된 행에도 위치별 이동속도와 캡쳐 수를 넣을 수 있고, 비워 두면 기본 촬영 설정을 따릅니다.
+GUI의 `선형 경로` 버튼은 시작 X/Y, 끝 X/Y를 받아 직선 보간 위치 목록을 생성합니다. 생성 기준은 `간격 mm/캡쳐` 또는 `위치 수` 중 선택할 수 있습니다. 간격 기준은 경로를 따라 지정한 mm마다 한 위치를 만들고 끝점은 항상 포함합니다. 모달 안의 2D 미니맵은 생성될 점, 진행 방향, 총 거리, 위치 수, 예상 캡쳐 수를 입력 변경 즉시 보여줍니다. 생성된 행에도 위치별 이동속도와 캡쳐 수를 넣을 수 있고, 비워 두면 기본 촬영 설정을 따릅니다.
 
 `positions`와 `positions_file`이 모두 비어 있고 `scan.linear_path`가 설정되어 있으면 선형 경로가 생성됩니다. `scan.linear_path.spacing_mm`이 있으면 간격 기준을 사용하고, 없으면 `count` 기준을 사용합니다. 세 항목이 모두 비어 있으면 기존 grid 설정이 fallback으로 사용됩니다.
 
@@ -203,7 +206,7 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
     000000_..._x0.000000_y0.000000_origin.tiff
 ```
 
-`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 경로가 기록됩니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다.
+`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 이미지 파일명은 기본적으로 `{label_or_point}_x{X}mm_y{Y}mm_{timestamp}_cap{capture_index:03d}.tiff` 형태라 파일명만 봐도 촬영 위치와 시간을 확인할 수 있습니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다.
 
 ## 원본 이미지
 

@@ -4,9 +4,12 @@ import os
 import unittest
 
 import numpy as np
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 from linear_stage_control.camera import PYLON_IMPORT_ERROR, BaslerCamera, camera_settings_from_config
+from linear_stage_control.dataset import point_name
 from linear_stage_control.dataset_exports import (
     DEFAULT_METADATA_FORMATS,
     SUPPORTED_METADATA_FORMATS,
@@ -77,6 +80,39 @@ class CameraCompatibilityTests(unittest.TestCase):
         self.assertEqual(settings.pixel_format, "Auto")
         self.assertEqual(settings.pixel_format_candidates, ("Mono8", "Mono16", "BayerRG8"))
 
+    def test_camera_settings_parse_extended_optional_parameters(self) -> None:
+        settings = camera_settings_from_config(
+            {
+                "camera": {
+                    "gain": "1.5",
+                    "acquisition_frame_rate": "10",
+                    "width": "640",
+                    "height": "480",
+                    "offset_x": "16",
+                    "offset_y": "8",
+                    "gamma": "0.8",
+                    "black_level": "2",
+                    "binning_x": "2",
+                    "binning_y": "2",
+                    "decimation_x": "",
+                    "decimation_y": None,
+                }
+            }
+        )
+
+        self.assertEqual(settings.gain, 1.5)
+        self.assertEqual(settings.acquisition_frame_rate, 10)
+        self.assertEqual(settings.width, 640)
+        self.assertEqual(settings.height, 480)
+        self.assertEqual(settings.offset_x, 16)
+        self.assertEqual(settings.offset_y, 8)
+        self.assertEqual(settings.gamma, 0.8)
+        self.assertEqual(settings.black_level, 2)
+        self.assertEqual(settings.binning_x, 2)
+        self.assertEqual(settings.binning_y, 2)
+        self.assertIsNone(settings.decimation_x)
+        self.assertIsNone(settings.decimation_y)
+
     def test_output_pixel_format_aliases_resolve_to_pylon_pixel_types(self) -> None:
         if PYLON_IMPORT_ERROR is not None:
             self.skipTest(f"pylon Runtime not available: {PYLON_IMPORT_ERROR}")
@@ -104,6 +140,11 @@ class StageAxisSettingsTests(unittest.TestCase):
         self.assertFalse(settings.y.enabled)
         self.assertEqual((settings.x.device_index, settings.x.axis_number), (0, 1))
         self.assertEqual((settings.y.device_index, settings.y.axis_number), (0, 2))
+
+    def test_stage_settle_ms_alias_is_used_when_settle_s_is_blank(self) -> None:
+        settings = stage_settings_from_config({"stage": {"settle_s": "", "settle_ms": 250}})
+
+        self.assertEqual(settings.settle_s, 0.25)
 
     def test_disabled_axis_must_remain_constant(self) -> None:
         points = points_from_records(
@@ -158,6 +199,37 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertFalse(window.preview_label.pixmap().isNull())
         window.close()
+
+    def test_linear_path_preview_widget_renders_without_hardware(self) -> None:
+        from linear_stage_control.gui_widgets import LinearPathPreviewWidget
+
+        app = QApplication.instance() or QApplication([])
+        widget = LinearPathPreviewWidget()
+        widget.resize(QSize(360, 220))
+        widget.set_path([(0, 0), (0.5, 0.25), (1.0, 0.5)], "총 거리 1.118 mm | 위치 3개")
+        pixmap = QPixmap(widget.size())
+        widget.render(pixmap)
+        app.processEvents()
+
+        image = pixmap.toImage()
+        colors = {
+            image.pixelColor(x, y).name()
+            for x in range(0, image.width(), 40)
+            for y in range(0, image.height(), 40)
+        }
+        self.assertGreater(len(colors), 1)
+
+
+class DatasetNamingTests(unittest.TestCase):
+    def test_point_name_includes_label_position_timestamp_and_capture_index(self) -> None:
+        point = points_from_records([{"label": "sample a", "x_mm": "0.5", "y_mm": "-1.25"}])[0]
+
+        name = point_name(point, "20260528T153012_123456+0900", 7)
+
+        self.assertEqual(
+            name,
+            "sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap007",
+        )
 
 
 if __name__ == "__main__":

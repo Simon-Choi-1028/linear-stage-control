@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -64,7 +65,13 @@ from .gui_workers import (
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
-from .gui_widgets import ErrorChartWidget, FullscreenImageWindow, ImagePreviewLabel, ParameterAdjustRow
+from .gui_widgets import (
+    ErrorChartWidget,
+    FullscreenImageWindow,
+    ImagePreviewLabel,
+    LinearPathPreviewWidget,
+    ParameterAdjustRow,
+)
 from .position_validation import (
     POSITION_MAX_MM,
     POSITION_MIN_MM,
@@ -91,6 +98,20 @@ from . import __version__
 
 APP_TITLE = "XY 스테이지 캡처"
 POSITION_PLACEHOLDER_ROLE = Qt.UserRole + 50
+CAMERA_PARAMETER_FIELDS = (
+    ("gain", "Gain", "예: 0"),
+    ("acquisition_frame_rate", "FrameRate", "Hz"),
+    ("width", "Width", "px"),
+    ("height", "Height", "px"),
+    ("offset_x", "Offset X", "px"),
+    ("offset_y", "Offset Y", "px"),
+    ("gamma", "Gamma", "비우면 유지"),
+    ("black_level", "Black Level", "비우면 유지"),
+    ("binning_x", "Binning X", "정수"),
+    ("binning_y", "Binning Y", "정수"),
+    ("decimation_x", "Decimation X", "정수"),
+    ("decimation_y", "Decimation Y", "정수"),
+)
 
 
 @dataclass(frozen=True)
@@ -315,10 +336,18 @@ class MainWindow(QMainWindow):
         self.exposure_spin.setRange(1, 10_000_000)
         self.exposure_spin.setSuffix("us")
         self.exposure_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.settle_spin = QSpinBox()
-        self.settle_spin.setRange(0, 60_000)
-        self.settle_spin.setSuffix("ms")
+        self.settle_spin = QDoubleSpinBox()
         self.settle_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.settle_unit_combo = QComboBox()
+        self.settle_unit_combo.addItems(["ms", "s"])
+        self._settle_unit = "ms"
+        self.settle_editor = QWidget()
+        settle_editor_layout = QHBoxLayout(self.settle_editor)
+        settle_editor_layout.setContentsMargins(0, 0, 0, 0)
+        settle_editor_layout.setSpacing(4)
+        settle_editor_layout.addWidget(self.settle_spin, 1)
+        settle_editor_layout.addWidget(self.settle_unit_combo)
+        self._sync_settle_unit()
         self.velocity_edit = QLineEdit()
         self.velocity_edit.setPlaceholderText("장비 기본값")
         _set_placeholder_color(self.velocity_edit)
@@ -343,6 +372,8 @@ class MainWindow(QMainWindow):
                 "Auto",
             ]
         )
+        self.camera_parameter_edits: dict[str, QLineEdit] = {}
+        self.camera_parameter_box = self._build_camera_parameter_box()
         self.software_trigger_check = QCheckBox("소프트웨어 트리거")
         self.save_numpy_check = QCheckBox("NPY 저장")
         self.skip_home_check = QCheckBox("원점 복귀 생략")
@@ -358,11 +389,13 @@ class MainWindow(QMainWindow):
         )
         self.settle_row = ParameterAdjustRow(
             "안정화",
-            self.settle_spin,
+            self.settle_editor,
             (-100, -10, -5, 5, 10, 100),
             "ms",
             "스테이지 이동 완료 후 촬영 전 대기 시간을 조정합니다. 기본값: 200ms",
-            lambda delta: self._adjust_spin_value(self.settle_spin, delta),
+            self._adjust_settle_value,
+            editor_min_width=150,
+            editor_max_width=190,
         )
         self.velocity_row = ParameterAdjustRow(
             "이동속도\nmm/s",
@@ -387,12 +420,14 @@ class MainWindow(QMainWindow):
         form.addRow(self.settle_row)
         form.addRow(self.velocity_row)
         form.addRow(self.capture_count_row)
+        form.addRow("카메라 파라미터", self.camera_parameter_box)
         form.addRow("픽셀 형식", self.pixel_format_combo)
         form.addRow("메타데이터", self._format_check_grid(self.metadata_format_checks))
         form.addRow("요약", self._format_check_grid(self.summary_format_checks))
         form.addRow("실행 옵션", self._option_check_box())
 
         self.output_browse_button.clicked.connect(self.browse_output_root)
+        self.settle_unit_combo.currentTextChanged.connect(self._on_settle_unit_changed)
         self.velocity_edit.textChanged.connect(self.refresh_position_feedback)
         self.capture_count_spin.valueChanged.connect(self.refresh_position_feedback)
         return group
@@ -430,6 +465,31 @@ class MainWindow(QMainWindow):
             layout.addWidget(check, index // 2, index % 2)
         return widget
 
+    def _build_camera_parameter_box(self) -> QWidget:
+        widget = QWidget()
+        widget.setObjectName("optionBox")
+        layout = QGridLayout(widget)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(5)
+        for index, (key, label_text, placeholder) in enumerate(CAMERA_PARAMETER_FIELDS):
+            label = QLabel(label_text)
+            edit = QLineEdit()
+            edit.setPlaceholderText(placeholder)
+            _set_placeholder_color(edit)
+            tooltip = (
+                f"Basler GenICam {label_text} 파라미터입니다. "
+                "비워 두면 카메라 현재값을 유지하고, 미지원 항목은 로그에 경고로 남깁니다."
+            )
+            label.setToolTip(tooltip)
+            edit.setToolTip(tooltip)
+            self.camera_parameter_edits[key] = edit
+            row = index // 2
+            column = (index % 2) * 2
+            layout.addWidget(label, row, column)
+            layout.addWidget(edit, row, column + 1)
+        return widget
+
     def _set_settings_tooltips(self) -> None:
         self.output_root_edit.setToolTip("run별 데이터셋을 저장할 폴더입니다. 기본값: Documents/LinearStageControl/datasets")
         self.output_browse_button.setToolTip("데이터셋 저장 폴더 선택")
@@ -446,6 +506,40 @@ class MainWindow(QMainWindow):
 
     def _adjust_spin_value(self, spin: QSpinBox, delta: int) -> None:
         spin.setValue(max(spin.minimum(), min(spin.maximum(), spin.value() + delta)))
+
+    def settle_seconds(self) -> float:
+        if self.settle_unit_combo.currentText() == "s":
+            return float(self.settle_spin.value())
+        return float(self.settle_spin.value()) / 1000.0
+
+    def set_settle_seconds(self, seconds: float) -> None:
+        seconds = max(0.0, float(seconds))
+        if self.settle_unit_combo.currentText() == "s":
+            self.settle_spin.setValue(seconds)
+        else:
+            self.settle_spin.setValue(seconds * 1000.0)
+
+    def _sync_settle_unit(self) -> None:
+        if self.settle_unit_combo.currentText() == "s":
+            self.settle_spin.setRange(0.0, 60.0)
+            self.settle_spin.setDecimals(3)
+            self.settle_spin.setSingleStep(0.01)
+        else:
+            self.settle_spin.setRange(0.0, 60_000.0)
+            self.settle_spin.setDecimals(0)
+            self.settle_spin.setSingleStep(10.0)
+
+    def _on_settle_unit_changed(self, unit: str) -> None:
+        previous_unit = getattr(self, "_settle_unit", "ms")
+        seconds = float(self.settle_spin.value())
+        if previous_unit != "s":
+            seconds /= 1000.0
+        self._settle_unit = unit
+        self._sync_settle_unit()
+        self.set_settle_seconds(seconds)
+
+    def _adjust_settle_value(self, delta_ms: int) -> None:
+        self.set_settle_seconds(self.settle_seconds() + delta_ms / 1000.0)
 
     def _adjust_velocity_value(self, delta: int) -> None:
         try:
@@ -941,10 +1035,11 @@ class MainWindow(QMainWindow):
 
         self.output_root_edit.setText(str(dataset.get("output_root", "output/datasets")))
         self.exposure_spin.setValue(int(camera.get("exposure_us", 5000) or 5000))
-        self.settle_spin.setValue(int(float(stage.get("settle_s", 0.2)) * 1000))
+        self.set_settle_seconds(_stage_settle_seconds_from_config(stage))
         self.velocity_edit.setText("" if stage.get("move_velocity_mm_s") in (None, "") else str(stage.get("move_velocity_mm_s")))
         self.capture_count_spin.setValue(default_capture_count_from_config(config))
         self.pixel_format_combo.setCurrentText(str(camera.get("pixel_format", "Mono8")))
+        self._apply_camera_parameter_values(camera)
         self.software_trigger_check.setChecked(bool(camera.get("use_software_trigger", True)))
         self.save_numpy_check.setChecked(bool(dataset.get("save_numpy", False)))
         self.skip_home_check.setChecked(False)
@@ -969,6 +1064,29 @@ class MainWindow(QMainWindow):
         self.set_positions(points_from_config(config, base_dir=config_path.parent))
         self.update_error_summary()
         self.log(f"설정 불러옴: {config_path}")
+
+    def _apply_camera_parameter_values(self, camera: dict[str, Any]) -> None:
+        for key, edit in self.camera_parameter_edits.items():
+            value = camera.get(key)
+            edit.setText("" if value in (None, "") else str(value))
+
+    def _apply_camera_parameter_config(self, camera: dict[str, Any]) -> None:
+        float_keys = {"gain", "acquisition_frame_rate", "gamma", "black_level"}
+        for key, edit in self.camera_parameter_edits.items():
+            text = edit.text().strip()
+            if not text:
+                camera[key] = None
+                continue
+            camera[key] = _optional_float_text(text) if key in float_keys else _optional_int_text(text)
+
+    def _camera_parameter_summary(self, camera: dict[str, Any]) -> str:
+        active: list[str] = []
+        labels = {key: label for key, label, _placeholder in CAMERA_PARAMETER_FIELDS}
+        for key, label in labels.items():
+            value = camera.get(key)
+            if value not in (None, ""):
+                active.append(f"{label}={value}")
+        return ", ".join(active) if active else "추가 파라미터 없음 | 빈 항목은 카메라 현재값 유지"
 
     def refresh_devices(self) -> None:
         self.refresh_stage_ports()
@@ -1106,9 +1224,10 @@ class MainWindow(QMainWindow):
         camera["serial_number"] = self.camera_combo.currentData() or None
         camera["pixel_format"] = self.pixel_format_combo.currentText()
         camera["exposure_us"] = self.exposure_spin.value()
+        self._apply_camera_parameter_config(camera)
         camera["use_software_trigger"] = False
         camera["trigger_mode"] = "Off"
-        camera["timeout_ms"] = 1000
+        camera["timeout_ms"] = max(1000, int(camera.get("timeout_ms", 5000) or 5000))
         return config
 
     def show_live_preview(self) -> None:
@@ -1131,7 +1250,13 @@ class MainWindow(QMainWindow):
         self.current_image_path = None
         self.fullscreen_button.setEnabled(False)
         self.live_status_label.setText("Live 시작 중")
-        self.live_worker = LivePreviewWorker(self.build_live_config(), fps=self.live_preview_fps())
+        try:
+            live_config = self.build_live_config()
+        except Exception as exc:
+            self.live_status_label.setText("Live 설정 오류")
+            self.preview_label.setText(f"Live 설정 오류\n{exc}")
+            return
+        self.live_worker = LivePreviewWorker(live_config, fps=self.live_preview_fps())
         self.live_worker.frame_ready.connect(self.on_live_frame)
         self.live_worker.status_changed.connect(self.live_status_label.setText)
         self.live_worker.live_failed.connect(self.on_live_failed)
@@ -1485,7 +1610,9 @@ class MainWindow(QMainWindow):
         self.positions_table.setRowCount(0)
         self.refresh_position_feedback()
 
-    def generate_linear_path_dialog(self) -> None:
+    def _generate_linear_path_dialog_legacy(self) -> None:
+        self.generate_linear_path_dialog()
+        return
         start_x, start_y, end_x, end_y = self._linear_path_defaults()
         default_spacing = max(0.001, _linear_distance(start_x, start_y, end_x, end_y) / 10.0)
         dialog = QDialog(self)
@@ -1635,6 +1762,176 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         dialog.exec()
 
+    def generate_linear_path_dialog(self) -> None:
+        start_x, start_y, end_x, end_y = self._linear_path_defaults()
+        default_spacing = max(0.001, _linear_distance(start_x, start_y, end_x, end_y) / 10.0)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("선형 연속 경로 생성")
+        dialog.resize(760, 520)
+        layout = QVBoxLayout(dialog)
+        body_layout = QHBoxLayout()
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
+
+        start_x_edit = QLineEdit(_mm_text(start_x))
+        start_y_edit = QLineEdit(_mm_text(start_y))
+        end_x_edit = QLineEdit(_mm_text(end_x))
+        end_y_edit = QLineEdit(_mm_text(end_y))
+        basis_combo = QComboBox()
+        basis_combo.addItem("간격 mm/캡쳐", "spacing")
+        basis_combo.addItem("위치 수", "count")
+        spacing_edit = QLineEdit(_mm_text(default_spacing))
+        count_spin = QSpinBox()
+        count_spin.setRange(2, 100_000)
+        count_spin.setValue(11)
+        count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        label_prefix_edit = QLineEdit("line")
+        velocity_edit = QLineEdit()
+        velocity_edit.setPlaceholderText("비우면 촬영 설정 이동속도 사용")
+        capture_count_edit = QLineEdit()
+        capture_count_edit.setPlaceholderText(f"비우면 기본 캡쳐 {self.capture_count_spin.value()}장")
+        _set_placeholder_color(velocity_edit)
+        _set_placeholder_color(capture_count_edit)
+        replace_check = QCheckBox("기존 위치를 지우고 생성")
+        preview_widget = LinearPathPreviewWidget()
+        preview_status = QLabel()
+        preview_status.setWordWrap(True)
+
+        form.addRow("시작 X mm", start_x_edit)
+        form.addRow("시작 Y mm", start_y_edit)
+        form.addRow("끝 X mm", end_x_edit)
+        form.addRow("끝 Y mm", end_y_edit)
+        form.addRow("생성 기준", basis_combo)
+        form.addRow("간격 mm/캡쳐", spacing_edit)
+        form.addRow("위치 수", count_spin)
+        form.addRow("라벨 접두어", label_prefix_edit)
+        form.addRow("이동속도 mm/s", velocity_edit)
+        form.addRow("캡쳐 수", capture_count_edit)
+        form.addRow("", replace_check)
+        body_layout.addWidget(form_widget, 0)
+        body_layout.addWidget(preview_widget, 1)
+        layout.addLayout(body_layout)
+        layout.addWidget(preview_status)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        ok_button.setText("생성")
+        buttons.button(QDialogButtonBox.Cancel).setText("취소")
+        layout.addWidget(buttons)
+
+        def build_points(start_index: int = 0) -> list[ScanPoint]:
+            x_start = float(start_x_edit.text().strip())
+            y_start = float(start_y_edit.text().strip())
+            x_stop = float(end_x_edit.text().strip())
+            y_stop = float(end_y_edit.text().strip())
+            move_velocity = _optional_float_text(velocity_edit.text())
+            if move_velocity is not None and move_velocity <= 0:
+                raise ValueError("이동속도는 비워 두거나 0보다 커야 합니다.")
+            capture_count = _optional_int_text(capture_count_edit.text())
+            if capture_count is not None and capture_count < 1:
+                raise ValueError("캡쳐 수는 비워 두거나 1 이상이어야 합니다.")
+            if basis_combo.currentData() == "spacing":
+                return list(
+                    linear_path_points_by_spacing(
+                        x_start=x_start,
+                        y_start=y_start,
+                        x_stop=x_stop,
+                        y_stop=y_stop,
+                        spacing_mm=float(spacing_edit.text().strip()),
+                        label_prefix=label_prefix_edit.text().strip() or "line",
+                        start_index=start_index,
+                        move_velocity_mm_s=move_velocity,
+                        capture_count=capture_count,
+                    )
+                )
+            return list(
+                linear_path_points(
+                    x_start=x_start,
+                    y_start=y_start,
+                    x_stop=x_stop,
+                    y_stop=y_stop,
+                    count=count_spin.value(),
+                    label_prefix=label_prefix_edit.text().strip() or "line",
+                    start_index=start_index,
+                    move_velocity_mm_s=move_velocity,
+                    capture_count=capture_count,
+                )
+            )
+
+        def update_linear_preview() -> None:
+            try:
+                points = build_points()
+                if basis_combo.currentData() == "spacing":
+                    count_spin.blockSignals(True)
+                    count_spin.setValue(len(points))
+                    count_spin.blockSignals(False)
+                distance = _linear_distance(
+                    float(start_x_edit.text().strip()),
+                    float(start_y_edit.text().strip()),
+                    float(end_x_edit.text().strip()),
+                    float(end_y_edit.text().strip()),
+                )
+                capture_count = _optional_int_text(capture_count_edit.text()) or self.capture_count_spin.value()
+                total_captures = len(points) * capture_count
+                summary = f"총 거리 {_mm_text(distance)} mm | 위치 {len(points)}개 | 예상 {total_captures}장"
+                preview_widget.set_path([(point.x_mm, point.y_mm) for point in points], summary)
+                preview_status.setText(summary)
+                preview_status.setStyleSheet("color: #1f5f43; font-weight: 600;")
+                ok_button.setEnabled(True)
+            except Exception as exc:
+                if basis_combo.currentData() == "spacing":
+                    count_spin.blockSignals(True)
+                    count_spin.setValue(2)
+                    count_spin.blockSignals(False)
+                message = str(exc)
+                preview_widget.set_path([], "", message)
+                preview_status.setText(message)
+                preview_status.setStyleSheet("color: #b42318; font-weight: 700;")
+                ok_button.setEnabled(False)
+
+        def sync_generation_mode() -> None:
+            use_spacing = basis_combo.currentData() == "spacing"
+            spacing_edit.setEnabled(use_spacing)
+            count_spin.setReadOnly(use_spacing)
+            update_linear_preview()
+
+        basis_combo.currentIndexChanged.connect(sync_generation_mode)
+        for editor in (
+            start_x_edit,
+            start_y_edit,
+            end_x_edit,
+            end_y_edit,
+            spacing_edit,
+            label_prefix_edit,
+            velocity_edit,
+            capture_count_edit,
+        ):
+            editor.textChanged.connect(update_linear_preview)
+        count_spin.valueChanged.connect(update_linear_preview)
+        sync_generation_mode()
+
+        def accept_generated_path() -> None:
+            try:
+                start_index = 0 if replace_check.isChecked() else self.positions_table.rowCount()
+                points = build_points(start_index=start_index)
+            except Exception as exc:
+                QMessageBox.warning(dialog, "경로 생성 오류", str(exc))
+                return
+
+            if replace_check.isChecked():
+                self.set_positions(points)
+            else:
+                for point in points:
+                    self.add_position_row(point, update_feedback=False)
+                self.reindex_positions()
+                self.refresh_position_feedback()
+            self.log(f"선형 경로 생성: {len(points)}개 위치")
+            dialog.accept()
+
+        buttons.accepted.connect(accept_generated_path)
+        buttons.rejected.connect(dialog.reject)
+        dialog.exec()
+
     def _linear_path_defaults(self) -> tuple[float, float, float, float]:
         selected_rows = sorted({index.row() for index in self.positions_table.selectedIndexes()})
         if len(selected_rows) >= 2:
@@ -1731,6 +2028,7 @@ class MainWindow(QMainWindow):
         camera["serial_number"] = selected_serial or None
         camera["pixel_format"] = self.pixel_format_combo.currentText()
         camera["exposure_us"] = self.exposure_spin.value()
+        self._apply_camera_parameter_config(camera)
         camera["use_software_trigger"] = self.software_trigger_check.isChecked()
         camera.setdefault("trigger_selector", "FrameStart")
         camera.setdefault("trigger_source", "Software")
@@ -1740,7 +2038,8 @@ class MainWindow(QMainWindow):
         live_preview.setdefault("fps", 10)
 
         stage["serial_port"] = self.stage_port_combo.currentData() or self.stage_port_combo.currentText().split(" - ")[0]
-        stage["settle_s"] = self.settle_spin.value() / 1000.0
+        stage["settle_s"] = self.settle_seconds()
+        stage.pop("settle_ms", None)
         stage["move_velocity_mm_s"] = _optional_float_text(self.velocity_edit.text())
         axes = stage.setdefault("axes", {})
         x_axis = axes.setdefault("x", {})
@@ -1900,7 +2199,14 @@ class MainWindow(QMainWindow):
                 "촬영 설정",
                 "통과",
                 f"{camera.get('pixel_format', 'Mono8')} | 노출 {camera.get('exposure_us')} us | "
-                f"안정화 {self.settle_spin.value()} ms | 기본 캡쳐 {default_capture_count_from_config(config)}장",
+                f"안정화 {_settle_display_text(self.settle_seconds())} | 기본 캡쳐 {default_capture_count_from_config(config)}장",
+            )
+        )
+        issues.append(
+            PreflightIssue(
+                "카메라 파라미터",
+                "통과",
+                self._camera_parameter_summary(camera),
             )
         )
         metadata_formats = ", ".join(str(item).upper() for item in dataset.get("metadata_formats", ["csv"]))
@@ -2404,6 +2710,20 @@ def _um_text(value: Any) -> str:
 
 def _number_text(value: Any) -> str:
     return _compact_number_text(value, 3)
+
+
+def _settle_display_text(seconds: float) -> str:
+    if seconds < 1:
+        return f"{_number_text(seconds * 1000)} ms"
+    return f"{_number_text(seconds)} s"
+
+
+def _stage_settle_seconds_from_config(stage: dict[str, Any]) -> float:
+    if stage.get("settle_s") not in (None, ""):
+        return float(stage.get("settle_s", 0.2))
+    if stage.get("settle_ms") not in (None, ""):
+        return float(stage["settle_ms"]) / 1000.0
+    return 0.2
 
 
 def _velocity_text(value: Any) -> str:

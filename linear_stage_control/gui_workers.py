@@ -144,8 +144,8 @@ class AcquisitionWorker(QThread):
                                 f"위치 #{point.index} {capture_index}/{capture_count}"
                             )
                             image_timestamp = safe_timestamp()
-                            image_path = dataset.image_path(point, image_timestamp)
-                            npy_path = dataset.npy_path(point, image_timestamp)
+                            image_path = dataset.image_path(point, image_timestamp, capture_index)
+                            npy_path = dataset.npy_path(point, image_timestamp, capture_index)
                             capture = camera.capture_original_to(image_path, npy_path=npy_path)
 
                             self.status_changed.emit(f"{completed + 1}/{total} 이미지와 메타데이터 저장 중")
@@ -157,6 +157,7 @@ class AcquisitionWorker(QThread):
                                     "camera_timestamp_ns": capture.camera_timestamp_ns,
                                     "block_id": capture.block_id,
                                     "image_path": str(capture.image_path.relative_to(dataset.run_dir)),
+                                    "image_filename": capture.image_path.name,
                                     "absolute_image_path": str(capture.image_path),
                                     "npy_path": str(capture.npy_path.relative_to(dataset.run_dir))
                                     if capture.npy_path
@@ -229,11 +230,17 @@ class LivePreviewWorker(QThread):
             settings = camera_settings_from_config(preview_config)
             frame_delay_ms = max(1, int(1000 / self.fps))
             with BaslerCamera(settings) as camera:
-                self.status_changed.emit(f"Live preview running ({self.fps} FPS)")
-                while not self._stop_requested:
-                    array, metadata = camera.grab_original_array(timeout_ms=settings.timeout_ms)
+                self.status_changed.emit("Live 첫 프레임 대기")
+                first_frame = True
+                for array, metadata in camera.live_original_arrays(
+                    timeout_ms=settings.timeout_ms,
+                    stop_requested=lambda: self._stop_requested,
+                ):
                     if self._stop_requested:
                         break
+                    if first_frame:
+                        self.status_changed.emit(f"Live 수신 중 ({self.fps} FPS)")
+                        first_frame = False
                     self.frame_ready.emit(array, metadata)
                     self.msleep(frame_delay_ms)
         except Exception as exc:

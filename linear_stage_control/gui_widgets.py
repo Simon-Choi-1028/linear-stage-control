@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,8 @@ class ParameterAdjustRow(QWidget):
         unit_text: str,
         tooltip: str,
         adjust_value: Callable[[int], None],
+        editor_min_width: int = 78,
+        editor_max_width: int | None = 94,
     ) -> None:
         super().__init__()
         self.setObjectName("parameterRow")
@@ -47,8 +49,9 @@ class ParameterAdjustRow(QWidget):
         label.setObjectName("parameterLabel")
         label.setToolTip(tooltip)
         editor.setToolTip(tooltip)
-        editor.setMinimumWidth(78)
-        editor.setMaximumWidth(94)
+        editor.setMinimumWidth(editor_min_width)
+        if editor_max_width is not None:
+            editor.setMaximumWidth(editor_max_width)
 
         left = QWidget()
         left_layout = QHBoxLayout(left)
@@ -73,6 +76,101 @@ class ParameterAdjustRow(QWidget):
         layout.addWidget(left)
         layout.addStretch(1)
         layout.addWidget(button_group)
+
+
+class LinearPathPreviewWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.points: list[tuple[float, float]] = []
+        self.summary = "경로 입력 대기"
+        self.error_message = ""
+        self.setMinimumHeight(180)
+        self.setMinimumWidth(320)
+        self.setObjectName("linearPathPreview")
+
+    def set_path(
+        self,
+        points: list[tuple[float, float]],
+        summary: str,
+        error_message: str = "",
+    ) -> None:
+        self.points = points
+        self.summary = summary
+        self.error_message = error_message
+        self.update()
+
+    def paintEvent(self, event: object) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(8, 8, -8, -8)
+        painter.fillRect(rect, QColor("#f7f9fb"))
+        painter.setPen(QPen(QColor("#cfd8e3"), 1))
+        painter.drawRoundedRect(rect, 6, 6)
+
+        if self.error_message:
+            painter.setPen(QColor("#b42318"))
+            painter.drawText(rect.adjusted(14, 14, -14, -14), Qt.AlignCenter | Qt.TextWordWrap, self.error_message)
+            return
+        if not self.points:
+            painter.setPen(QColor("#667085"))
+            painter.drawText(rect, Qt.AlignCenter, self.summary)
+            return
+
+        plot = QRectF(rect.adjusted(24, 24, -24, -44))
+        xs = [point[0] for point in self.points]
+        ys = [point[1] for point in self.points]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        if min_x == max_x:
+            min_x -= 0.5
+            max_x += 0.5
+        if min_y == max_y:
+            min_y -= 0.5
+            max_y += 0.5
+
+        def map_point(point: tuple[float, float]) -> QPointF:
+            x = plot.left() + (point[0] - min_x) / (max_x - min_x) * plot.width()
+            y = plot.bottom() - (point[1] - min_y) / (max_y - min_y) * plot.height()
+            return QPointF(x, y)
+
+        painter.setPen(QPen(QColor("#d0d5dd"), 1, Qt.DashLine))
+        for i in range(5):
+            x = plot.left() + plot.width() * i / 4
+            y = plot.top() + plot.height() * i / 4
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+
+        mapped = [map_point(point) for point in self.points]
+        painter.setPen(QPen(QColor("#2563eb"), 2))
+        for start, end in zip(mapped, mapped[1:]):
+            painter.drawLine(start, end)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#2563eb"))
+        for point in mapped:
+            painter.drawEllipse(point, 3.5, 3.5)
+
+        painter.setBrush(QColor("#16a34a"))
+        painter.drawEllipse(mapped[0], 6, 6)
+        painter.setBrush(QColor("#dc2626"))
+        painter.drawEllipse(mapped[-1], 6, 6)
+        if len(mapped) >= 2:
+            self._draw_arrow_head(painter, mapped[-2], mapped[-1])
+
+        painter.setPen(QColor("#344054"))
+        painter.drawText(rect.adjusted(14, rect.height() - 30, -14, -8), Qt.AlignCenter, self.summary)
+
+    def _draw_arrow_head(self, painter: QPainter, start: QPointF, end: QPointF) -> None:
+        vector = end - start
+        length = (vector.x() ** 2 + vector.y() ** 2) ** 0.5
+        if length <= 0:
+            return
+        ux, uy = vector.x() / length, vector.y() / length
+        size = 10
+        left = QPointF(end.x() - ux * size - uy * size * 0.55, end.y() - uy * size + ux * size * 0.55)
+        right = QPointF(end.x() - ux * size + uy * size * 0.55, end.y() - uy * size - ux * size * 0.55)
+        painter.setBrush(QColor("#dc2626"))
+        painter.setPen(Qt.NoPen)
+        painter.drawPolygon([end, left, right])
 
 
 class FullscreenImageWindow(QMainWindow):

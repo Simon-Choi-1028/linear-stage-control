@@ -3,6 +3,10 @@
     <img src="https://www.baslerweb.com/favicon.svg" width="36" height="36" alt="Basler">
   </a>
   &nbsp;&nbsp;
+  <a href="https://www.kitech.re.kr/" title="KITECH">
+    <img src="https://www.kitech.re.kr/images/sub/logo_eng.svg" width="128" height="25" alt="KITECH">
+  </a>
+  &nbsp;&nbsp;
   <a href="https://www.zaber.com/software" title="Zaber Software">
     <img src="https://www.zaber.com/favicon.ico" width="36" height="36" alt="Zaber">
   </a>

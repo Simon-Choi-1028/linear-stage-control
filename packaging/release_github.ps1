@@ -99,7 +99,7 @@ function Get-GitHubRelease {
   try {
     return Invoke-GitHubRest `
       -Method "Get" `
-      -Uri "https://api.github.com/repos/$Repository/releases/tags/$ReleaseTag" `
+      -Uri ("https://api.github.com/repos/{0}/releases/tags/{1}" -f $Repository, $ReleaseTag) `
       -Headers $Headers
   } catch {
     if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
@@ -107,6 +107,46 @@ function Get-GitHubRelease {
     }
     throw
   }
+}
+
+function Invoke-GitHubAssetUpload {
+  param(
+    [Parameter(Mandatory = $true)][string]$UploadUri,
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Token,
+    [Parameter(Mandatory = $true)][hashtable]$Headers
+  )
+
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($curl) {
+    $curlPath = "@$((Get-Item -LiteralPath $Path).FullName -replace '\\', '/')"
+    & $curl.Source `
+      --fail `
+      --location `
+      --retry 5 `
+      --retry-delay 10 `
+      --retry-all-errors `
+      --request POST `
+      --header "Authorization: Bearer $Token" `
+      --header "Accept: application/vnd.github+json" `
+      --header "X-GitHub-Api-Version: 2022-11-28" `
+      --header "User-Agent: LinearStageControlReleaseScript" `
+      --header "Content-Type: application/octet-stream" `
+      --data-binary $curlPath `
+      $UploadUri | Out-Null
+
+    if ($LASTEXITCODE -ne 0) {
+      throw "GitHub asset upload failed with curl exit code $LASTEXITCODE"
+    }
+    return
+  }
+
+  Invoke-GitHubRest `
+    -Method "Post" `
+    -Uri $UploadUri `
+    -Headers $Headers `
+    -ContentType "application/octet-stream" `
+    -InFile (Get-Item -LiteralPath $Path).FullName | Out-Null
 }
 
 function Publish-GitHubRestRelease {
@@ -140,7 +180,7 @@ function Publish-GitHubRestRelease {
 
     $release = Invoke-GitHubRest `
       -Method "Post" `
-      -Uri "https://api.github.com/repos/$Repository/releases" `
+      -Uri ("https://api.github.com/repos/{0}/releases" -f $Repository) `
       -Headers $headers `
       -Body $body
   } else {
@@ -153,36 +193,55 @@ function Publish-GitHubRestRelease {
 
     $release = Invoke-GitHubRest `
       -Method "Patch" `
-      -Uri "https://api.github.com/repos/$Repository/releases/$($release.id)" `
+      -Uri ("https://api.github.com/repos/{0}/releases/{1}" -f $Repository, $release.id) `
       -Headers $headers `
       -Body $body
   }
 
-  $uploadBase = $release.upload_url -replace "\{.*$", ""
+  $uploadBase = [regex]::Replace([string]$release.upload_url, "\{.*$", "")
   $assetNames = @{}
   foreach ($assetPath in $ReleaseAssets) {
     $asset = Get-Item -LiteralPath $assetPath
     $assetNames[$asset.Name] = $true
   }
 
+  $existingAssets = @{}
   foreach ($asset in @($release.assets)) {
-    if ($assetNames.ContainsKey($asset.name)) {
+    if (-not $asset) {
+      continue
+    }
+    $existingAssets[$asset.name] = $asset
+  }
+
+  foreach ($assetPath in $ReleaseAssets) {
+    $localAsset = Get-Item -LiteralPath $assetPath
+    if (-not $existingAssets.ContainsKey($localAsset.Name)) {
+      continue
+    }
+
+    $remoteAsset = $existingAssets[$localAsset.Name]
+    if ([int64]$remoteAsset.size -eq [int64]$localAsset.Length) {
+      Write-Host "Release asset already exists with matching size, skipping: $($localAsset.Name)"
+      continue
+    }
+
+    if ($assetNames.ContainsKey($remoteAsset.name)) {
       Invoke-GitHubRest `
         -Method "Delete" `
-        -Uri "https://api.github.com/repos/$Repository/releases/assets/$($asset.id)" `
+        -Uri ("https://api.github.com/repos/{0}/releases/assets/{1}" -f $Repository, $remoteAsset.id) `
         -Headers $headers | Out-Null
+      $existingAssets.Remove($localAsset.Name)
     }
   }
 
   foreach ($assetPath in $ReleaseAssets) {
     $asset = Get-Item -LiteralPath $assetPath
-    $uploadUri = "$uploadBase?name=$([uri]::EscapeDataString($asset.Name))"
-    Invoke-GitHubRest `
-      -Method "Post" `
-      -Uri $uploadUri `
-      -Headers $headers `
-      -ContentType "application/octet-stream" `
-      -InFile $asset.FullName | Out-Null
+    if ($existingAssets.ContainsKey($asset.Name)) {
+      continue
+    }
+
+    $uploadUri = "{0}?name={1}" -f $uploadBase, [uri]::EscapeDataString($asset.Name)
+    Invoke-GitHubAssetUpload -UploadUri $uploadUri -Path $asset.FullName -Token $token -Headers $headers
     Write-Host "Uploaded release asset: $($asset.Name)"
   }
 }

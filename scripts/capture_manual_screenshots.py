@@ -33,16 +33,16 @@ def save_widget(widget, output_dir: Path, name: str) -> Path:
     return path
 
 
-def prepare_window() -> MainWindow:
+def prepare_window(width: int, height: int) -> MainWindow:
     window = MainWindow(start_device_scan=False)
-    window.resize(1320, 860)
+    window.resize(width, height)
     window.show()
     window.set_positions(
         points_from_records(
             [
                 {"label": "origin", "x_mm": 0, "y_mm": 0, "capture_count": 1},
-                {"label": "sample_a", "x_mm": 0.5, "y_mm": -1.25, "move_velocity_mm_s": 25, "capture_count": 3},
-                {"label": "sample_b", "x_mm": 1.0, "y_mm": -1.25},
+                {"label": "sample_a", "x_mm": 0.5, "y_mm": 1.25, "move_velocity_mm_s": 25, "capture_count": 3},
+                {"label": "sample_b", "x_mm": 1.0, "y_mm": 1.25},
             ]
         )
     )
@@ -79,9 +79,9 @@ def capture_linear_path_dialog(window: MainWindow, output_dir: Path) -> None:
     )
 
 
-def capture_all(output_dir: Path) -> list[Path]:
+def capture_all(output_dir: Path, width: int = 1320, height: int = 860) -> list[Path]:
     app = QApplication.instance() or QApplication([])
-    window = prepare_window()
+    window = prepare_window(width, height)
     saved: list[Path] = []
 
     saved.append(save_widget(window, output_dir, "01_main_live_preview"))
@@ -107,8 +107,10 @@ def capture_all(output_dir: Path) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture LinearStageControl manual UI screenshots.")
     parser.add_argument("--output-dir", type=Path, default=default_output_dir())
+    parser.add_argument("--width", type=int, default=1320)
+    parser.add_argument("--height", type=int, default=860)
     args = parser.parse_args()
-    paths = capture_all(args.output_dir)
+    paths = capture_all(args.output_dir, width=args.width, height=args.height)
     for path in paths:
         print(path)
     return 0

@@ -7,6 +7,7 @@ from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -70,17 +71,18 @@ class ParameterAdjustRow(QWidget):
         left_layout.addWidget(editor)
 
         button_group = QWidget()
-        button_layout = QHBoxLayout(button_group)
+        button_layout = QGridLayout(button_group)
         button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.setSpacing(6)
-        for delta in deltas:
+        button_layout.setHorizontalSpacing(5)
+        button_layout.setVerticalSpacing(4)
+        for index, delta in enumerate(deltas):
             button = QPushButton(f"{delta:+d}")
             button.setObjectName("parameterButton")
-            button.setFixedWidth(40)
+            button.setFixedWidth(38)
             tooltip_label = label_text.replace("\n", " ")
             button.setToolTip(f"{tooltip_label} 값을 {delta:+d}{unit_text} 조정")
             button.clicked.connect(lambda _checked=False, step=delta: adjust_value(step))
-            button_layout.addWidget(button)
+            button_layout.addWidget(button, index // 3, index % 3)
 
         layout.addWidget(left)
         layout.addStretch(1)

@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.1.5 - 2026-05-29
 
 - Added a GUI diagnostics tab for pylon, Basler camera discovery, Zaber COM/Device DB, output folder, and update access checks.
 - Added a manual Zaber stage control panel for position read, homing, absolute moves, jog moves, and stop requests outside acquisition runs.
+- Modernized the white-mode GUI styling with a shared stylesheet, card-like panels, clearer controls, lighter tables, and improved responsive behavior.
 - Added dataset integrity manifests with app version, record count, file sizes, and SHA256 hashes while keeping legacy `manifest.json` compatibility.
 - Added `scripts/capture_manual_screenshots.py` for repeatable manual UI screenshots in the Downloads folder.
-- Added a GitHub Release helper script for future approved releases without changing the current release.
+- Added GitHub Release publishing fallback via the GitHub REST API when the `gh` CLI is not installed.
 
 ## v0.1.4 - 2026-05-28
 

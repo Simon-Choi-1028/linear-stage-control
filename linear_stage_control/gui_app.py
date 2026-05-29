@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QSlider,
     QSpinBox,
@@ -82,6 +83,7 @@ from .gui_support import (
     set_placeholder_color as _set_placeholder_color,
     set_table_values as _set_table_values,
 )
+from .gui_style import APP_STYLESHEET
 from .position_validation import (
     POSITION_MAX_MM,
     POSITION_MIN_MM,
@@ -207,8 +209,10 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         toolbar = QWidget()
+        toolbar.setObjectName("topToolbar")
         toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(10, 8, 10, 8)
+        toolbar_layout.setContentsMargins(14, 9, 14, 9)
+        toolbar_layout.setSpacing(8)
         self.load_config_button = QPushButton("설정 불러오기")
         self.save_config_button = QPushButton("설정 저장")
         self.refresh_button = QPushButton("장비 새로고침")
@@ -262,18 +266,33 @@ class MainWindow(QMainWindow):
     def update_responsive_layout(self) -> None:
         if not hasattr(self, "main_splitter"):
             return
-        is_narrow = self.width() < 980
+        is_narrow = self.width() < 1180
         if self._layout_is_narrow == is_narrow:
             return
         self._layout_is_narrow = is_narrow
         if is_narrow:
             self.main_splitter.setOrientation(Qt.Vertical)
             self.control_scroll.setMinimumWidth(0)
-            self._set_preview_base_height(260)
-            self.main_splitter.setSizes([380, 560])
+            self.control_scroll.setMinimumHeight(300)
+            self.preview_panel.setMinimumHeight(0)
+            self.preview_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            if hasattr(self, "preview_metrics_table"):
+                self.preview_metrics_table.setMinimumHeight(72)
+                self.preview_metrics_table.setMaximumHeight(84)
+            if hasattr(self, "preview_tabs"):
+                self.preview_tabs.setMinimumHeight(150)
+            self._set_preview_base_height(190)
+            self.main_splitter.setSizes([420, 620])
         else:
             self.main_splitter.setOrientation(Qt.Horizontal)
+            self.control_scroll.setMinimumHeight(0)
             self.control_scroll.setMinimumWidth(420)
+            self.preview_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            if hasattr(self, "preview_metrics_table"):
+                self.preview_metrics_table.setMinimumHeight(86)
+                self.preview_metrics_table.setMaximumHeight(96)
+            if hasattr(self, "preview_tabs"):
+                self.preview_tabs.setMinimumHeight(0)
             self._set_preview_base_height(360)
             self.main_splitter.setSizes([470, max(650, self.width() - 470)])
 
@@ -361,9 +380,10 @@ class MainWindow(QMainWindow):
 
     def _build_control_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("controlPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 12, 10, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 12, 12, 14)
+        layout.setSpacing(12)
 
         layout.addWidget(self._build_device_group())
         layout.addWidget(self._build_manual_stage_group())
@@ -378,6 +398,7 @@ class MainWindow(QMainWindow):
         self.camera_combo = QComboBox()
         self.stage_port_combo = QComboBox()
         self.camera_scan_button = QPushButton("자동검색")
+        self.camera_scan_button.setProperty("variant", "quiet")
         self.camera_scan_state_label = QLabel("대기")
         self.camera_scan_state_label.setAlignment(Qt.AlignCenter)
         self.camera_scan_state_label.setObjectName("cameraScanState")
@@ -392,6 +413,7 @@ class MainWindow(QMainWindow):
         )
         self.camera_status_icon.setVisible(False)
         self.pylon_runtime_button = QPushButton("pylon Runtime 받기")
+        self.pylon_runtime_button.setProperty("variant", "quiet")
         self.pylon_runtime_button.setVisible(False)
         self.x_axis_enabled_check = QCheckBox("X축 사용")
         self.y_axis_enabled_check = QCheckBox("Y축 사용")
@@ -457,6 +479,7 @@ class MainWindow(QMainWindow):
         self.manual_step_spin.setSingleStep(0.1)
         self.manual_step_spin.setValue(1.0)
         self.manual_step_spin.setSuffix(" mm")
+        self.manual_step_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.manual_position_button = QPushButton("위치 읽기")
         self.manual_home_button = QPushButton("원점")
         self.manual_move_button = QPushButton("이동")
@@ -490,15 +513,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.manual_velocity_edit, 1, 1)
         layout.addWidget(QLabel("Jog"), 1, 2)
         layout.addWidget(self.manual_step_spin, 1, 3)
-        layout.addWidget(self.manual_position_button, 2, 0)
-        layout.addWidget(self.manual_home_button, 2, 1)
-        layout.addWidget(self.manual_move_button, 2, 2)
-        layout.addWidget(self.manual_stop_button, 2, 3)
-        layout.addWidget(self.manual_x_minus_button, 3, 0)
-        layout.addWidget(self.manual_x_plus_button, 3, 1)
-        layout.addWidget(self.manual_y_minus_button, 3, 2)
-        layout.addWidget(self.manual_y_plus_button, 3, 3)
-        layout.addWidget(self.manual_stage_status_label, 4, 0, 1, 4)
+        layout.addWidget(self.manual_position_button, 2, 0, 1, 2)
+        layout.addWidget(self.manual_home_button, 2, 2, 1, 2)
+        layout.addWidget(self.manual_move_button, 3, 0, 1, 2)
+        layout.addWidget(self.manual_stop_button, 3, 2, 1, 2)
+        layout.addWidget(self.manual_x_minus_button, 4, 0, 1, 2)
+        layout.addWidget(self.manual_x_plus_button, 4, 2, 1, 2)
+        layout.addWidget(self.manual_y_minus_button, 5, 0, 1, 2)
+        layout.addWidget(self.manual_y_plus_button, 5, 2, 1, 2)
+        layout.addWidget(self.manual_stage_status_label, 6, 0, 1, 4)
 
         self.manual_position_button.clicked.connect(self.read_manual_stage_position)
         self.manual_home_button.clicked.connect(self.home_manual_stage)
@@ -519,6 +542,7 @@ class MainWindow(QMainWindow):
         output_layout.setContentsMargins(0, 0, 0, 0)
         self.output_root_edit = QLineEdit()
         self.output_browse_button = QPushButton("찾기")
+        self.output_browse_button.setProperty("variant", "quiet")
         _apply_button_icon(self.output_browse_button, QStyle.SP_DirOpenIcon, "저장 폴더 선택")
         self.output_browse_button.setMinimumWidth(72)
         output_layout.addWidget(self.output_root_edit, 1)
@@ -676,10 +700,9 @@ class MainWindow(QMainWindow):
             label.setToolTip(tooltip)
             edit.setToolTip(tooltip)
             self.camera_parameter_edits[key] = edit
-            row = index // 2
-            column = (index % 2) * 2
-            layout.addWidget(label, row, column)
-            layout.addWidget(edit, row, column + 1)
+            layout.addWidget(label, index, 0)
+            layout.addWidget(edit, index, 1)
+        layout.setColumnStretch(1, 1)
         return widget
 
     def _set_settings_tooltips(self) -> None:
@@ -820,6 +843,7 @@ class MainWindow(QMainWindow):
         button_grid.addWidget(self.clear_rows_button, 1, 2)
 
         self.positions_table = QTableWidget(0, 6)
+        self.positions_table.setAlternatingRowColors(True)
         self.positions_table.setHorizontalHeaderLabels(["#", "라벨", "X mm", "Y mm", "속도\nmm/s", "캡쳐 수"])
         self.positions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.positions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -858,6 +882,8 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("중지")
         self.start_button.setObjectName("runControlButton")
         self.stop_button.setObjectName("runControlButton")
+        self.start_button.setProperty("variant", "primary")
+        self.stop_button.setProperty("variant", "danger")
         self.start_button.setMinimumHeight(42)
         self.stop_button.setMinimumHeight(42)
         _apply_button_icon(self.start_button, QStyle.SP_MediaPlay, "촬영 run 시작")
@@ -881,8 +907,10 @@ class MainWindow(QMainWindow):
 
     def _build_preview_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("previewPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 12, 12, 12)
+        layout.setContentsMargins(12, 12, 14, 14)
+        layout.setSpacing(9)
 
         self.preview_label = ImagePreviewLabel("이미지 없음")
         self.preview_label.setAlignment(Qt.AlignCenter)
@@ -901,6 +929,10 @@ class MainWindow(QMainWindow):
         self.live_stop_button = QPushButton("Live 정지")
         self.live_retry_button = QPushButton("Live 재연결")
         self.live_scan_button = QPushButton("카메라 재검색")
+        self.live_button.setProperty("variant", "primary")
+        self.live_stop_button.setProperty("variant", "danger")
+        self.live_retry_button.setProperty("variant", "quiet")
+        self.live_scan_button.setProperty("variant", "quiet")
         self.live_status_label = QLabel("Live 대기")
         self.live_status_label.setObjectName("liveStatus")
         self.live_size_label = QLabel("100%")
@@ -950,6 +982,7 @@ class MainWindow(QMainWindow):
         self.preview_zoom_slider.setFixedWidth(140)
         self.preview_zoom_slider.setToolTip("미리보기 디지털 확대 비율입니다. 확대 후 이미지를 클릭하면 해당 지점으로 중심이 이동합니다.")
         self.preview_zoom_reset_button = QPushButton("맞춤")
+        self.preview_zoom_reset_button.setProperty("variant", "quiet")
         self.preview_zoom_reset_button.setMinimumWidth(64)
         self.preview_zoom_reset_button.setToolTip("확대를 100%로 되돌리고 중심을 화면 중앙으로 맞춥니다.")
         self.preview_grid_check = QCheckBox("격자")
@@ -1004,6 +1037,7 @@ class MainWindow(QMainWindow):
         captures_tab = QWidget()
         captures_layout = QVBoxLayout(captures_tab)
         self.captures_table = QTableWidget(0, 13)
+        self.captures_table.setAlternatingRowColors(True)
         self.captures_table.setHorizontalHeaderLabels(
             [
                 "#",
@@ -1087,6 +1121,8 @@ class MainWindow(QMainWindow):
         top_row = QHBoxLayout()
         self.run_diagnostics_button = QPushButton("진단 실행")
         self.diagnostics_refresh_button = QPushButton("장비 새로고침")
+        self.run_diagnostics_button.setProperty("variant", "primary")
+        self.diagnostics_refresh_button.setProperty("variant", "quiet")
         self.diagnostics_status_label = QLabel("진단 전")
         self.diagnostics_status_label.setObjectName("manualStageStatus")
         _apply_button_icon(self.run_diagnostics_button, QStyle.SP_MessageBoxInformation, "pylon, Basler, Zaber, 저장 폴더, 업데이트 접근성을 점검합니다.")
@@ -1098,6 +1134,7 @@ class MainWindow(QMainWindow):
         top_row.addWidget(self.diagnostics_status_label, 1)
 
         self.diagnostics_table = QTableWidget(0, 3)
+        self.diagnostics_table.setAlternatingRowColors(True)
         self.diagnostics_table.setObjectName("diagnosticsTable")
         self.diagnostics_table.setHorizontalHeaderLabels(["항목", "상태", "내용"])
         self.diagnostics_table.verticalHeader().setVisible(False)
@@ -1117,195 +1154,10 @@ class MainWindow(QMainWindow):
         return tab
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget { background: #f5f6f7; color: #1e2329; }
-            QGroupBox {
-                border: 1px solid #d2d7dd;
-                border-radius: 6px;
-                margin-top: 10px;
-                padding: 10px;
-                font-weight: 600;
-            }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
-            QPushButton {
-                background: #ffffff;
-                border: 1px solid #c4cbd3;
-                border-radius: 5px;
-                padding: 7px 11px;
-                min-height: 24px;
-            }
-            QPushButton:hover { background: #edf5f1; border-color: #7ca58f; }
-            QPushButton:pressed { background: #dceae3; }
-            QPushButton:disabled { color: #8c96a0; background: #eceff1; }
-            QPushButton#parameterButton {
-                background: #ffffff;
-                border: 1px solid #9aa5af;
-                border-radius: 4px;
-                padding: 3px 0;
-                min-height: 22px;
-                font-weight: 600;
-                font-size: 8pt;
-            }
-            QPushButton#parameterButton:hover {
-                background: #eef8f2;
-                border-color: #2f8f68;
-            }
-            QPushButton#runControlButton {
-                min-height: 40px;
-                font-weight: 700;
-                font-size: 10pt;
-            }
-            QLabel#parameterLabel {
-                min-width: 58px;
-                font-weight: 600;
-            }
-            QCheckBox {
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #89949f;
-                border-radius: 2px;
-                background: #ffffff;
-            }
-            QCheckBox::indicator:checked {
-                background: #dff2e8;
-                border: 2px solid #2f8f68;
-            }
-            QWidget#formatBox, QWidget#optionBox {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-            }
-            QLabel#cameraScanState {
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                padding: 6px 10px;
-                min-width: 54px;
-                font-weight: 700;
-                qproperty-alignment: AlignCenter;
-            }
-            QLabel#cameraScanState[state="idle"] {
-                background: #ffffff;
-                color: #4f5963;
-            }
-            QLabel#cameraScanState[state="searching"] {
-                background: #e9f2ff;
-                border-color: #8fb3e8;
-                color: #24568f;
-            }
-            QLabel#cameraScanState[state="success"] {
-                background: #eef8f2;
-                border-color: #96c5a8;
-                color: #1f5f43;
-            }
-            QLabel#cameraScanState[state="failure"] {
-                background: #fff0ef;
-                border-color: #d99a96;
-                color: #7a2420;
-            }
-            QLabel#cameraStatus[state="idle"] { color: #4f5963; }
-            QLabel#cameraStatus[state="searching"] { color: #24568f; font-weight: 600; }
-            QLabel#cameraStatus[state="success"] { color: #1f5f43; font-weight: 600; }
-            QLabel#cameraStatus[state="failure"] { color: #7a2420; font-weight: 700; }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTableWidget, QPlainTextEdit {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 4px;
-                padding: 4px;
-            }
-            QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
-                background: #eceff1;
-                color: #6f7983;
-            }
-            QScrollArea { background: #f5f6f7; }
-            QHeaderView::section {
-                background: #e7eaee;
-                border: 0;
-                border-right: 1px solid #cfd5dc;
-                padding: 5px;
-                font-weight: 600;
-            }
-            QLabel#preview {
-                background: #151719;
-                color: #c7cdd4;
-                border-radius: 6px;
-                border: 1px solid #2a3036;
-            }
-            QTableWidget#errorSummary, QTableWidget#previewMetrics, QTableWidget#stageSpecs, QTableWidget#preflightTable, QTableWidget#diagnosticsTable {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                gridline-color: #d7dde3;
-            }
-            QTableWidget#errorSummary::item, QTableWidget#previewMetrics::item, QTableWidget#stageSpecs::item, QTableWidget#preflightTable::item, QTableWidget#diagnosticsTable::item {
-                padding: 6px;
-                font-weight: 600;
-            }
-            QLabel#positionStatus {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                padding: 7px;
-            }
-            QLabel#positionStatus[state="ok"] {
-                background: #eef8f2;
-                border-color: #96c5a8;
-                color: #1f5f43;
-            }
-            QLabel#positionStatus[state="warning"] {
-                background: #fff8df;
-                border-color: #d6b95e;
-                color: #6d560b;
-            }
-            QLabel#positionStatus[state="error"] {
-                background: #fff0ef;
-                border-color: #d99a96;
-                color: #7a2420;
-            }
-            QLabel#previewInfo {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                padding: 7px;
-            }
-            QLabel#errorBasis {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                padding: 7px;
-                font-weight: 600;
-            }
-            QLabel#runStatus {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                padding: 7px;
-                font-weight: 600;
-            }
-            QLabel#manualStageStatus {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 5px;
-                padding: 7px;
-                color: #4f5963;
-            }
-            QLabel#progressDetail {
-                color: #4f5963;
-                padding: 2px 4px;
-            }
-            QProgressBar {
-                background: #ffffff;
-                border: 1px solid #cfd5dc;
-                border-radius: 4px;
-                text-align: center;
-                height: 18px;
-            }
-            QProgressBar::chunk { background: #2f8f68; border-radius: 3px; }
-            """
-        )
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(APP_STYLESHEET)
+        self.setStyleSheet(APP_STYLESHEET)
 
     def _load_initial_config(self) -> None:
         for path in (
@@ -1332,6 +1184,7 @@ class MainWindow(QMainWindow):
         self._camera_user_touched = False
 
         self.output_root_edit.setText(str(dataset.get("output_root", "output/datasets")))
+        self.output_root_edit.setCursorPosition(0)
         self.exposure_spin.setValue(int(camera.get("exposure_us", 5000) or 5000))
         self.set_settle_seconds(_stage_settle_seconds_from_config(stage))
         self.velocity_edit.setText("" if stage.get("move_velocity_mm_s") in (None, "") else str(stage.get("move_velocity_mm_s")))

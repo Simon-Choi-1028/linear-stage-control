@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import time
+import logging
+import lzma
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -10,6 +12,16 @@ from typing import Any, Callable
 from serial.tools import list_ports
 from zaber_motion import DeviceDbSourceType, Library, Units
 from zaber_motion.ascii import Axis, Connection
+from zaber_motion.exceptions import DeviceBusyException, DeviceDbFailedException, SerialPortBusyException
+
+from .exceptions import LinearStageControlError, StageConnectionError
+
+DEVICE_DB_SQLITE_NAME = "devices-public-v2.sqlite"
+DEVICE_DB_LZMA_NAME = "devices-public-v2.sqlite.lzma"
+DEVICE_DB_RELATIVE_DIR = Path("sdk_downloads") / "zaber"
+SQLITE_HEADER = b"SQLite format 3\x00"
+TRUE_CONFIG_VALUES = {"1", "true", "yes", "y", "on"}
+FALSE_CONFIG_VALUES = {"0", "false", "no", "n", "off"}
 
 
 @dataclass(frozen=True)
@@ -33,33 +45,61 @@ class StageSettings:
     y: AxisAddress = AxisAddress(device_index=0, axis_number=2)
 
 
-class StageMoveCancelled(RuntimeError):
+class StageMoveCancelled(LinearStageControlError):
     """Raised when a stage move is stopped through the owning worker."""
 
 
 def stage_settings_from_config(config: dict[str, Any]) -> StageSettings:
-    stage = config.get("stage", {})
-    axes = stage.get("axes", {})
+    stage = config.get("stage") or {}
+    if not isinstance(stage, dict):
+        raise StageConnectionError(
+            "Zaber stage 설정은 객체 형태여야 합니다.",
+            f"Invalid stage config: {stage!r}",
+        )
+    axes = stage.get("axes") or {}
+    settle_s = _settle_seconds(stage)
+    move_velocity_mm_s = _optional_float(stage.get("move_velocity_mm_s"), "stage.move_velocity_mm_s")
+    if settle_s < 0:
+        raise StageConnectionError(
+            "Zaber 안정화 시간은 0 이상이어야 합니다.",
+            f"Invalid stage.settle_s: {settle_s}",
+        )
+    if move_velocity_mm_s is not None and move_velocity_mm_s <= 0:
+        raise StageConnectionError(
+            "Zaber 이동속도는 비워두거나 0보다 큰 값이어야 합니다.",
+            f"Invalid stage.move_velocity_mm_s: {move_velocity_mm_s}",
+        )
+    baud_rate = _positive_int(stage.get("baud_rate", 115200), "stage.baud_rate")
     return StageSettings(
-        serial_port=str(stage.get("serial_port", "COM3")),
-        baud_rate=int(stage.get("baud_rate", 115200)),
-        identify_devices=bool(stage.get("identify_devices", True)),
-        home_on_start=bool(stage.get("home_on_start", True)),
-        settle_s=_settle_seconds(stage),
-        move_velocity_mm_s=_optional_float(stage.get("move_velocity_mm_s")),
+        serial_port=str(stage.get("serial_port") or "COM3"),
+        baud_rate=baud_rate,
+        identify_devices=_bool_value(stage.get("identify_devices", True), True, "stage.identify_devices"),
+        home_on_start=_bool_value(stage.get("home_on_start", True), True, "stage.home_on_start"),
+        settle_s=settle_s,
+        move_velocity_mm_s=move_velocity_mm_s,
         device_db_path=_optional_str(stage.get("device_db_path")),
-        use_bundled_device_db=bool(stage.get("use_bundled_device_db", True)),
+        use_bundled_device_db=_bool_value(
+            stage.get("use_bundled_device_db", True),
+            True,
+            "stage.use_bundled_device_db",
+        ),
         x=_axis_address(axes, "x", default_device_index=0),
         y=_axis_address(axes, "y", default_device_index=0, default_axis_number=2),
     )
 
 
 def _settle_seconds(stage: dict[str, Any]) -> float:
-    if stage.get("settle_s") not in (None, ""):
-        return float(stage.get("settle_s", 0.2))
-    if stage.get("settle_ms") not in (None, ""):
-        return float(stage["settle_ms"]) / 1000.0
-    return 0.2
+    try:
+        if stage.get("settle_s") not in (None, ""):
+            return float(stage.get("settle_s", 0.2))
+        if stage.get("settle_ms") not in (None, ""):
+            return float(stage["settle_ms"]) / 1000.0
+        return 0.2
+    except (TypeError, ValueError) as exc:
+        raise StageConnectionError(
+            "Zaber 안정화 시간은 숫자로 입력해야 합니다.",
+            f"Invalid stage settle value: {exc}",
+        ) from exc
 
 
 def list_serial_ports() -> list[dict[str, str]]:
@@ -88,20 +128,36 @@ class ZaberXYStage:
         self.close()
 
     def open(self) -> ZaberXYStage:
-        configure_zaber_device_database(self.settings)
+        try:
+            configure_zaber_device_database(self.settings)
+            try:
+                self._open_connection_and_detect_devices()
+            except DeviceDbFailedException as exc:
+                self.close()
+                _configure_zaber_web_service_fallback(f"device detection failed with local Device DB: {exc}")
+                self._open_connection_and_detect_devices()
+        except StageConnectionError:
+            self.close()
+            raise
+        except Exception as exc:
+            self.close()
+            raise StageConnectionError(
+                "Zaber 스테이지 연결 또는 장치 탐색에 실패했습니다.",
+                str(exc),
+            ) from exc
+        return self
+
+    def _open_connection_and_detect_devices(self) -> None:
         self.connection = Connection.open_serial_port(
             self.settings.serial_port,
             baud_rate=self.settings.baud_rate,
         )
         self.connection.enable_alerts()
-        self.devices = self.connection.detect_devices(
-            identify_devices=self.settings.identify_devices
-        )
+        self.devices = self.connection.detect_devices(identify_devices=self.settings.identify_devices)
         self.x_axis = self._resolve_axis(self.settings.x)
         self.y_axis = self._resolve_axis(self.settings.y)
         if not self._axes():
-            raise RuntimeError("At least one Zaber axis must be enabled.")
-        return self
+            raise StageConnectionError("최소 하나의 Zaber 축은 활성화되어야 합니다.")
 
     def close(self) -> None:
         if self.connection is not None:
@@ -125,17 +181,30 @@ class ZaberXYStage:
     ) -> None:
         active_moves: list[Axis] = []
         move_kwargs = _move_kwargs(velocity_mm_s)
-        if self.settings.x.enabled:
-            x_axis = self._require_axis(self.x_axis, "X")
-            x_axis.move_absolute(x_mm, Units.LENGTH_MILLIMETRES, **move_kwargs)
-            active_moves.append(x_axis)
-        if self.settings.y.enabled:
-            y_axis = self._require_axis(self.y_axis, "Y")
-            y_axis.move_absolute(y_mm, Units.LENGTH_MILLIMETRES, **move_kwargs)
-            active_moves.append(y_axis)
-        if not active_moves:
-            raise RuntimeError("At least one Zaber axis must be enabled before moving.")
-        self._wait_until_idle(active_moves, cancel_requested)
+        try:
+            if self.settings.x.enabled:
+                x_axis = self._require_axis(self.x_axis, "X")
+                x_axis.move_absolute(x_mm, Units.LENGTH_MILLIMETRES, **move_kwargs)
+                active_moves.append(x_axis)
+            if self.settings.y.enabled:
+                y_axis = self._require_axis(self.y_axis, "Y")
+                y_axis.move_absolute(y_mm, Units.LENGTH_MILLIMETRES, **move_kwargs)
+                active_moves.append(y_axis)
+            if not active_moves:
+                raise StageConnectionError("이동하려면 최소 하나의 Zaber 축이 활성화되어야 합니다.")
+        except StageConnectionError:
+            self._stop_axes(active_moves, wait_until_idle=False, suppress_errors=True)
+            raise
+        except Exception as exc:
+            self._stop_axes(active_moves, wait_until_idle=False, suppress_errors=True)
+            raise _stage_command_error(exc, "stage move command failed") from exc
+        try:
+            self._wait_until_idle(active_moves, cancel_requested)
+        except StageMoveCancelled:
+            raise
+        except Exception as exc:
+            self._stop_axes(active_moves, wait_until_idle=False, suppress_errors=True)
+            raise _stage_command_error(exc, "stage move wait failed") from exc
 
     def position_mm(self) -> tuple[float | None, float | None]:
         x_position = (
@@ -151,8 +220,7 @@ class ZaberXYStage:
         return x_position, y_position
 
     def stop(self, wait_until_idle: bool = False) -> None:
-        for axis in self._axes():
-            axis.stop(wait_until_idle=wait_until_idle)
+        self._stop_axes(self._axes(), wait_until_idle=wait_until_idle, suppress_errors=False)
 
     def device_summary(self) -> list[dict[str, Any]]:
         return [
@@ -169,16 +237,19 @@ class ZaberXYStage:
         if not address.enabled:
             return None
         if address.device_index < 0 or address.device_index >= len(self.devices):
-            raise RuntimeError(
-                f"Zaber device index {address.device_index} was requested, "
-                f"but only {len(self.devices)} device(s) were detected."
+            raise StageConnectionError(
+                "요청한 Zaber 장치 index를 찾을 수 없습니다. 축 사용 설정과 device index를 확인하세요.",
+                (
+                    f"Zaber device index {address.device_index} was requested, "
+                    f"but only {len(self.devices)} device(s) were detected."
+                ),
             )
         return self.devices[address.device_index].get_axis(address.axis_number)
 
     @staticmethod
     def _require_axis(axis: Axis | None, name: str) -> Axis:
         if axis is None:
-            raise RuntimeError(f"{name} axis is not available.")
+            raise StageConnectionError(f"{name}축을 사용할 수 없습니다. 축 활성화와 Zaber 연결을 확인하세요.")
         return axis
 
     def _axes(self) -> tuple[Axis, ...]:
@@ -199,11 +270,36 @@ class ZaberXYStage:
             if not busy_axes:
                 return
             if cancel_requested is not None and cancel_requested():
-                self.stop(wait_until_idle=False)
+                self._stop_axes(axes, wait_until_idle=False, suppress_errors=False)
                 while any(axis.is_busy() for axis in axes):
                     time.sleep(0.05)
-                raise StageMoveCancelled("Stage move was cancelled.")
+                raise StageMoveCancelled("사용자 중지 요청으로 스테이지 이동을 취소했습니다.")
             time.sleep(0.05)
+
+    def _stop_axes(
+        self,
+        axes: tuple[Axis, ...] | list[Axis],
+        *,
+        wait_until_idle: bool,
+        suppress_errors: bool,
+    ) -> None:
+        errors: list[str] = []
+        for axis in axes:
+            try:
+                axis.stop(wait_until_idle=wait_until_idle)
+            except Exception as exc:
+                errors.append(str(exc))
+                logging.getLogger("linear_stage_control.stage").warning(
+                    "zaber axis stop failed: %s",
+                    exc,
+                )
+                if not suppress_errors:
+                    break
+        if errors and not suppress_errors:
+            raise StageConnectionError(
+                "Zaber 정지 명령을 완료하지 못했습니다. 장비 전원과 COM 포트 점유 상태를 확인하세요.",
+                "; ".join(errors),
+            )
 
 
 def _axis_address(
@@ -212,18 +308,38 @@ def _axis_address(
     default_device_index: int,
     default_axis_number: int = 1,
 ) -> AxisAddress:
+    if not isinstance(axes, dict):
+        raise StageConnectionError(
+            "Zaber axes 설정은 x/y 항목을 가진 객체여야 합니다.",
+            f"Invalid stage.axes: {axes!r}",
+        )
     axis = axes.get(name, {})
+    if axis is None:
+        axis = {}
+    if not isinstance(axis, dict):
+        raise StageConnectionError(
+            f"Zaber {name.upper()}축 설정은 객체여야 합니다.",
+            f"Invalid stage.axes.{name}: {axis!r}",
+        )
+    device_index = _non_negative_int(axis.get("device_index", default_device_index), f"stage.axes.{name}.device_index")
+    axis_number = _positive_int(axis.get("axis_number", default_axis_number), f"stage.axes.{name}.axis_number")
     return AxisAddress(
-        device_index=int(axis.get("device_index", default_device_index)),
-        axis_number=int(axis.get("axis_number", default_axis_number)),
-        enabled=bool(axis.get("enabled", True)),
+        device_index=device_index,
+        axis_number=axis_number,
+        enabled=_bool_value(axis.get("enabled", True), True, f"stage.axes.{name}.enabled"),
     )
 
 
-def _optional_float(value: Any) -> float | None:
+def _optional_float(value: Any, field_name: str = "value") -> float | None:
     if value is None or value == "":
         return None
-    return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise StageConnectionError(
+            f"{field_name} 값은 숫자로 입력해야 합니다.",
+            f"Invalid float for {field_name}: {value!r}",
+        ) from exc
 
 
 def _optional_str(value: Any) -> str | None:
@@ -241,11 +357,85 @@ def _move_kwargs(velocity_mm_s: float | None) -> dict[str, Any]:
     return kwargs
 
 
+def _bool_value(value: Any, default: bool, field_name: str) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in TRUE_CONFIG_VALUES:
+        return True
+    if text in FALSE_CONFIG_VALUES:
+        return False
+    raise StageConnectionError(
+        f"{field_name} 설정은 true 또는 false로 입력해야 합니다.",
+        f"Invalid boolean for {field_name}: {value!r}",
+    )
+
+
+def _positive_int(value: Any, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise StageConnectionError(
+            f"{field_name} 값은 정수로 입력해야 합니다.",
+            f"Invalid integer for {field_name}: {value!r}",
+        ) from exc
+    if parsed <= 0:
+        raise StageConnectionError(
+            f"{field_name} 값은 1 이상이어야 합니다.",
+            f"Invalid positive integer for {field_name}: {parsed}",
+        )
+    return parsed
+
+
+def _non_negative_int(value: Any, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise StageConnectionError(
+            f"{field_name} 값은 정수로 입력해야 합니다.",
+            f"Invalid integer for {field_name}: {value!r}",
+        ) from exc
+    if parsed < 0:
+        raise StageConnectionError(
+            f"{field_name} 값은 0 이상이어야 합니다.",
+            f"Invalid non-negative integer for {field_name}: {parsed}",
+        )
+    return parsed
+
+
+def _stage_command_error(exc: Exception, developer_context: str) -> StageConnectionError:
+    if isinstance(exc, SerialPortBusyException):
+        return StageConnectionError(
+            "Zaber COM 포트가 사용 중입니다. 실행 중인 run은 앱의 중지 버튼으로 정지하고, "
+            "Zaber Launcher 등 같은 포트를 쓰는 프로그램을 닫은 뒤 다시 시도하세요.",
+            f"{developer_context}: {exc}",
+        )
+    if isinstance(exc, DeviceBusyException):
+        return StageConnectionError(
+            "Zaber 장치가 이전 명령을 처리 중입니다. 잠시 기다리거나 중지 버튼으로 현재 이동을 멈춘 뒤 다시 시도하세요.",
+            f"{developer_context}: {exc}",
+        )
+    return StageConnectionError(
+        "Zaber 스테이지 명령 처리 중 오류가 발생했습니다. 연결, 전원, 축 활성화 설정을 확인하세요.",
+        f"{developer_context}: {exc}",
+    )
+
+
 def configure_zaber_device_database(settings: StageSettings) -> Path | None:
     device_db_path = _resolve_device_db_path(settings)
     if device_db_path is None:
         return None
-    Library.set_device_db_source(DeviceDbSourceType.FILE, str(device_db_path))
+    try:
+        Library.set_device_db_source(DeviceDbSourceType.FILE, str(device_db_path))
+    except Exception as exc:
+        _configure_zaber_web_service_fallback(f"local Device DB failed: {exc}")
+        return None
     return device_db_path
 
 
@@ -254,15 +444,121 @@ def _resolve_device_db_path(settings: StageSettings) -> Path | None:
     if settings.device_db_path:
         candidates.append(Path(os.path.expandvars(os.path.expanduser(settings.device_db_path))))
     if settings.use_bundled_device_db:
-        relative_path = Path("sdk_downloads") / "zaber" / "devices-public-v2.sqlite.lzma"
+        sqlite_relative_path = DEVICE_DB_RELATIVE_DIR / DEVICE_DB_SQLITE_NAME
+        lzma_relative_path = DEVICE_DB_RELATIVE_DIR / DEVICE_DB_LZMA_NAME
+        base_dirs = [
+            Path.cwd(),
+            Path(getattr(sys, "_MEIPASS", Path.cwd())),
+            Path(sys.executable).resolve().parent / "_internal",
+        ]
         candidates.extend(
-            [
-                Path.cwd() / relative_path,
-                Path(getattr(sys, "_MEIPASS", Path.cwd())) / relative_path,
-                Path(sys.executable).resolve().parent / "_internal" / relative_path,
-            ]
+            [base_dir / sqlite_relative_path for base_dir in base_dirs]
+            + [base_dir / lzma_relative_path for base_dir in base_dirs]
         )
-    for candidate in candidates:
+    invalid_reasons: list[str] = []
+    logger = logging.getLogger("linear_stage_control.stage")
+    for candidate in _dedupe_paths(candidates):
         if candidate.exists():
-            return candidate.resolve()
+            try:
+                return prepare_zaber_device_db_path(candidate)
+            except StageConnectionError as exc:
+                invalid_reasons.append(exc.developer_message)
+                logger.warning("skipping invalid zaber device database candidate: %s", exc.developer_message)
+                continue
+    if invalid_reasons:
+        _configure_zaber_web_service_fallback("; ".join(invalid_reasons))
     return None
+
+
+def prepare_zaber_device_db_path(path: str | Path) -> Path:
+    candidate = Path(path)
+    if not candidate.exists():
+        raise StageConnectionError(
+            "Zaber Device Database 파일을 찾을 수 없습니다.",
+            f"Missing Zaber Device Database: {candidate}",
+        )
+    if candidate.name.lower().endswith(".sqlite.lzma"):
+        return _decompress_zaber_device_db(candidate)
+    if candidate.suffix.lower() == ".sqlite":
+        resolved = candidate.resolve()
+        if _validate_sqlite_device_db(resolved):
+            return resolved
+        raise StageConnectionError(
+            "Zaber Device Database 파일이 올바른 SQLite DB가 아닙니다.",
+            f"Invalid Zaber Device Database header: {resolved}",
+        )
+    raise StageConnectionError(
+        "Zaber Device Database는 .sqlite 또는 .sqlite.lzma 파일이어야 합니다.",
+        f"Unsupported Zaber Device Database path: {candidate}",
+    )
+
+
+def _validate_sqlite_device_db(path: str | Path) -> bool:
+    try:
+        candidate = Path(path)
+        if not candidate.is_file():
+            return False
+        with candidate.open("rb") as file:
+            return file.read(len(SQLITE_HEADER)) == SQLITE_HEADER
+    except OSError:
+        return False
+
+
+def _decompress_zaber_device_db(path: Path) -> Path:
+    source = path.resolve()
+    cache_path = _zaber_device_db_cache_path()
+    if _validate_sqlite_device_db(cache_path) and cache_path.stat().st_mtime >= source.stat().st_mtime:
+        return cache_path
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cache_path.with_name(cache_path.name + ".tmp")
+    try:
+        with lzma.open(source, "rb") as source_file, temp_path.open("wb") as target_file:
+            while True:
+                chunk = source_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                target_file.write(chunk)
+        if not _validate_sqlite_device_db(temp_path):
+            raise StageConnectionError(
+                "Zaber Device Database 압축 해제 결과가 올바른 SQLite DB가 아닙니다.",
+                f"Invalid SQLite header after decompressing {source}",
+            )
+        temp_path.replace(cache_path)
+    except StageConnectionError:
+        temp_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        temp_path.unlink(missing_ok=True)
+        raise StageConnectionError(
+            "Zaber Device Database 압축 해제에 실패했습니다.",
+            f"Failed to decompress {source}: {exc}",
+        ) from exc
+    return cache_path
+
+
+def _zaber_device_db_cache_path() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) if base else Path.home() / "AppData" / "Local"
+    return root / "LinearStageControl" / "zaber" / DEVICE_DB_SQLITE_NAME
+
+
+def _configure_zaber_web_service_fallback(reason: str) -> None:
+    logger = logging.getLogger("linear_stage_control.stage")
+    try:
+        Library.set_device_db_source(DeviceDbSourceType.WEB_SERVICE)
+    except Exception:
+        logger.exception("zaber device database web service fallback failed")
+        return
+    logger.warning("zaber device database web service fallback enabled: %s", reason)
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result

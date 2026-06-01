@@ -10,7 +10,6 @@ from xml.sax.saxutils import escape
 
 import yaml
 
-
 DEFAULT_METADATA_FORMATS = ("csv", "jsonl", "json", "tsv", "yaml", "xlsx")
 DEFAULT_SUMMARY_FORMATS = ("json", "yaml", "md")
 SUPPORTED_METADATA_FORMATS = {"csv", "jsonl", "json", "tsv", "yaml", "xlsx"}
@@ -108,9 +107,7 @@ def build_run_summary(
         for record in ok_records
         if record.get("measured_radial_error_um") not in ("", None)
     ]
-    threshold_failures = sum(
-        1 for record in ok_records if record.get("within_error_threshold") is False
-    )
+    threshold_failures = sum(1 for record in ok_records if record.get("within_error_threshold") is False)
     return {
         "run_id": run_id,
         "status": status,
@@ -232,9 +229,7 @@ def _xlsx_sheet(rows: list[list[Any]]) -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        "<sheetData>"
-        + "".join(row_xml)
-        + "</sheetData></worksheet>"
+        "<sheetData>" + "".join(row_xml) + "</sheetData></worksheet>"
     )
 
 

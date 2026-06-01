@@ -20,11 +20,7 @@ class StageManufacturerSpecs:
 
     @property
     def axis_xy_worst_case_um(self) -> float:
-        return (
-            abs(self.accuracy_unidirectional_um)
-            + abs(self.repeatability_um)
-            + abs(self.horizontal_runout_um)
-        )
+        return abs(self.accuracy_unidirectional_um) + abs(self.repeatability_um) + abs(self.horizontal_runout_um)
 
     @property
     def radial_xy_worst_case_um(self) -> float:
@@ -44,11 +40,7 @@ class ErrorBudgetSettings:
 
     @property
     def axis_worst_case_um(self) -> float:
-        return (
-            abs(self.stage_accuracy_um)
-            + abs(self.stage_repeatability_um)
-            + abs(self.horizontal_runout_um)
-        )
+        return abs(self.stage_accuracy_um) + abs(self.stage_repeatability_um) + abs(self.horizontal_runout_um)
 
     @property
     def configured_worst_case_um(self) -> float:
@@ -135,9 +127,7 @@ def estimate_position_error_um(
     error_y_um = error_y_mm * 1000.0 if y_active and error_y_mm is not None else None
     radial_um = math.hypot(*(value for value in (error_x_um, error_y_um) if value is not None))
     active_axis_count = int(x_active) + int(y_active)
-    configured_budget_um = (
-        budget.configured_worst_case_um if active_axis_count == 2 else budget.axis_worst_case_um
-    )
+    configured_budget_um = budget.configured_worst_case_um if active_axis_count == 2 else budget.axis_worst_case_um
     max_allowed_um = budget.max_allowed_um if active_axis_count == 2 else budget.axis_worst_case_um
     predicted_min_um = max(0.0, radial_um - configured_budget_um)
     predicted_max_um = max(radial_um, configured_budget_um)

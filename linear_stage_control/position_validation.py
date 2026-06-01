@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .error_model import ZABER_LDM210_XY_SPECS
 from .scan import ScanPoint
-
 
 POSITION_MIN_MM = 0.0
 POSITION_MAX_MM = ZABER_LDM210_XY_SPECS.travel_range_mm
@@ -145,9 +145,7 @@ def validate_scan_points(points: list[ScanPoint]) -> PositionValidationResult:
             cell_warnings[(row, 1)] = detail
 
     if len(points) > LARGE_POSITION_COUNT_WARNING:
-        warnings.append(
-            f"위치가 {len(points)}개입니다. 장시간 run이 예상되므로 저장 공간과 카메라 발열을 확인하세요."
-        )
+        warnings.append(f"위치가 {len(points)}개입니다. 장시간 run이 예상되므로 저장 공간과 카메라 발열을 확인하세요.")
 
     return PositionValidationResult(errors, warnings, cell_errors, cell_warnings)
 
@@ -185,7 +183,7 @@ def format_issue_list(title: str, issues: list[str]) -> str:
     return "\n".join(lines)
 
 
-def compact_mm(value: object) -> str:
+def compact_mm(value: Any) -> str:
     try:
         number = float(value)
     except (TypeError, ValueError):

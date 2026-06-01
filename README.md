@@ -41,6 +41,7 @@
 | 검증 manifest | [update_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/update_manifest.json) | 자동 업데이트 SHA256 검증 | 설치 파일 hash, 크기, 채널 정보 |
 
 - Current public release: `v0.1.5`
+- Current local verification candidate: `v0.1.5`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -61,9 +62,20 @@ Basler ace 2 `a2A2464-115g5mBAS` 카메라와 Zaber XY 스테이지를 연동해
 - Python 3.13 가상환경: `.venv`
 - Basler Python SDK: `pypylon==26.4.1`
 - Zaber Motion Library: `zaber-motion==9.3.0`
-- Zaber official Device Database: `sdk_downloads/zaber/devices-public-v2.sqlite.lzma`
+- Zaber official Device Database: `sdk_downloads/zaber/devices-public-v2.sqlite`
 - Basler pylon Runtime은 기본 slim installer에 포함하지 않습니다. 앱 실행 후 장비 연결 실패 시 pylon Runtime 다운로드 안내 버튼을 사용합니다.
 - 오프라인 배포가 필요할 때만 `packaging\build_windows.ps1 -IncludePylonRuntime`으로 Runtime 포함 빌드를 만듭니다.
+
+개발용 검사 도구는 optional dependency로 분리되어 있습니다.
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m ruff check .
+python -m ruff format .
+python -m pyright
+```
+
+`pyright`는 처음부터 strict가 아니라 `camera.py`, `stage.py`, `dataset.py`, `scan.py`, `position_validation.py` 같은 핵심 로직과 공통 예외/로그 모듈을 basic mode로 검사합니다.
 
 ## 기본 명령
 
@@ -111,7 +123,17 @@ GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접
 
 오른쪽 `진단` 탭은 pypylon import, Basler 카메라 탐색, Zaber COM 포트, Zaber Device Database, 저장 폴더 쓰기 권한, GitHub 업데이트 접근성을 한 번에 점검합니다. 현장 PC에서 live가 뜨지 않거나 장비 연결이 애매할 때 먼저 실행해 결과를 로그와 표로 확인하면 됩니다.
 
-v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 오류가 났을 때는 `Live 재연결`과 `카메라 재검색`으로 빠르게 복구를 시도할 수 있습니다. `Live 크기` 슬라이더로 미리보기 화면 높이를 50-200% 범위에서 조정할 수 있습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+GUI의 실행 상태는 `AppRunState` enum으로 관리합니다. 촬영, 취소, 카메라 탐색, live preview, 진단, 수동 스테이지, 업데이트 다운로드 상태에 따라 버튼 활성화는 `apply_state()`에서 한 번에 정리합니다. 하드웨어/파서/저장/업데이트 오류는 공통 예외 계층을 거쳐 GUI에는 사용자용 메시지만 표시하고, 개발자용 상세 정보는 로그에 남깁니다.
+
+현장 디버깅 로그는 JSONL 형식으로 아래 경로에 저장됩니다.
+
+```text
+%USERPROFILE%/Documents/LinearStageControl/logs/
+  app_YYYYMMDD.log
+  run_<run_id>.log
+```
+
+v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 크기는 우하단 resize handle을 대각선으로 끌어 조정하고, 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
 
 Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
 

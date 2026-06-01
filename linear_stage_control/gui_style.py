@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 APP_STYLESHEET = """
 QWidget {
     color: #172033;
@@ -206,6 +205,10 @@ QLabel#preview {
     color: #cfd6df;
     border-radius: 9px;
     border: 1px solid #202833;
+}
+QWidget#previewResizeHandle {
+    background: rgba(17, 20, 24, 120);
+    border-top-left-radius: 7px;
 }
 QTableWidget#errorSummary, QTableWidget#previewMetrics, QTableWidget#stageSpecs, QTableWidget#preflightTable, QTableWidget#diagnosticsTable {
     background: #ffffff;

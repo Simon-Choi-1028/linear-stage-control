@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import lzma
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from linear_stage_control.camera import PYLON_IMPORT_ERROR, BaslerCamera, camera_settings_from_config
@@ -19,12 +21,70 @@ from linear_stage_control.dataset_exports import (
     normalise_formats,
 )
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
-from linear_stage_control.position_validation import disabled_axis_variation_errors
+from linear_stage_control.exceptions import StageConnectionError
+from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
 from linear_stage_control.scan import linear_path_points_by_spacing, points_from_records
-from linear_stage_control.stage import configure_zaber_device_database, stage_settings_from_config
+from linear_stage_control.stage import (
+    AxisAddress,
+    StageMoveCancelled,
+    StageSettings,
+    ZaberXYStage,
+    _resolve_device_db_path,
+    _validate_sqlite_device_db,
+    configure_zaber_device_database,
+    prepare_zaber_device_db_path,
+    stage_settings_from_config,
+)
 from linear_stage_control.updater import is_newer_version, sha256_file, verify_file_sha256
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+class _FakeAxis:
+    def __init__(
+        self,
+        *,
+        fail_on_move: bool = False,
+        fail_on_position: bool = False,
+        move_exception: Exception | None = None,
+        stop_exception: Exception | None = None,
+        stays_busy_until_stopped: bool = False,
+        position: float = 0.0,
+    ):
+        self.fail_on_move = fail_on_move
+        self.fail_on_position = fail_on_position
+        self.move_exception = move_exception
+        self.stop_exception = stop_exception
+        self.stays_busy_until_stopped = stays_busy_until_stopped
+        self.position = position
+        self.move_calls = 0
+        self.stop_calls = 0
+        self.stopped = False
+        self.moved = False
+
+    def move_absolute(self, *_args: object, **_kwargs: object) -> None:
+        self.move_calls += 1
+        if self.move_exception is not None:
+            raise self.move_exception
+        if self.fail_on_move:
+            raise RuntimeError("move failed")
+        self.moved = True
+        self.stopped = False
+
+    def is_busy(self) -> bool:
+        return self.stays_busy_until_stopped and self.moved and not self.stopped
+
+    def stop(self, *, wait_until_idle: bool = False) -> None:
+        _ = wait_until_idle
+        self.stop_calls += 1
+        if self.stop_exception is not None:
+            raise self.stop_exception
+        self.stopped = True
+
+    def get_position(self, *_args: object, **_kwargs: object) -> float:
+        if self.fail_on_position:
+            raise RuntimeError("inactive axis should not be read")
+        return self.position
 
 
 class ScanInputTests(unittest.TestCase):
@@ -63,6 +123,11 @@ class ScanInputTests(unittest.TestCase):
         self.assertEqual(points[0].y_mm, 2.5)
         self.assertEqual(points[0].move_velocity_mm_s, 10)
         self.assertEqual(points[0].capture_count, 3)
+
+    def test_blank_position_label_falls_back_to_point_name(self) -> None:
+        points = points_from_records([{"label": " ", "x_mm": "0.5", "y_mm": "0.0"}])
+
+        self.assertEqual(points[0].label, "point_0000")
 
 
 class CameraCompatibilityTests(unittest.TestCase):
@@ -149,6 +214,34 @@ class StageAxisSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.settle_s, 0.25)
 
+    def test_stage_boolean_strings_are_parsed_explicitly(self) -> None:
+        settings = stage_settings_from_config(
+            {
+                "stage": {
+                    "identify_devices": "false",
+                    "home_on_start": "0",
+                    "use_bundled_device_db": "no",
+                    "axes": {
+                        "x": {"enabled": "true"},
+                        "y": {"enabled": "off"},
+                    },
+                }
+            }
+        )
+
+        self.assertFalse(settings.identify_devices)
+        self.assertFalse(settings.home_on_start)
+        self.assertFalse(settings.use_bundled_device_db)
+        self.assertTrue(settings.x.enabled)
+        self.assertFalse(settings.y.enabled)
+
+    def test_stage_invalid_axis_config_raises_user_error(self) -> None:
+        with self.assertRaises(StageConnectionError):
+            stage_settings_from_config({"stage": {"axes": {"x": {"device_index": -1}}}})
+
+        with self.assertRaises(StageConnectionError):
+            stage_settings_from_config({"stage": {"axes": {"y": {"enabled": "sometimes"}}}})
+
     def test_disabled_axis_must_remain_constant(self) -> None:
         points = points_from_records(
             [
@@ -164,6 +257,161 @@ class StageAxisSettingsTests(unittest.TestCase):
         settings = stage_settings_from_config({"stage": {"use_bundled_device_db": False}})
 
         self.assertIsNone(configure_zaber_device_database(settings))
+
+    def test_zaber_device_database_sqlite_header_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sqlite_path = Path(directory) / "devices-public-v2.sqlite"
+            sqlite_path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 32)
+            bad_path = Path(directory) / "bad.sqlite"
+            bad_path.write_bytes(b"not sqlite")
+
+            self.assertTrue(_validate_sqlite_device_db(sqlite_path))
+            self.assertFalse(_validate_sqlite_device_db(bad_path))
+
+    def test_zaber_device_database_lzma_is_decompressed_to_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous_localappdata = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = directory
+            try:
+                lzma_path = Path(directory) / "devices-public-v2.sqlite.lzma"
+                lzma_path.write_bytes(lzma.compress(b"SQLite format 3\x00" + b"\x00" * 32))
+
+                resolved = prepare_zaber_device_db_path(lzma_path)
+
+                self.assertEqual(resolved.name, "devices-public-v2.sqlite")
+                self.assertTrue(_validate_sqlite_device_db(resolved))
+                self.assertTrue(str(resolved).startswith(directory))
+            finally:
+                if previous_localappdata is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous_localappdata
+
+    def test_zaber_device_database_prefers_uncompressed_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zaber_dir = root / "sdk_downloads" / "zaber"
+            zaber_dir.mkdir(parents=True)
+            sqlite_path = zaber_dir / "devices-public-v2.sqlite"
+            sqlite_path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 32)
+            (zaber_dir / "devices-public-v2.sqlite.lzma").write_bytes(
+                lzma.compress(b"SQLite format 3\x00" + b"\x01" * 32)
+            )
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                settings = stage_settings_from_config({"stage": {"use_bundled_device_db": True}})
+
+                resolved = _resolve_device_db_path(settings)
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(resolved, sqlite_path.resolve())
+
+    def test_zaber_device_database_skips_invalid_explicit_path_and_uses_bundled_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bad_path = root / "bad.sqlite"
+            bad_path.write_bytes(b"not sqlite")
+            zaber_dir = root / "sdk_downloads" / "zaber"
+            zaber_dir.mkdir(parents=True)
+            sqlite_path = zaber_dir / "devices-public-v2.sqlite"
+            sqlite_path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 32)
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                settings = StageSettings(
+                    serial_port="COM_TEST",
+                    device_db_path=str(bad_path),
+                    use_bundled_device_db=True,
+                )
+
+                resolved = _resolve_device_db_path(settings)
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(resolved, sqlite_path.resolve())
+
+    def test_stage_move_stops_started_axis_when_second_axis_command_fails(self) -> None:
+        stage = ZaberXYStage(StageSettings(serial_port="COM_TEST"))
+        x_axis = _FakeAxis()
+        y_axis = _FakeAxis(fail_on_move=True)
+        stage.x_axis = x_axis  # type: ignore[assignment]
+        stage.y_axis = y_axis  # type: ignore[assignment]
+
+        with self.assertRaises(StageConnectionError):
+            stage.move_absolute_mm(1.0, 2.0)
+
+        self.assertEqual(x_axis.move_calls, 1)
+        self.assertEqual(y_axis.move_calls, 1)
+        self.assertEqual(x_axis.stop_calls, 1)
+
+    def test_stage_cancel_uses_open_axis_stop_and_raises_cancelled(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        x_axis = _FakeAxis(stays_busy_until_stopped=True)
+        stage.x_axis = x_axis  # type: ignore[assignment]
+
+        with self.assertRaises(StageMoveCancelled):
+            stage.move_absolute_mm(1.0, 0.0, cancel_requested=lambda: True)
+
+        self.assertEqual(x_axis.stop_calls, 1)
+
+    def test_stage_inactive_axis_is_not_commanded_or_read(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        x_axis = _FakeAxis(position=1.25)
+        y_axis = _FakeAxis(fail_on_position=True)
+        stage.x_axis = x_axis  # type: ignore[assignment]
+        stage.y_axis = y_axis  # type: ignore[assignment]
+
+        stage.move_absolute_mm(1.25, 99.0)
+        self.assertEqual(stage.position_mm(), (1.25, None))
+        self.assertEqual(x_axis.move_calls, 1)
+        self.assertEqual(y_axis.move_calls, 0)
+
+    def test_stage_serial_busy_exception_becomes_user_recovery_message(self) -> None:
+        from zaber_motion.exceptions import SerialPortBusyException
+
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        stage.x_axis = _FakeAxis(move_exception=SerialPortBusyException("port busy"))  # type: ignore[assignment]
+
+        with self.assertRaises(StageConnectionError) as context:
+            stage.move_absolute_mm(1.0, 0.0)
+
+        self.assertIn("COM", context.exception.user_message)
+        self.assertIn("중지", context.exception.user_message)
+
+    def test_stage_stop_failure_becomes_user_recovery_message(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        stage.x_axis = _FakeAxis(stop_exception=RuntimeError("stop failed"))  # type: ignore[assignment]
+
+        with self.assertRaises(StageConnectionError) as context:
+            stage.stop(wait_until_idle=False)
+
+        self.assertIn("정지", context.exception.user_message)
 
 
 class ErrorModelTests(unittest.TestCase):
@@ -197,27 +445,102 @@ class GuiSmokeTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         window = MainWindow(start_device_scan=False)
         window.preview_mode = "live"
-        window.on_live_frame(np.zeros((24, 32), dtype=np.uint8), {})
+        window.on_live_frame(np.zeros((24, 32), dtype=np.uint8), {"live_fps": 9.75})
         app.processEvents()
 
         self.assertFalse(window.preview_label.pixmap().isNull())
+        self.assertEqual(window.live_status_label.text(), "Live 9.8 FPS")
         window.close()
 
-    def test_live_preview_size_slider_changes_preview_height(self) -> None:
+    def test_live_first_frame_resets_to_full_frame_fit(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        frame = np.arange(48 * 64, dtype=np.uint16).reshape(48, 64)
+        window.preview_mode = "live"
+        window.preview_zoom_slider.setValue(300)
+        window.live_first_frame_pending = True
+
+        window.on_live_frame(frame, {"live_fps": 10})
+        app.processEvents()
+
+        self.assertEqual(window.preview_zoom_slider.value(), 100)
+        self.assertEqual(window.preview_crop_rect, (0, 0, 64, 48))
+        window.close()
+
+    def test_live_parameter_update_sends_current_exposure_to_worker(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        class FakeLiveWorker:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, object]] = []
+
+            def isRunning(self) -> bool:
+                return True
+
+            def request_settings_update(self, config: dict[str, object]) -> None:
+                self.requests.append(config)
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        fake_worker = FakeLiveWorker()
+        window.live_worker = fake_worker  # type: ignore[assignment]
+        window.exposure_spin.setValue(12345)
+
+        window.apply_live_parameter_update()
+        app.processEvents()
+
+        self.assertEqual(fake_worker.requests[-1]["camera"]["exposure_us"], 12345)
+        window.live_worker = None
+        window.close()
+
+    def test_live_preview_resize_handle_changes_preview_height(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
         app = QApplication.instance() or QApplication([])
         window = MainWindow(start_device_scan=False)
         base_height = window.preview_label.minimumHeight()
-        window.live_size_slider.setValue(150)
+        window.resize_preview_by_drag(120)
         app.processEvents()
 
-        self.assertEqual(window.live_size_label.text(), "150%")
         self.assertGreater(window.preview_label.minimumHeight(), base_height)
+        self.assertIsNotNone(window.preview_user_min_height)
 
         window.live_size_reset_button.click()
         app.processEvents()
-        self.assertEqual(window.live_size_label.text(), "100%")
+        self.assertIsNone(window.preview_user_min_height)
+        self.assertEqual(window.preview_label.minimumHeight(), window.preview_base_min_height)
+        window.close()
+
+    def test_responsive_layout_allows_narrow_and_short_windows(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.show()
+        app.processEvents()
+
+        window.resize(980, 760)
+        app.processEvents()
+        QTest.qWait(120)
+        app.processEvents()
+        window.update_responsive_layout()
+
+        self.assertEqual(window.main_splitter.orientation(), Qt.Vertical)
+        self.assertLessEqual(window.width(), 990)
+        self.assertLessEqual(window.height(), 795)
+        self.assertGreaterEqual(window.preview_label.height(), 150)
+        self.assertGreaterEqual(window.preview_tabs.height(), 160)
+
+        window.resize(1440, 640)
+        app.processEvents()
+        QTest.qWait(120)
+        app.processEvents()
+        window.update_responsive_layout()
+
+        self.assertEqual(window.main_splitter.orientation(), Qt.Horizontal)
+        self.assertLessEqual(window.height(), 705)
         window.close()
 
     def test_diagnostics_tab_and_manual_stage_controls_exist(self) -> None:
@@ -233,6 +556,56 @@ class GuiSmokeTests(unittest.TestCase):
         window.manual_x_edit.setText("1.5")
         window.manual_y_edit.setText("-2.0")
         self.assertEqual(window._manual_target_values(), (1.5, -2.0))
+        window.close()
+
+    def test_app_state_centralizes_button_enablement(self) -> None:
+        from linear_stage_control.app_state import AppRunState
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        app.processEvents()
+
+        window.apply_state(AppRunState.ACQUIRING)
+        self.assertFalse(window.start_button.isEnabled())
+        self.assertTrue(window.stop_button.isEnabled())
+        self.assertFalse(window.camera_scan_button.isEnabled())
+        self.assertFalse(window.manual_move_button.isEnabled())
+
+        window.apply_state(AppRunState.CANCELLING)
+        self.assertFalse(window.stop_button.isEnabled())
+
+        window.apply_state(AppRunState.IDLE)
+        self.assertTrue(window.start_button.isEnabled())
+        self.assertFalse(window.stop_button.isEnabled())
+        self.assertFalse(window.manual_stop_button.isEnabled())
+        window.close()
+
+    def test_preflight_parses_string_axis_enabled_and_reports_single_axis_conflict(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        points = points_from_records([{"x_mm": 0, "y_mm": 0}, {"x_mm": 1, "y_mm": 0}])
+        config = {
+            "camera": {"pixel_format": "Mono8", "exposure_us": 5000},
+            "dataset": {"output_root": str(Path(tempfile.gettempdir()) / "LinearStageControl-QC")},
+            "scan": {"default_capture_count": 1},
+            "stage": {
+                "serial_port": "COM_TEST",
+                "axes": {
+                    "x": {"enabled": "false", "device_index": 0, "axis_number": 1},
+                    "y": {"enabled": "true", "device_index": 0, "axis_number": 2},
+                },
+            },
+            "updates": {"enabled": False},
+        }
+
+        issues = window.collect_preflight_issues(points, config, validate_scan_points(points))
+
+        conflict_details = [issue.detail for issue in issues if issue.item == "단일축 운용" and issue.status == "오류"]
+        self.assertTrue(conflict_details)
+        self.assertTrue(any("X" in detail for detail in conflict_details))
         window.close()
 
     def test_preview_zoom_grid_and_cross_render_without_hardware(self) -> None:
@@ -299,9 +672,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         image = pixmap.toImage()
         colors = {
-            image.pixelColor(x, y).name()
-            for x in range(0, image.width(), 40)
-            for y in range(0, image.height(), 40)
+            image.pixelColor(x, y).name() for x in range(0, image.width(), 40) for y in range(0, image.height(), 40)
         }
         self.assertGreater(len(colors), 1)
 

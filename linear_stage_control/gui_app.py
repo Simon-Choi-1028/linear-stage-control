@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 from PIL import Image
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QImage
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -39,9 +39,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QSlider,
     QSpinBox,
+    QSplitter,
     QStyle,
     QTableWidget,
     QTableWidgetItem,
@@ -50,6 +50,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
+from .app_state import AppRunState
 from .camera import iso_timestamp
 from .config import ConfigError, load_config
 from .dataset_exports import DEFAULT_METADATA_FORMATS, DEFAULT_SUMMARY_FORMATS
@@ -57,6 +59,24 @@ from .error_model import (
     ZABER_LDM210_XY_SPECS,
     error_budget_from_config,
     fixed_calibration_record,
+)
+from .exceptions import StageConnectionError
+from .gui_style import APP_STYLESHEET
+from .gui_support import (
+    app_base_dir,
+    apply_button_icon as _apply_button_icon,
+    apply_default_font as _apply_default_font,
+    bundled_resource,
+    preflight_status_color as _preflight_status_color,
+    set_placeholder_color as _set_placeholder_color,
+    set_table_values as _set_table_values,
+)
+from .gui_widgets import (
+    ErrorChartWidget,
+    FullscreenImageWindow,
+    ImagePreviewLabel,
+    ParameterAdjustRow,
+    PreviewResizeHandle,
 )
 from .gui_workers import (
     AcquisitionWorker,
@@ -67,23 +87,8 @@ from .gui_workers import (
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
-from .gui_widgets import (
-    ErrorChartWidget,
-    FullscreenImageWindow,
-    ImagePreviewLabel,
-    ParameterAdjustRow,
-)
 from .linear_path_dialog import show_linear_path_dialog
-from .gui_support import (
-    apply_button_icon as _apply_button_icon,
-    apply_default_font as _apply_default_font,
-    app_base_dir,
-    bundled_resource,
-    preflight_status_color as _preflight_status_color,
-    set_placeholder_color as _set_placeholder_color,
-    set_table_values as _set_table_values,
-)
-from .gui_style import APP_STYLESHEET
+from .logging_setup import configure_logging, get_logger
 from .position_validation import (
     POSITION_MAX_MM,
     POSITION_MIN_MM,
@@ -94,6 +99,7 @@ from .position_validation import (
     parse_position_rows,
     short_issue_text,
 )
+from .preview_rendering import qimage_from_array, render_preview_qimage
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
@@ -101,10 +107,8 @@ from .scan import (
     points_from_file,
     total_capture_count,
 )
-from .preview_rendering import qimage_from_array, render_preview_qimage
-from .stage import list_serial_ports
+from .stage import list_serial_ports, stage_settings_from_config
 from .text_formatting import (
-    axis_activity_from_stage_config as _axis_activity_from_stage_config,
     camera_display_name as _camera_display_name,
     camera_signature as _camera_signature,
     capture_sequence_text as _capture_sequence_text,
@@ -122,8 +126,6 @@ from .text_formatting import (
     um_text as _um_text,
 )
 from .updater import UpdateInfo, update_settings_from_config
-from . import __version__
-
 
 APP_TITLE = "XY 스테이지 캡처"
 POSITION_PLACEHOLDER_ROLE = Qt.UserRole + 50
@@ -141,6 +143,16 @@ CAMERA_PARAMETER_FIELDS = (
     ("decimation_x", "Decimation X", "정수"),
     ("decimation_y", "Decimation Y", "정수"),
 )
+LIVE_RESTART_CAMERA_PARAMETER_KEYS = {
+    "width",
+    "height",
+    "offset_x",
+    "offset_y",
+    "binning_x",
+    "binning_y",
+    "decimation_x",
+    "decimation_y",
+}
 
 
 @dataclass(frozen=True)
@@ -158,6 +170,9 @@ class MainWindow(QMainWindow):
         self.resize(1320, 820)
         self.config_path = Path("config.yaml")
         self.config: dict[str, Any] = {}
+        self.app_state = AppRunState.IDLE
+        self.app_log_path = configure_logging()
+        self.logger = get_logger("gui")
         self.worker: AcquisitionWorker | None = None
         self.camera_scan_worker: CameraDiscoveryWorker | None = None
         self.live_worker: LivePreviewWorker | None = None
@@ -175,14 +190,30 @@ class MainWindow(QMainWindow):
         self._preferred_camera_serial = ""
         self._camera_user_touched = False
         self._layout_is_narrow: bool | None = None
-        self.preview_base_min_height = 360
+        self.preview_base_min_height = 180
+        self.preview_user_min_height: int | None = None
         self.preview_source_qimage: QImage | None = None
         self.preview_crop_rect: tuple[int, int, int, int] | None = None
         self.preview_center_x = 0.5
         self.preview_center_y = 0.5
+        self.live_first_frame_pending = False
+        self.live_restart_required = False
+        self.live_settings_timer = QTimer(self)
+        self.live_settings_timer.setSingleShot(True)
+        self.live_settings_timer.setInterval(250)
+        self.live_settings_timer.timeout.connect(self.apply_live_parameter_update)
+        self.responsive_layout_timer = QTimer(self)
+        self.responsive_layout_timer.setSingleShot(True)
+        self.responsive_layout_timer.setInterval(80)
+        self.responsive_layout_timer.timeout.connect(self.update_responsive_layout)
         self._build_ui()
         self._apply_style()
         self._load_initial_config()
+        self.apply_state(AppRunState.IDLE)
+        self.logger.info(
+            "gui started",
+            extra={"event": "gui_started", "version": __version__, "log_path": self.app_log_path},
+        )
         if start_device_scan:
             self.refresh_devices()
             self.check_for_updates(silent=True)
@@ -205,7 +236,10 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)
-        self.update_responsive_layout()
+        if hasattr(self, "responsive_layout_timer"):
+            self.responsive_layout_timer.start()
+        else:
+            self.update_responsive_layout()
 
     def _build_ui(self) -> None:
         toolbar = QWidget()
@@ -267,34 +301,99 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "main_splitter"):
             return
         is_narrow = self.width() < 1180
-        if self._layout_is_narrow == is_narrow:
-            return
+        orientation_changed = self._layout_is_narrow != is_narrow
         self._layout_is_narrow = is_narrow
         if is_narrow:
-            self.main_splitter.setOrientation(Qt.Vertical)
+            if orientation_changed:
+                self.main_splitter.setOrientation(Qt.Vertical)
             self.control_scroll.setMinimumWidth(0)
-            self.control_scroll.setMinimumHeight(300)
+            self.control_scroll.setMinimumHeight(260)
+            self.preview_panel.setMinimumHeight(220)
+            self.preview_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            if hasattr(self, "preview_metrics_table"):
+                self.preview_metrics_table.setMinimumHeight(60)
+                self.preview_metrics_table.setMaximumHeight(78)
+            if hasattr(self, "preview_tabs"):
+                self.preview_tabs.setMinimumHeight(180)
+            self._set_preview_base_height(160)
+            total_height = max(640, self.main_splitter.height())
+            self.main_splitter.setSizes([min(430, total_height // 2), max(260, total_height - 430)])
+        else:
+            if orientation_changed:
+                self.main_splitter.setOrientation(Qt.Horizontal)
+            self.control_scroll.setMinimumHeight(0)
+            self.control_scroll.setMinimumWidth(300)
             self.preview_panel.setMinimumHeight(0)
             self.preview_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             if hasattr(self, "preview_metrics_table"):
-                self.preview_metrics_table.setMinimumHeight(72)
-                self.preview_metrics_table.setMaximumHeight(84)
+                self.preview_metrics_table.setMinimumHeight(64)
+                self.preview_metrics_table.setMaximumHeight(82)
             if hasattr(self, "preview_tabs"):
-                self.preview_tabs.setMinimumHeight(150)
-            self._set_preview_base_height(190)
-            self.main_splitter.setSizes([420, 620])
-        else:
-            self.main_splitter.setOrientation(Qt.Horizontal)
-            self.control_scroll.setMinimumHeight(0)
-            self.control_scroll.setMinimumWidth(420)
-            self.preview_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            if hasattr(self, "preview_metrics_table"):
-                self.preview_metrics_table.setMinimumHeight(86)
-                self.preview_metrics_table.setMaximumHeight(96)
-            if hasattr(self, "preview_tabs"):
-                self.preview_tabs.setMinimumHeight(0)
-            self._set_preview_base_height(360)
-            self.main_splitter.setSizes([470, max(650, self.width() - 470)])
+                self.preview_tabs.setMinimumHeight(180)
+            self._set_preview_base_height(180)
+            left_width = min(520, max(420, int(self.width() * 0.36)))
+            self.main_splitter.setSizes([left_width, max(620, self.width() - left_width)])
+        self._apply_preview_height()
+
+    def apply_state(self, state: AppRunState) -> None:
+        self.app_state = state
+        acquiring = state == AppRunState.ACQUIRING or self._worker_running(self.worker)
+        cancelling = state == AppRunState.CANCELLING
+        camera_scanning = state == AppRunState.DISCOVERING_CAMERA or self._worker_running(self.camera_scan_worker)
+        diagnostics = state == AppRunState.DIAGNOSTICS or self._worker_running(self.diagnostics_worker)
+        manual_stage = state == AppRunState.MANUAL_STAGE or self._worker_running(self.manual_stage_worker)
+        update_busy = (
+            state in {AppRunState.UPDATE_CHECKING, AppRunState.UPDATE_DOWNLOADING}
+            or self._worker_running(self.update_check_worker)
+            or self._worker_running(self.update_download_worker)
+        )
+        blocked = acquiring or cancelling
+
+        if hasattr(self, "start_button"):
+            self.start_button.setEnabled(not blocked and not camera_scanning and not diagnostics and not manual_stage)
+        if hasattr(self, "stop_button"):
+            self.stop_button.setEnabled(acquiring and not cancelling)
+        if hasattr(self, "refresh_button"):
+            self.refresh_button.setEnabled(not blocked and not camera_scanning and not diagnostics)
+        if hasattr(self, "camera_scan_button"):
+            self.camera_scan_button.setEnabled(not blocked and not camera_scanning and not diagnostics)
+        if hasattr(self, "update_button"):
+            self.update_button.setEnabled(not blocked and not update_busy)
+        if hasattr(self, "run_diagnostics_button"):
+            self.run_diagnostics_button.setEnabled(not blocked and not diagnostics and not camera_scanning)
+        if hasattr(self, "diagnostics_refresh_button"):
+            self.diagnostics_refresh_button.setEnabled(not blocked and not diagnostics and not camera_scanning)
+        if hasattr(self, "open_dataset_button"):
+            self.open_dataset_button.setEnabled(
+                bool(self.current_run_dir and self.current_run_dir.exists()) and not blocked
+            )
+        if hasattr(self, "manual_position_button"):
+            self._set_manual_stage_enabled(not blocked and not manual_stage)
+            self.manual_stop_button.setEnabled(manual_stage)
+
+    def apply_ambient_state(self) -> None:
+        self.apply_state(self._ambient_state())
+
+    def _ambient_state(self) -> AppRunState:
+        if self._worker_running(self.worker):
+            return AppRunState.ACQUIRING
+        if self._worker_running(self.manual_stage_worker):
+            return AppRunState.MANUAL_STAGE
+        if self._worker_running(self.diagnostics_worker):
+            return AppRunState.DIAGNOSTICS
+        if self._worker_running(self.update_download_worker):
+            return AppRunState.UPDATE_DOWNLOADING
+        if self._worker_running(self.update_check_worker):
+            return AppRunState.UPDATE_CHECKING
+        if self._worker_running(self.camera_scan_worker):
+            return AppRunState.DISCOVERING_CAMERA
+        if self._worker_running(self.live_worker):
+            return AppRunState.LIVE_PREVIEW
+        return AppRunState.IDLE
+
+    @staticmethod
+    def _worker_running(worker: object) -> bool:
+        return bool(worker is not None and hasattr(worker, "isRunning") and worker.isRunning())
 
     def _set_preview_base_height(self, height: int) -> None:
         self.preview_base_min_height = int(height)
@@ -302,17 +401,35 @@ class MainWindow(QMainWindow):
 
     def set_live_preview_scale(self, value: int) -> None:
         scale = int(value)
-        if hasattr(self, "live_size_label"):
-            self.live_size_label.setText(f"{scale}%")
+        self.preview_user_min_height = max(160, int(self.preview_base_min_height * scale / 100))
+        if hasattr(self, "live_size_hint_label"):
+            self.live_size_hint_label.setText(f"사용자 지정 높이 {self.preview_user_min_height}px")
+        self._apply_preview_height()
+
+    def resize_preview_by_drag(self, delta_y: int) -> None:
+        if not hasattr(self, "preview_label"):
+            return
+        current = self.preview_label.minimumHeight() or self.preview_base_min_height
+        self.preview_user_min_height = max(160, min(980, current + int(delta_y)))
+        if hasattr(self, "live_size_hint_label"):
+            self.live_size_hint_label.setText(f"사용자 지정 높이 {self.preview_user_min_height}px")
+        self._apply_preview_height()
+
+    def reset_preview_height(self) -> None:
+        self.preview_user_min_height = None
+        if hasattr(self, "live_size_hint_label"):
+            self.live_size_hint_label.setText("우하단 핸들을 끌어 크기 조정")
         self._apply_preview_height()
 
     def _apply_preview_height(self) -> None:
         if not hasattr(self, "preview_label"):
             return
-        scale = self.live_size_slider.value() if hasattr(self, "live_size_slider") else 100
-        height = max(160, int(self.preview_base_min_height * scale / 100))
+        height = max(160, int(self.preview_user_min_height or self.preview_base_min_height))
         self.preview_label.setMinimumHeight(height)
-        self.preview_label.setMaximumHeight(height)
+        self.preview_label.setMaximumHeight(16777215)
+        if hasattr(self, "preview_frame"):
+            self.preview_frame.setMinimumHeight(height)
+            self.preview_frame.setMaximumHeight(16777215)
         self.render_preview_source()
 
     def set_preview_zoom(self, value: int) -> None:
@@ -326,6 +443,18 @@ class MainWindow(QMainWindow):
         self.preview_center_y = 0.5
         if hasattr(self, "preview_zoom_slider"):
             self.preview_zoom_slider.setValue(100)
+        self.render_preview_source()
+
+    def reset_live_preview_view(self) -> None:
+        self.preview_center_x = 0.5
+        self.preview_center_y = 0.5
+        self.preview_crop_rect = None
+        if hasattr(self, "preview_zoom_slider"):
+            was_blocked = self.preview_zoom_slider.blockSignals(True)
+            self.preview_zoom_slider.setValue(100)
+            self.preview_zoom_slider.blockSignals(was_blocked)
+        if hasattr(self, "preview_zoom_label"):
+            self.preview_zoom_label.setText("100%")
         self.render_preview_source()
 
     def set_preview_center_from_label(self, x: float, y: float) -> None:
@@ -426,8 +555,12 @@ class MainWindow(QMainWindow):
         self.camera_status_label.setToolTip("마지막 Basler 카메라 검색 결과와 선택된 장비를 표시합니다.")
         _apply_button_icon(self.camera_scan_button, QStyle.SP_BrowserReload, "LAN Basler 카메라 자동검색 실행")
         self.pylon_runtime_button.setToolTip("pylon Runtime이 없을 때 Basler 공식 다운로드 페이지를 엽니다.")
-        self.x_axis_enabled_check.setToolTip("X축 장치가 연결된 경우 켭니다. 끄면 X 좌표가 run 전체에서 고정되어야 합니다.")
-        self.y_axis_enabled_check.setToolTip("Y축 장치가 연결된 경우 켭니다. 끄면 Y 좌표가 run 전체에서 고정되어야 합니다.")
+        self.x_axis_enabled_check.setToolTip(
+            "X축 장치가 연결된 경우 켭니다. 끄면 X 좌표가 run 전체에서 고정되어야 합니다."
+        )
+        self.y_axis_enabled_check.setToolTip(
+            "Y축 장치가 연결된 경우 켭니다. 끄면 Y 좌표가 run 전체에서 고정되어야 합니다."
+        )
         _apply_button_icon(self.pylon_runtime_button, QStyle.SP_DialogHelpButton, "Basler pylon Runtime 다운로드 안내")
         camera_scan_row = QWidget()
         camera_scan_layout = QHBoxLayout(camera_scan_row)
@@ -494,7 +627,9 @@ class MainWindow(QMainWindow):
 
         self.manual_x_edit.setToolTip("수동 절대 이동 목표 X 좌표입니다. X축 비활성 시 이동 명령에 사용되지 않습니다.")
         self.manual_y_edit.setToolTip("수동 절대 이동 목표 Y 좌표입니다. Y축 비활성 시 이동 명령에 사용되지 않습니다.")
-        self.manual_velocity_edit.setToolTip("수동 이동 속도입니다. 비우면 촬영 설정의 이동속도, 그것도 비어 있으면 장비 기본 속도를 사용합니다.")
+        self.manual_velocity_edit.setToolTip(
+            "수동 이동 속도입니다. 비우면 촬영 설정의 이동속도, 그것도 비어 있으면 장비 기본 속도를 사용합니다."
+        )
         self.manual_step_spin.setToolTip("X+/X-/Y+/Y- 버튼으로 이동할 상대 거리입니다.")
         _apply_button_icon(self.manual_position_button, QStyle.SP_BrowserReload, "현재 Zaber 위치 읽기")
         _apply_button_icon(self.manual_home_button, QStyle.SP_DialogResetButton, "활성 축 원점 복귀")
@@ -643,9 +778,19 @@ class MainWindow(QMainWindow):
         form.addRow("실행 옵션", self._option_check_box())
 
         self.output_browse_button.clicked.connect(self.browse_output_root)
+        self.exposure_spin.valueChanged.connect(lambda _value=0: self.schedule_live_parameter_update())
         self.settle_unit_combo.currentTextChanged.connect(self._on_settle_unit_changed)
         self.velocity_edit.textChanged.connect(self.refresh_position_feedback)
         self.capture_count_spin.valueChanged.connect(self.refresh_position_feedback)
+        self.pixel_format_combo.currentTextChanged.connect(
+            lambda _text="": self.schedule_live_parameter_update(restart_required=True)
+        )
+        for key, edit in self.camera_parameter_edits.items():
+            edit.editingFinished.connect(
+                lambda key=key: self.schedule_live_parameter_update(
+                    restart_required=key in LIVE_RESTART_CAMERA_PARAMETER_KEYS
+                )
+            )
         return group
 
     def _format_checks(self, formats: tuple[str, ...]) -> dict[str, QCheckBox]:
@@ -675,9 +820,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 7, 8, 7)
         layout.setHorizontalSpacing(10)
         layout.setVerticalSpacing(5)
-        for index, check in enumerate(
-            (self.software_trigger_check, self.save_numpy_check, self.skip_home_check)
-        ):
+        for index, check in enumerate((self.software_trigger_check, self.save_numpy_check, self.skip_home_check)):
             layout.addWidget(check, index // 2, index % 2)
         return widget
 
@@ -706,7 +849,9 @@ class MainWindow(QMainWindow):
         return widget
 
     def _set_settings_tooltips(self) -> None:
-        self.output_root_edit.setToolTip("run별 데이터셋을 저장할 폴더입니다. 기본값: Documents/LinearStageControl/datasets")
+        self.output_root_edit.setToolTip(
+            "run별 데이터셋을 저장할 폴더입니다. 기본값: Documents/LinearStageControl/datasets"
+        )
         self.output_browse_button.setToolTip("데이터셋 저장 폴더 선택")
         self.capture_count_spin.setToolTip("위치별 캡쳐 수가 비어 있을 때 사용할 기본 촬영 횟수입니다. 기본값: 1")
         self.pixel_format_combo.setToolTip("Basler 원본 픽셀 형식입니다. 기본값: Mono8")
@@ -831,9 +976,13 @@ class MainWindow(QMainWindow):
         self.clear_rows_button = QPushButton("비우기")
         _apply_button_icon(self.add_row_button, QStyle.SP_FileDialogNewFolder, "위치 행 추가")
         _apply_button_icon(self.delete_row_button, QStyle.SP_TrashIcon, "선택 위치 삭제")
-        _apply_button_icon(self.import_csv_button, QStyle.SP_DialogOpenButton, "CSV/TSV/TXT/JSON/YAML/XLSX 위치 목록 불러오기")
+        _apply_button_icon(
+            self.import_csv_button, QStyle.SP_DialogOpenButton, "CSV/TSV/TXT/JSON/YAML/XLSX 위치 목록 불러오기"
+        )
         _apply_button_icon(self.export_csv_button, QStyle.SP_DialogSaveButton, "현재 위치 목록 CSV 저장")
-        _apply_button_icon(self.linear_path_button, QStyle.SP_FileDialogDetailedView, "시작점과 끝점을 잇는 선형 연속 경로 생성 설정")
+        _apply_button_icon(
+            self.linear_path_button, QStyle.SP_FileDialogDetailedView, "시작점과 끝점을 잇는 선형 연속 경로 생성 설정"
+        )
         _apply_button_icon(self.clear_rows_button, QStyle.SP_LineEditClearButton, "위치 목록 비우기")
         button_grid.addWidget(self.add_row_button, 0, 0)
         button_grid.addWidget(self.delete_row_button, 0, 1)
@@ -851,15 +1000,11 @@ class MainWindow(QMainWindow):
         self.positions_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.positions_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.positions_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        self.positions_table.setToolTip(
-            "속도와 캡쳐 수는 비워 두면 촬영 설정의 이동속도/기본 캡쳐 수를 사용합니다."
-        )
+        self.positions_table.setToolTip("속도와 캡쳐 수는 비워 두면 촬영 설정의 이동속도/기본 캡쳐 수를 사용합니다.")
         self.positions_table.verticalHeader().setVisible(False)
         self.positions_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.positions_table.itemChanged.connect(self.on_position_item_changed)
-        self.position_status_label = QLabel(
-            f"위치 범위: {_mm_text(POSITION_MIN_MM)}-{_mm_text(POSITION_MAX_MM)} mm"
-        )
+        self.position_status_label = QLabel(f"위치 범위: {_mm_text(POSITION_MIN_MM)}-{_mm_text(POSITION_MAX_MM)} mm")
         self.position_status_label.setObjectName("positionStatus")
         self.position_status_label.setWordWrap(True)
 
@@ -914,10 +1059,22 @@ class MainWindow(QMainWindow):
 
         self.preview_label = ImagePreviewLabel("이미지 없음")
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(360)
+        self.preview_label.setMinimumHeight(180)
         self.preview_label.setObjectName("preview")
+        self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview_label.double_clicked.connect(self.open_fullscreen_image)
         self.preview_label.clicked.connect(self.set_preview_center_from_label)
+        self.preview_frame = QWidget()
+        self.preview_frame.setObjectName("previewFrame")
+        self.preview_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_frame_layout = QGridLayout(self.preview_frame)
+        preview_frame_layout.setContentsMargins(0, 0, 0, 0)
+        preview_frame_layout.setSpacing(0)
+        preview_frame_layout.addWidget(self.preview_label, 0, 0)
+        self.preview_resize_handle = PreviewResizeHandle()
+        self.preview_resize_handle.dragged.connect(self.resize_preview_by_drag)
+        self.preview_resize_handle.reset_requested.connect(self.reset_preview_height)
+        preview_frame_layout.addWidget(self.preview_resize_handle, 0, 0, Qt.AlignRight | Qt.AlignBottom)
         self.preview_info_label = QLabel("촬영 이미지를 선택하면 아래 칸에 위치와 오차가 표시됩니다")
         self.preview_info_label.setWordWrap(True)
         self.preview_info_label.setObjectName("previewInfo")
@@ -935,43 +1092,46 @@ class MainWindow(QMainWindow):
         self.live_scan_button.setProperty("variant", "quiet")
         self.live_status_label = QLabel("Live 대기")
         self.live_status_label.setObjectName("liveStatus")
-        self.live_size_label = QLabel("100%")
-        self.live_size_label.setMinimumWidth(42)
-        self.live_size_label.setAlignment(Qt.AlignCenter)
-        self.live_size_slider = QSlider(Qt.Horizontal)
-        self.live_size_slider.setRange(50, 200)
-        self.live_size_slider.setValue(100)
-        self.live_size_slider.setFixedWidth(140)
-        self.live_size_slider.setToolTip("Live 화면 크기 비율입니다. 기본값: 100%")
-        self.live_size_reset_button = QPushButton("100%")
-        self.live_size_reset_button.setMinimumWidth(58)
-        self.live_size_reset_button.setToolTip("Live 화면 크기를 기본값으로 되돌립니다.")
+        self.live_size_hint_label = QLabel("우하단 핸들을 끌어 크기 조정")
+        self.live_size_hint_label.setObjectName("previewInfo")
+        self.live_size_reset_button = QPushButton("기본 크기")
+        self.live_size_reset_button.setMinimumWidth(82)
+        self.live_size_reset_button.setToolTip("Live/이미지 미리보기 높이를 현재 레이아웃의 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
-        _apply_button_icon(self.live_retry_button, QStyle.SP_BrowserReload, "현재 선택한 카메라로 Live preview를 다시 연결합니다.")
-        _apply_button_icon(self.live_scan_button, QStyle.SP_FileDialogContentsView, "Basler 카메라를 재검색한 뒤 Live preview를 다시 시도합니다.")
+        _apply_button_icon(
+            self.live_retry_button, QStyle.SP_BrowserReload, "현재 선택한 카메라로 Live preview를 다시 연결합니다."
+        )
+        _apply_button_icon(
+            self.live_scan_button,
+            QStyle.SP_FileDialogContentsView,
+            "Basler 카메라를 재검색한 뒤 Live preview를 다시 시도합니다.",
+        )
         self.live_button.clicked.connect(self.show_live_preview)
         self.live_stop_button.clicked.connect(lambda: self.stop_live_preview(wait_ms=1500))
         self.live_retry_button.clicked.connect(self.restart_live_preview_from_button)
         self.live_scan_button.clicked.connect(lambda: self.start_camera_scan("live_recover"))
-        _apply_button_icon(self.live_size_reset_button, QStyle.SP_BrowserReload, "Live 화면 크기 100%")
-        self.live_size_slider.valueChanged.connect(self.set_live_preview_scale)
-        self.live_size_reset_button.clicked.connect(lambda: self.live_size_slider.setValue(100))
-        preview_info_row = QHBoxLayout()
-        preview_info_row.addWidget(self.preview_info_label, 1)
-        preview_info_row.addWidget(self.live_status_label)
-        preview_info_row.addWidget(self.live_button)
-        preview_info_row.addWidget(self.live_stop_button)
-        preview_info_row.addWidget(self.live_retry_button)
-        preview_info_row.addWidget(self.live_scan_button)
-        preview_info_row.addWidget(self.fullscreen_button)
-
-        live_size_row = QHBoxLayout()
-        live_size_row.addStretch(1)
-        live_size_row.addWidget(QLabel("Live 크기"))
-        live_size_row.addWidget(self.live_size_slider)
-        live_size_row.addWidget(self.live_size_label)
-        live_size_row.addWidget(self.live_size_reset_button)
+        _apply_button_icon(self.live_size_reset_button, QStyle.SP_BrowserReload, "미리보기 화면 크기 초기화")
+        self.live_size_reset_button.clicked.connect(self.reset_preview_height)
+        preview_info_widget = QWidget()
+        preview_info_grid = QGridLayout(preview_info_widget)
+        preview_info_grid.setContentsMargins(0, 0, 0, 0)
+        preview_info_grid.setHorizontalSpacing(6)
+        preview_info_grid.setVerticalSpacing(6)
+        preview_info_grid.addWidget(self.preview_info_label, 0, 0, 1, 5)
+        preview_info_grid.addWidget(self.live_status_label, 0, 5)
+        preview_info_grid.addWidget(self.live_button, 1, 0)
+        preview_info_grid.addWidget(self.live_stop_button, 1, 1)
+        preview_info_grid.addWidget(self.live_retry_button, 1, 2)
+        preview_info_grid.addWidget(self.live_scan_button, 1, 3)
+        preview_info_grid.addWidget(self.fullscreen_button, 1, 4)
+        preview_info_grid.addWidget(self.live_size_reset_button, 1, 5)
+        preview_info_grid.setColumnStretch(0, 1)
+        preview_info_grid.setColumnStretch(1, 1)
+        preview_info_grid.setColumnStretch(2, 1)
+        preview_info_grid.setColumnStretch(3, 1)
+        preview_info_grid.setColumnStretch(4, 1)
+        preview_info_grid.setColumnStretch(5, 1)
 
         self.preview_zoom_label = QLabel("100%")
         self.preview_zoom_label.setMinimumWidth(42)
@@ -980,7 +1140,9 @@ class MainWindow(QMainWindow):
         self.preview_zoom_slider.setRange(100, 800)
         self.preview_zoom_slider.setValue(100)
         self.preview_zoom_slider.setFixedWidth(140)
-        self.preview_zoom_slider.setToolTip("미리보기 디지털 확대 비율입니다. 확대 후 이미지를 클릭하면 해당 지점으로 중심이 이동합니다.")
+        self.preview_zoom_slider.setToolTip(
+            "미리보기 디지털 확대 비율입니다. 확대 후 이미지를 클릭하면 해당 지점으로 중심이 이동합니다."
+        )
         self.preview_zoom_reset_button = QPushButton("맞춤")
         self.preview_zoom_reset_button.setProperty("variant", "quiet")
         self.preview_zoom_reset_button.setMinimumWidth(64)
@@ -1025,8 +1187,8 @@ class MainWindow(QMainWindow):
         self.preview_metrics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.preview_metrics_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.preview_metrics_table.setFocusPolicy(Qt.NoFocus)
-        self.preview_metrics_table.setMinimumHeight(86)
-        self.preview_metrics_table.setMaximumHeight(96)
+        self.preview_metrics_table.setMinimumHeight(64)
+        self.preview_metrics_table.setMaximumHeight(82)
         for column in range(self.preview_metrics_table.columnCount()):
             self.preview_metrics_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.preview_metrics_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -1086,8 +1248,8 @@ class MainWindow(QMainWindow):
         self.error_summary_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.error_summary_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.error_summary_table.setFocusPolicy(Qt.NoFocus)
-        self.error_summary_table.setMinimumHeight(96)
-        self.error_summary_table.setMaximumHeight(112)
+        self.error_summary_table.setMinimumHeight(60)
+        self.error_summary_table.setMaximumHeight(78)
         for column in range(self.error_summary_table.columnCount()):
             self.error_summary_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
         self._set_error_summary_values(["촬영 전", "-", "-", "-", "-", "-"])
@@ -1107,9 +1269,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_diagnostics_tab(), "진단")
         tabs.addTab(log_tab, "로그")
 
-        layout.addWidget(self.preview_label, 3)
-        layout.addLayout(preview_info_row)
-        layout.addLayout(live_size_row)
+        layout.addWidget(self.preview_frame, 3)
+        layout.addWidget(preview_info_widget)
         layout.addLayout(preview_tools_row)
         layout.addWidget(self.preview_metrics_table)
         layout.addWidget(tabs, 2)
@@ -1125,8 +1286,14 @@ class MainWindow(QMainWindow):
         self.diagnostics_refresh_button.setProperty("variant", "quiet")
         self.diagnostics_status_label = QLabel("진단 전")
         self.diagnostics_status_label.setObjectName("manualStageStatus")
-        _apply_button_icon(self.run_diagnostics_button, QStyle.SP_MessageBoxInformation, "pylon, Basler, Zaber, 저장 폴더, 업데이트 접근성을 점검합니다.")
-        _apply_button_icon(self.diagnostics_refresh_button, QStyle.SP_BrowserReload, "카메라와 COM 포트 목록을 새로고침합니다.")
+        _apply_button_icon(
+            self.run_diagnostics_button,
+            QStyle.SP_MessageBoxInformation,
+            "pylon, Basler, Zaber, 저장 폴더, 업데이트 접근성을 점검합니다.",
+        )
+        _apply_button_icon(
+            self.diagnostics_refresh_button, QStyle.SP_BrowserReload, "카메라와 COM 포트 목록을 새로고침합니다."
+        )
         self.run_diagnostics_button.clicked.connect(self.run_diagnostics)
         self.diagnostics_refresh_button.clicked.connect(self.refresh_devices)
         top_row.addWidget(self.run_diagnostics_button)
@@ -1187,7 +1354,9 @@ class MainWindow(QMainWindow):
         self.output_root_edit.setCursorPosition(0)
         self.exposure_spin.setValue(int(camera.get("exposure_us", 5000) or 5000))
         self.set_settle_seconds(_stage_settle_seconds_from_config(stage))
-        self.velocity_edit.setText("" if stage.get("move_velocity_mm_s") in (None, "") else str(stage.get("move_velocity_mm_s")))
+        self.velocity_edit.setText(
+            "" if stage.get("move_velocity_mm_s") in (None, "") else str(stage.get("move_velocity_mm_s"))
+        )
         self.capture_count_spin.setValue(default_capture_count_from_config(config))
         self.pixel_format_combo.setCurrentText(str(camera.get("pixel_format", "Mono8")))
         self._apply_camera_parameter_values(camera)
@@ -1264,7 +1433,7 @@ class MainWindow(QMainWindow):
             return
 
         self._set_camera_scan_state("searching", "탐색중", "Basler LAN 카메라 검색 중...")
-        self.camera_scan_button.setEnabled(False)
+        self.apply_state(AppRunState.DISCOVERING_CAMERA)
         self.camera_scan_worker = CameraDiscoveryWorker(reason)
         self.camera_scan_worker.cameras_found.connect(self.on_cameras_found)
         self.camera_scan_worker.scan_failed.connect(self.on_camera_scan_failed)
@@ -1333,8 +1502,7 @@ class MainWindow(QMainWindow):
 
     def on_camera_scan_finished(self) -> None:
         self.camera_scan_worker = None
-        if self.worker is None or not self.worker.isRunning():
-            self.camera_scan_button.setEnabled(True)
+        self.apply_ambient_state()
 
     def _set_camera_scan_state(self, state: str, label: str, detail: str) -> None:
         self.camera_scan_state_label.setText(label)
@@ -1355,7 +1523,10 @@ class MainWindow(QMainWindow):
             self.start_live_preview()
 
     def open_pylon_runtime_download(self) -> None:
-        url = str(self.config.get("camera", {}).get("pylon_runtime_url") or "https://www.baslerweb.com/en/downloads/software-downloads/")
+        url = str(
+            self.config.get("camera", {}).get("pylon_runtime_url")
+            or "https://www.baslerweb.com/en/downloads/software-downloads/"
+        )
         webbrowser.open(url)
 
     def live_preview_enabled(self) -> bool:
@@ -1381,10 +1552,35 @@ class MainWindow(QMainWindow):
         camera["timeout_ms"] = max(1000, int(camera.get("timeout_ms", 5000) or 5000))
         return config
 
+    def schedule_live_parameter_update(self, restart_required: bool = False) -> None:
+        if not self._worker_running(self.live_worker):
+            return
+        self.live_restart_required = self.live_restart_required or restart_required
+        self.live_settings_timer.start()
+
+    def apply_live_parameter_update(self) -> None:
+        if not self._worker_running(self.live_worker):
+            self.live_restart_required = False
+            return
+        if self.live_restart_required:
+            self.live_restart_required = False
+            self.restart_live_preview_from_button()
+            return
+        try:
+            live_config = self.build_live_config()
+        except Exception as exc:
+            self.live_status_label.setText("Live 설정 오류")
+            self.log(f"Live 설정 업데이트 오류: {exc}")
+            return
+        if self.live_worker is not None:
+            self.live_worker.request_settings_update(live_config)
+            self.live_status_label.setText("Live 설정 적용 중")
+
     def show_live_preview(self) -> None:
         self.preview_mode = "live"
         self.current_image_path = None
         self.fullscreen_button.setEnabled(False)
+        self.reset_live_preview_view()
         if self.live_worker is None or not self.live_worker.isRunning():
             self.start_live_preview()
         else:
@@ -1392,6 +1588,7 @@ class MainWindow(QMainWindow):
 
     def restart_live_preview_from_button(self) -> None:
         self.preview_mode = "live"
+        self.reset_live_preview_view()
         self.stop_live_preview(wait_ms=1500, update_label=False)
         if self.camera_combo.count() <= 1:
             self.live_status_label.setText("카메라 재검색 중")
@@ -1409,6 +1606,8 @@ class MainWindow(QMainWindow):
         self.preview_mode = "live"
         self.current_image_path = None
         self.fullscreen_button.setEnabled(False)
+        self.live_first_frame_pending = True
+        self.reset_live_preview_view()
         self.live_status_label.setText("Live 시작 중")
         try:
             live_config = self.build_live_config()
@@ -1422,11 +1621,14 @@ class MainWindow(QMainWindow):
         self.live_worker.live_failed.connect(self.on_live_failed)
         self.live_worker.finished.connect(self.on_live_finished)
         self.live_worker.start()
+        self.apply_state(AppRunState.LIVE_PREVIEW)
 
     def stop_live_preview(self, wait_ms: int = 0, update_label: bool = True) -> None:
         if self.live_worker is None:
             if update_label and hasattr(self, "live_status_label"):
                 self.live_status_label.setText("Live 정지")
+            if self.app_state == AppRunState.LIVE_PREVIEW:
+                self.apply_ambient_state()
             return
         worker = self.live_worker
         worker.request_stop()
@@ -1436,12 +1638,23 @@ class MainWindow(QMainWindow):
             self.live_worker = None
         if update_label and hasattr(self, "live_status_label"):
             self.live_status_label.setText("Live 정지")
+        if self.app_state == AppRunState.LIVE_PREVIEW:
+            self.apply_ambient_state()
 
     def on_live_frame(self, array: object, metadata: dict[str, Any]) -> None:
         if self.preview_mode != "live":
             return
-        self.set_preview_source(qimage_from_array(array), reset_center=False)
-        self.live_status_label.setText(f"Live {self.live_preview_fps()} FPS")
+        reset_center = self.live_first_frame_pending
+        self.live_first_frame_pending = False
+        if reset_center:
+            self.reset_live_preview_view()
+        self.set_preview_source(qimage_from_array(array), reset_center=reset_center)
+        fps_value = metadata.get("live_fps")
+        try:
+            fps_text = f"{float(fps_value):.1f} FPS" if fps_value else "수신 중"
+        except (TypeError, ValueError):
+            fps_text = "수신 중"
+        self.live_status_label.setText(f"Live {fps_text}")
         timestamp = metadata.get("completed_at") or metadata.get("captured_at") or ""
         self.preview_info_label.setText(f"Live preview 표시 중 {timestamp}".strip())
 
@@ -1451,9 +1664,12 @@ class MainWindow(QMainWindow):
         if "pylon" in message.lower():
             self.pylon_runtime_button.setVisible(True)
         self.log(f"Live preview 오류: {message}")
+        self.apply_state(AppRunState.ERROR)
 
     def on_live_finished(self) -> None:
         self.live_worker = None
+        if self.app_state == AppRunState.LIVE_PREVIEW:
+            self.apply_ambient_state()
 
     def check_for_updates(self, silent: bool = False) -> None:
         settings = update_settings_from_config(self.config)
@@ -1465,10 +1681,12 @@ class MainWindow(QMainWindow):
         if self.update_check_worker is not None and self.update_check_worker.isRunning():
             return
         self.update_status_label.setText("업데이트 확인 중")
-        self.update_button.setEnabled(False)
+        self.apply_state(AppRunState.UPDATE_CHECKING)
         self.update_check_worker = UpdateCheckWorker(settings.repo, __version__)
         self.update_check_worker.update_available.connect(lambda update: self.on_update_available(update, silent))
-        self.update_check_worker.update_not_available.connect(lambda version: self.on_update_not_available(version, silent))
+        self.update_check_worker.update_not_available.connect(
+            lambda version: self.on_update_not_available(version, silent)
+        )
         self.update_check_worker.update_failed.connect(lambda message: self.on_update_failed(message, silent))
         self.update_check_worker.finished.connect(self.on_update_check_finished)
         self.update_check_worker.start()
@@ -1509,7 +1727,7 @@ class MainWindow(QMainWindow):
 
     def on_update_check_finished(self) -> None:
         self.update_check_worker = None
-        self.update_button.setEnabled(True)
+        self.apply_ambient_state()
 
     def start_update_download(self, update: UpdateInfo) -> None:
         if self.update_download_worker is not None and self.update_download_worker.isRunning():
@@ -1517,7 +1735,7 @@ class MainWindow(QMainWindow):
         file_name = update.setup_asset_name or "LinearStageControlSetup.exe"
         output_path = Path(os.environ.get("TEMP", ".")) / "LinearStageControl" / file_name
         self.update_status_label.setText("업데이트 다운로드 중")
-        self.update_button.setEnabled(False)
+        self.apply_state(AppRunState.UPDATE_DOWNLOADING)
         self.update_download_worker = UpdateDownloadWorker(update, output_path)
         self.update_download_worker.progress_changed.connect(self.on_update_download_progress)
         self.update_download_worker.download_done.connect(self.on_update_download_done)
@@ -1544,7 +1762,7 @@ class MainWindow(QMainWindow):
 
     def on_update_download_finished(self) -> None:
         self.update_download_worker = None
-        self.update_button.setEnabled(True)
+        self.apply_ambient_state()
 
     def run_diagnostics(self) -> None:
         if self.diagnostics_worker is not None and self.diagnostics_worker.isRunning():
@@ -1556,7 +1774,7 @@ class MainWindow(QMainWindow):
         output_root = self.output_root_edit.text() if hasattr(self, "output_root_edit") else "output/datasets"
         self.diagnostics_table.setRowCount(0)
         self.diagnostics_status_label.setText("진단 실행 중")
-        self.run_diagnostics_button.setEnabled(False)
+        self.apply_state(AppRunState.DIAGNOSTICS)
         self.diagnostics_worker = DiagnosticsWorker(config, output_root, __version__)
         self.diagnostics_worker.diagnostics_done.connect(self.on_diagnostics_done)
         self.diagnostics_worker.diagnostics_failed.connect(self.on_diagnostics_failed)
@@ -1595,7 +1813,7 @@ class MainWindow(QMainWindow):
 
     def on_diagnostics_finished(self) -> None:
         self.diagnostics_worker = None
-        self.run_diagnostics_button.setEnabled(True)
+        self.apply_ambient_state()
 
     def browse_output_root(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", self.output_root_edit.text())
@@ -1980,8 +2198,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "수동 스테이지 설정 오류", str(exc))
             return
         self.manual_stage_status_label.setText("명령 준비 중")
-        self._set_manual_stage_enabled(False)
-        self.manual_stop_button.setEnabled(True)
+        self.apply_state(AppRunState.MANUAL_STAGE)
         self.manual_stage_worker = ManualStageWorker(
             config,
             action,
@@ -2017,7 +2234,7 @@ class MainWindow(QMainWindow):
 
     def on_manual_stage_finished(self) -> None:
         self.manual_stage_worker = None
-        self._set_manual_stage_enabled(True)
+        self.apply_ambient_state()
 
     def _set_manual_stage_enabled(self, enabled: bool) -> None:
         for button in (
@@ -2067,7 +2284,9 @@ class MainWindow(QMainWindow):
         live_preview.setdefault("enabled", True)
         live_preview.setdefault("fps", 10)
 
-        stage["serial_port"] = self.stage_port_combo.currentData() or self.stage_port_combo.currentText().split(" - ")[0]
+        stage["serial_port"] = (
+            self.stage_port_combo.currentData() or self.stage_port_combo.currentText().split(" - ")[0]
+        )
         stage["settle_s"] = self.settle_seconds()
         stage.pop("settle_ms", None)
         stage["move_velocity_mm_s"] = _optional_float_text(self.velocity_edit.text())
@@ -2115,9 +2334,7 @@ class MainWindow(QMainWindow):
             default_capture_count = default_capture_count_from_config(config)
             total_captures = total_capture_count(points, default_capture_count)
             override_count = sum(
-                1
-                for point in points
-                if point.move_velocity_mm_s is not None or point.capture_count is not None
+                1 for point in points if point.move_velocity_mm_s is not None or point.capture_count is not None
             )
             status = "경고" if position_validation.warnings else "통과"
             detail = (
@@ -2181,24 +2398,31 @@ class MainWindow(QMainWindow):
                 )
             )
 
-        issues.append(self._axis_mapping_issue(stage))
-        x_active, y_active = _axis_activity_from_stage_config(stage)
-        axis_variation_errors = disabled_axis_variation_errors(
-            points,
-            x_active=x_active,
-            y_active=y_active,
-        )
-        if axis_variation_errors:
-            for error in axis_variation_errors:
-                issues.append(PreflightIssue("단일축 운용", "오류", error))
+        axis_issue = self._axis_mapping_issue(stage)
+        issues.append(axis_issue)
+        try:
+            parsed_stage_settings = stage_settings_from_config(config)
+        except StageConnectionError as exc:
+            issues.append(PreflightIssue("스테이지 설정", "오류", exc.user_message))
         else:
-            mode = "XY 2축" if x_active and y_active else ("X축 단독" if x_active else "Y축 단독")
-            inactive_note = ""
-            if not x_active:
-                inactive_note = " | X actual/error는 빈 값으로 저장"
-            if not y_active:
-                inactive_note = " | Y actual/error는 빈 값으로 저장"
-            issues.append(PreflightIssue("축 활성화", "통과", f"{mode} 운용{inactive_note}"))
+            x_active = parsed_stage_settings.x.enabled
+            y_active = parsed_stage_settings.y.enabled
+            axis_variation_errors = disabled_axis_variation_errors(
+                points,
+                x_active=x_active,
+                y_active=y_active,
+            )
+            if axis_variation_errors:
+                for error in axis_variation_errors:
+                    issues.append(PreflightIssue("단일축 운용", "오류", error))
+            else:
+                mode = "XY 2축" if x_active and y_active else ("X축 단독" if x_active else "Y축 단독")
+                inactive_note = ""
+                if not x_active:
+                    inactive_note = " | X actual/error는 빈 값으로 저장"
+                if not y_active:
+                    inactive_note = " | Y actual/error는 빈 값으로 저장"
+                issues.append(PreflightIssue("축 활성화", "통과", f"{mode} 운용{inactive_note}"))
 
         dataset = config.get("dataset", {})
         output_root = str(dataset.get("output_root") or "").strip()
@@ -2265,22 +2489,15 @@ class MainWindow(QMainWindow):
         return issues
 
     def _axis_mapping_issue(self, stage: dict[str, Any]) -> PreflightIssue:
-        axes = stage.get("axes", {})
         try:
-            x_axis = axes.get("x", {}) or {}
-            y_axis = axes.get("y", {}) or {}
-            x_enabled = bool(x_axis.get("enabled", True))
-            y_enabled = bool(y_axis.get("enabled", True))
-            x_address = (
-                int(x_axis.get("device_index", 0)),
-                int(x_axis.get("axis_number", 1)),
-            )
-            y_address = (
-                int(y_axis.get("device_index", 0)),
-                int(y_axis.get("axis_number", 2)),
-            )
-        except (TypeError, ValueError) as exc:
-            return PreflightIssue("축 매핑", "오류", f"X/Y 축 설정을 숫자로 해석할 수 없습니다: {exc}")
+            settings = stage_settings_from_config({"stage": stage})
+        except StageConnectionError as exc:
+            return PreflightIssue("축 매핑", "오류", exc.user_message)
+
+        x_enabled = settings.x.enabled
+        y_enabled = settings.y.enabled
+        x_address = (settings.x.device_index, settings.x.axis_number)
+        y_address = (settings.y.device_index, settings.y.axis_number)
 
         detail = (
             f"X {'ON' if x_enabled else 'OFF'} device {x_address[0]} axis {x_address[1]} | "
@@ -2387,12 +2604,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.set_run_status("촬영 준비 중")
         self.progress_detail_label.setText(f"0/{capture_total} 완료")
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.refresh_button.setEnabled(False)
-        self.camera_scan_button.setEnabled(False)
-        self._set_manual_stage_enabled(False)
-        self.manual_stop_button.setEnabled(False)
+        self.apply_state(AppRunState.ACQUIRING)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_status_label.setText("카메라 검색 종료 대기 중...")
             self.camera_scan_worker.wait(2000)
@@ -2418,7 +2630,7 @@ class MainWindow(QMainWindow):
     def stop_run(self) -> None:
         if self.worker is not None:
             self.worker.request_stop()
-            self.stop_button.setEnabled(False)
+            self.apply_state(AppRunState.CANCELLING)
             self.set_run_status("중지 요청됨")
             self.log("중지 요청됨")
 
@@ -2465,29 +2677,20 @@ class MainWindow(QMainWindow):
         )
 
     def on_run_failed(self, message: str) -> None:
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.refresh_button.setEnabled(True)
-        self.camera_scan_button.setEnabled(True)
-        self._set_manual_stage_enabled(True)
         self.set_run_status("오류 발생")
+        self.apply_state(AppRunState.ERROR)
         self.log(f"오류: {message}")
         QMessageBox.critical(self, "실행 실패", message)
         self.restart_live_preview_after_run()
 
     def on_run_done(self, run_dir: str, stopped: bool) -> None:
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.refresh_button.setEnabled(True)
         self.worker = None
-        self.camera_scan_button.setEnabled(True)
-        self._set_manual_stage_enabled(True)
         if run_dir:
             self.current_run_dir = Path(run_dir)
-            self.open_dataset_button.setEnabled(True)
         if self.run_status_label.text() != "오류 발생":
             self.set_run_status("중지됨" if stopped else "완료")
         self.log("촬영 중지됨" if stopped else "촬영 완료")
+        self.apply_ambient_state()
         self.restart_live_preview_after_run()
 
     def restart_live_preview_after_run(self) -> None:
@@ -2532,7 +2735,10 @@ class MainWindow(QMainWindow):
             os.startfile(self.current_run_dir)
 
     def log(self, message: str) -> None:
-        self.log_edit.appendPlainText(f"{iso_timestamp()}  {message}")
+        if hasattr(self, "log_edit"):
+            self.log_edit.appendPlainText(f"{iso_timestamp()}  {message}")
+        if hasattr(self, "logger"):
+            self.logger.info(message, extra={"event": "gui_log"})
 
     def set_run_status(self, message: str) -> None:
         self.run_status_label.setText(message)
@@ -2680,9 +2886,10 @@ def _start_smoke_watchdog(timeout_s: float = 20.0) -> None:
 
 
 def main() -> int:
-    smoke_test = any(arg.lower() in {"--smoke", "--smoke-test"} for arg in sys.argv[1:]) or os.environ.get(
-        "LINEAR_STAGE_SMOKE_TEST"
-    ) == "1"
+    smoke_test = (
+        any(arg.lower() in {"--smoke", "--smoke-test"} for arg in sys.argv[1:])
+        or os.environ.get("LINEAR_STAGE_SMOKE_TEST") == "1"
+    )
 
     if smoke_test:
         _start_smoke_watchdog()

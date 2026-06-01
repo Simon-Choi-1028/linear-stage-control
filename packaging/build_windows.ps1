@@ -102,6 +102,7 @@ $dataFiles = @(
   @{ Source = "README.md"; Target = "."; Required = $true },
   @{ Source = "rules.md"; Target = "."; Required = $true },
   @{ Source = "sdk_downloads\README.md"; Target = "sdk_downloads"; Required = $false },
+  @{ Source = "sdk_downloads\zaber\devices-public-v2.sqlite"; Target = "sdk_downloads\zaber"; Required = $false },
   @{ Source = "sdk_downloads\zaber\devices-public-v2.sqlite.lzma"; Target = "sdk_downloads\zaber"; Required = $false }
 )
 
@@ -111,10 +112,13 @@ if ($IncludePylonRuntime) {
   Write-Host "Slim build: pylon Runtime installer is not bundled. Use -IncludePylonRuntime for an offline installer."
 }
 
-$zaberDeviceDb = Join-Path $Root "sdk_downloads\zaber\devices-public-v2.sqlite.lzma"
+$zaberDeviceDb = Join-Path $Root "sdk_downloads\zaber\devices-public-v2.sqlite"
 if (-not (Test-Path -LiteralPath $zaberDeviceDb) -and -not $SkipZaberSdkDownload) {
   Write-Host "Zaber Device Database is missing; downloading official SDK artifacts."
   & (Join-Path $PSScriptRoot "download_zaber_sdk.ps1") -SkipWheel
+}
+if (-not (Test-Path -LiteralPath $zaberDeviceDb)) {
+  Write-Warning "Uncompressed Zaber Device Database is missing; stage detection will use runtime fallback if needed."
 }
 
 foreach ($item in $dataFiles) {

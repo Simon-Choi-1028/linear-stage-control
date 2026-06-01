@@ -125,11 +125,7 @@ def linear_spacing_point_count(
     if length <= 0:
         return 2
     base_count = int(math.floor(length / spacing_mm)) + 1
-    endpoint_count = (
-        0
-        if math.isclose((base_count - 1) * spacing_mm, length, rel_tol=0.0, abs_tol=1e-9)
-        else 1
-    )
+    endpoint_count = 0 if math.isclose((base_count - 1) * spacing_mm, length, rel_tol=0.0, abs_tol=1e-9) else 1
     return base_count + endpoint_count
 
 

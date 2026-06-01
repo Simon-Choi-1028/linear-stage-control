@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .exceptions import UpdateVerificationError
 
 DEFAULT_UPDATE_REPO = "Simon-Choi-1028/linear-stage-control"
 DEFAULT_SETUP_ASSET_NAME = "LinearStageControlSetup.exe"
@@ -49,7 +50,10 @@ def fetch_latest_update(
     *,
     timeout_s: float = 10.0,
 ) -> UpdateInfo | None:
-    release = _fetch_json(f"https://api.github.com/repos/{repo}/releases/latest", timeout_s=timeout_s)
+    try:
+        release = _fetch_json(f"https://api.github.com/repos/{repo}/releases/latest", timeout_s=timeout_s)
+    except Exception as exc:
+        raise UpdateVerificationError("GitHub 최신 릴리즈 정보를 가져오지 못했습니다.", str(exc)) from exc
     version = str(release.get("tag_name") or release.get("name") or "").strip()
     if not version or not is_newer_version(version, current_version):
         return None
@@ -73,8 +77,11 @@ def fetch_latest_update(
     sha256 = None
     manifest_asset_name = str(setup_asset.get("name") or DEFAULT_SETUP_ASSET_NAME)
     if manifest_asset is not None:
-        manifest = _fetch_json(str(manifest_asset.get("browser_download_url")), timeout_s=timeout_s)
-        manifest_asset_name, sha256 = _manifest_setup_hash(manifest, manifest_asset_name)
+        try:
+            manifest = _fetch_json(str(manifest_asset.get("browser_download_url")), timeout_s=timeout_s)
+            manifest_asset_name, sha256 = _manifest_setup_hash(manifest, manifest_asset_name)
+        except Exception as exc:
+            raise UpdateVerificationError("업데이트 manifest를 읽거나 해석하지 못했습니다.", str(exc)) from exc
 
     return UpdateInfo(
         version=version,
@@ -114,17 +121,20 @@ def download_file(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "LinearStageControl-Updater"})
-    with urllib.request.urlopen(request, timeout=timeout_s) as response, path.open("wb") as file:
-        total = _optional_int(response.headers.get("Content-Length"))
-        received = 0
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            file.write(chunk)
-            received += len(chunk)
-            if progress_callback is not None:
-                progress_callback(received, total)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response, path.open("wb") as file:
+            total = _optional_int(response.headers.get("Content-Length"))
+            received = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                file.write(chunk)
+                received += len(chunk)
+                if progress_callback is not None:
+                    progress_callback(received, total)
+    except Exception as exc:
+        raise UpdateVerificationError("업데이트 설치 파일 다운로드에 실패했습니다.", str(exc)) from exc
     return path
 
 

@@ -55,9 +55,7 @@ def main() -> None:
         y_active=stage_settings.y.enabled,
     )
     if axis_errors:
-        raise SystemExit(
-            format_issue_list("Stage axis settings conflict with the position list.", axis_errors)
-        )
+        raise SystemExit(format_issue_list("Stage axis settings conflict with the position list.", axis_errors))
 
     if args.dry_run:
         _print_points(console, points)
@@ -98,12 +96,8 @@ def main() -> None:
                 )
                 record["move_completed_at"] = _now()
                 actual_x_mm, actual_y_mm = stage.position_mm()
-                error_x_mm = (
-                    actual_x_mm - point.x_mm if x_active and actual_x_mm is not None else None
-                )
-                error_y_mm = (
-                    actual_y_mm - point.y_mm if y_active and actual_y_mm is not None else None
-                )
+                error_x_mm = actual_x_mm - point.x_mm if x_active and actual_x_mm is not None else None
+                error_y_mm = actual_y_mm - point.y_mm if y_active and actual_y_mm is not None else None
                 record["actual_x_mm"] = actual_x_mm if actual_x_mm is not None else ""
                 record["actual_y_mm"] = actual_y_mm if actual_y_mm is not None else ""
                 record["error_x_mm"] = error_x_mm if error_x_mm is not None else ""
@@ -138,9 +132,7 @@ def main() -> None:
                             "block_id": capture.block_id,
                             "image_path": str(capture.image_path.relative_to(dataset.run_dir)),
                             "image_filename": capture.image_path.name,
-                            "npy_path": str(capture.npy_path.relative_to(dataset.run_dir))
-                            if capture.npy_path
-                            else "",
+                            "npy_path": str(capture.npy_path.relative_to(dataset.run_dir)) if capture.npy_path else "",
                             "image_dtype": capture.dtype,
                             "image_shape": list(capture.shape),
                             "pixel_type": capture.pixel_type,
@@ -180,10 +172,12 @@ def _print_points(console: Console, points: list[ScanPoint]) -> None:
     console.print(table)
     console.print(f"{len(points)} point(s)")
 
+
 def _now() -> str:
     from linear_stage_control.camera import iso_timestamp
 
     return iso_timestamp()
+
 
 if __name__ == "__main__":
     main()

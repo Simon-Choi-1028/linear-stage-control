@@ -17,7 +17,7 @@ else:
     PYLON_IMPORT_ERROR = None
 
 from .config import none_if_blank
-
+from .exceptions import CameraConnectionError, DatasetWriteError
 
 DEFAULT_PIXEL_FORMAT_CANDIDATES = (
     "Mono8",
@@ -159,8 +159,8 @@ class BaslerCamera:
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.camera: pylon.InstantCamera | None = None
-        self.converter: pylon.ImageFormatConverter | None = None
+        self.camera: Any | None = None
+        self.converter: Any | None = None
 
     def __enter__(self) -> BaslerCamera:
         return self.open()
@@ -169,16 +169,21 @@ class BaslerCamera:
         self.close()
 
     def open(self) -> BaslerCamera:
-        require_pylon()
-        device_info = self._select_device()
-        self.camera = pylon.InstantCamera(
-            pylon.TlFactory.GetInstance().CreateDevice(device_info)
-        )
-        self.camera.Open()
-        self._apply_settings()
-        self.converter = pylon.ImageFormatConverter()
-        self.converter.OutputPixelFormat = self._output_pixel_type()
-        self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+        try:
+            require_pylon()
+            device_info = self._select_device()
+            self.camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateDevice(device_info))
+            self.camera.Open()
+            self._apply_settings()
+            self.converter = pylon.ImageFormatConverter()
+            self.converter.OutputPixelFormat = self._output_pixel_type()
+            self.converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+        except CameraConnectionError:
+            self.close()
+            raise
+        except Exception as exc:
+            self.close()
+            raise CameraConnectionError("Basler 카메라 연결 또는 설정 적용에 실패했습니다.", str(exc)) from exc
         return self
 
     def close(self) -> None:
@@ -193,13 +198,12 @@ class BaslerCamera:
 
         timeout = timeout_ms or self.settings.timeout_ms
         self.camera.StartGrabbingMax(1)
-        grab_result = self.camera.RetrieveResult(
-            timeout, pylon.TimeoutHandling_ThrowException
-        )
+        grab_result = self.camera.RetrieveResult(timeout, pylon.TimeoutHandling_ThrowException)
         try:
             if not grab_result.GrabSucceeded():
-                raise RuntimeError(
-                    f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}"
+                raise CameraConnectionError(
+                    "Basler 카메라 프레임 수신에 실패했습니다.",
+                    f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                 )
             image = self.converter.Convert(grab_result)
             return image.GetArray().copy()
@@ -255,21 +259,17 @@ class BaslerCamera:
         captured_at = iso_timestamp()
         try:
             if self.settings.use_software_trigger:
-                self.camera.WaitForFrameTriggerReady(
-                    timeout, pylon.TimeoutHandling_ThrowException
-                )
+                self.camera.WaitForFrameTriggerReady(timeout, pylon.TimeoutHandling_ThrowException)
                 captured_at = iso_timestamp()
                 self.camera.ExecuteSoftwareTrigger()
 
-            grab_result = self.camera.RetrieveResult(
-                timeout, pylon.TimeoutHandling_ThrowException
-            )
+            grab_result = self.camera.RetrieveResult(timeout, pylon.TimeoutHandling_ThrowException)
             completed_at = iso_timestamp()
             try:
                 if not grab_result.GrabSucceeded():
-                    raise RuntimeError(
-                        f"Grab failed: {grab_result.ErrorCode} "
-                        f"{grab_result.ErrorDescription}"
+                    raise CameraConnectionError(
+                        "Basler 카메라 캡처에 실패했습니다.",
+                        f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                     )
                 array = grab_result.GetArray().copy()
                 metadata = _grab_metadata(grab_result, captured_at, completed_at)
@@ -284,11 +284,14 @@ class BaslerCamera:
         self,
         timeout_ms: int | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        max_consecutive_failures: int = 5,
     ) -> Any:
         if self.camera is None:
             raise RuntimeError("Camera is not open.")
 
         timeout = timeout_ms or self.settings.timeout_ms
+        failure_threshold = max(1, int(max_consecutive_failures))
+        consecutive_failures = 0
         strategy = getattr(pylon, "GrabStrategy_LatestImageOnly", None)
         if strategy is None:
             self.camera.StartGrabbing()
@@ -299,20 +302,34 @@ class BaslerCamera:
                 if stop_requested is not None and stop_requested():
                     break
                 captured_at = iso_timestamp()
-                grab_result = self.camera.RetrieveResult(
-                    timeout, pylon.TimeoutHandling_ThrowException
-                )
+                try:
+                    grab_result = self.camera.RetrieveResult(timeout, pylon.TimeoutHandling_ThrowException)
+                except Exception as exc:
+                    consecutive_failures += 1
+                    if consecutive_failures >= failure_threshold:
+                        raise CameraConnectionError(
+                            "Basler live preview frame receive failed repeatedly.",
+                            f"Live RetrieveResult failed {consecutive_failures} times: {exc}",
+                        ) from exc
+                    continue
                 completed_at = iso_timestamp()
                 try:
                     if not grab_result.GrabSucceeded():
-                        raise RuntimeError(
-                            f"Live grab failed: {grab_result.ErrorCode} "
-                            f"{grab_result.ErrorDescription}"
-                        )
-                    yield grab_result.GetArray().copy(), _grab_metadata(
-                        grab_result,
-                        captured_at,
-                        completed_at,
+                        consecutive_failures += 1
+                        if consecutive_failures >= failure_threshold:
+                            raise CameraConnectionError(
+                                "Basler live preview frame receive failed repeatedly.",
+                                f"Live grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
+                            )
+                        continue
+                    consecutive_failures = 0
+                    yield (
+                        grab_result.GetArray().copy(),
+                        _grab_metadata(
+                            grab_result,
+                            captured_at,
+                            completed_at,
+                        ),
                     )
                 finally:
                     grab_result.Release()
@@ -320,27 +337,71 @@ class BaslerCamera:
             if self.camera is not None and self.camera.IsGrabbing():
                 self.camera.StopGrabbing()
 
+    def apply_live_settings(self, settings: CameraSettings) -> list[str]:
+        if self.camera is None:
+            raise RuntimeError("Camera is not open.")
+        warning_start = len(self.warnings)
+        self.settings = settings
+        self._apply_live_safe_camera_parameters(settings)
+        return self.warnings[warning_start:]
+
+    def _apply_live_safe_camera_parameters(self, settings: CameraSettings) -> None:
+        if settings.exposure_us is not None:
+            self._set_first_available_feature(("ExposureAuto",), "Off", warn_if_missing=False)
+            self._set_first_available_feature(
+                ("ExposureTime", "ExposureTimeAbs"),
+                float(settings.exposure_us),
+                label="ExposureTime",
+            )
+        if settings.gain is not None:
+            self._set_first_available_feature(("GainAuto",), "Off", warn_if_missing=False)
+            self._set_first_available_feature(
+                ("Gain", "GainRaw"),
+                float(settings.gain),
+                label="Gain",
+            )
+        if settings.acquisition_frame_rate is not None:
+            self._set_first_available_feature(
+                ("AcquisitionFrameRateEnable",),
+                True,
+                warn_if_missing=False,
+            )
+            self._set_first_available_feature(
+                ("AcquisitionFrameRate", "AcquisitionFrameRateAbs"),
+                float(settings.acquisition_frame_rate),
+                label="AcquisitionFrameRate",
+            )
+        if settings.gamma is not None:
+            self._set_first_available_feature(("Gamma",), float(settings.gamma), label="Gamma")
+        if settings.black_level is not None:
+            self._set_first_available_feature(
+                ("BlackLevel", "BlackLevelRaw"),
+                float(settings.black_level),
+                label="BlackLevel",
+            )
+
     def _select_device(self) -> Any:
         require_pylon()
         devices = list(pylon.TlFactory.GetInstance().EnumerateDevices())
         if not devices:
-            raise RuntimeError("No Basler camera was detected.")
+            raise CameraConnectionError("Basler 카메라가 감지되지 않았습니다.")
 
         if self.settings.serial_number:
             for device in devices:
                 if _safe_device_value(device, "GetSerialNumber") == self.settings.serial_number:
                     return device
-            raise RuntimeError(f"Basler camera serial not found: {self.settings.serial_number}")
+            raise CameraConnectionError(
+                "선택한 Basler 카메라 serial을 찾을 수 없습니다.",
+                f"Basler camera serial not found: {self.settings.serial_number}",
+            )
 
         if self.settings.user_defined_name:
             for device in devices:
-                if (
-                    _safe_device_value(device, "GetUserDefinedName")
-                    == self.settings.user_defined_name
-                ):
+                if _safe_device_value(device, "GetUserDefinedName") == self.settings.user_defined_name:
                     return device
-            raise RuntimeError(
-                f"Basler camera user-defined name not found: {self.settings.user_defined_name}"
+            raise CameraConnectionError(
+                "선택한 Basler 카메라 사용자 이름을 찾을 수 없습니다.",
+                f"Basler camera user-defined name not found: {self.settings.user_defined_name}",
             )
 
         candidates = devices
@@ -352,7 +413,10 @@ class BaslerCamera:
                 if expected in (_safe_device_value(device, "GetModelName") or "").lower()
             ]
             if not candidates:
-                raise RuntimeError(f"Basler camera model not found: {self.settings.model_name}")
+                raise CameraConnectionError(
+                    "설정한 Basler 카메라 모델을 찾을 수 없습니다.",
+                    f"Basler camera model not found: {self.settings.model_name}",
+                )
         if self.settings.device_class:
             expected = self.settings.device_class.lower()
             candidates = [
@@ -361,7 +425,10 @@ class BaslerCamera:
                 if expected == (_safe_device_value(device, "GetDeviceClass") or "").lower()
             ]
             if not candidates:
-                raise RuntimeError(f"Basler camera device class not found: {self.settings.device_class}")
+                raise CameraConnectionError(
+                    "설정한 Basler device class를 찾을 수 없습니다.",
+                    f"Basler camera device class not found: {self.settings.device_class}",
+                )
 
         return candidates[0]
 
@@ -425,9 +492,7 @@ class BaslerCamera:
             raise RuntimeError("Camera is not open.")
         if str(self.settings.pixel_format or "").strip().lower() in {"auto", "default"}:
             return
-        requested = _dedupe_strings(
-            [self.settings.pixel_format or ""] + list(self.settings.pixel_format_candidates)
-        )
+        requested = _dedupe_strings([self.settings.pixel_format or ""] + list(self.settings.pixel_format_candidates))
         requested = [item for item in requested if item.lower() not in {"auto", "default"}]
         if not requested:
             return
@@ -516,10 +581,10 @@ def require_pylon() -> None:
     if pylon is not None:
         return
     detail = f" ({PYLON_IMPORT_ERROR})" if PYLON_IMPORT_ERROR else ""
-    raise RuntimeError(
+    raise CameraConnectionError(
         "Basler pylon Runtime 또는 pypylon 로딩에 실패했습니다. "
         "Basler pylon Runtime을 설치한 뒤 앱을 다시 실행하세요."
-        f"{detail}"
+        f"{detail}",
     )
 
 
@@ -585,28 +650,38 @@ def _normalise_pixel_format_name(value: Any) -> str:
 
 
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    output_format = _normalise_pixel_format_name(pixel_format)
-    if array.ndim == 2:
-        image = Image.fromarray(array)
-    elif array.ndim == 3 and array.shape[2] == 3 and output_format in {"BGR8", "BGR8packed"}:
-        image = Image.fromarray(np.ascontiguousarray(array[:, :, ::-1]), "RGB")
-    elif array.ndim == 3 and array.shape[2] == 3:
-        image = Image.fromarray(np.ascontiguousarray(array), "RGB")
-    else:
-        raise ValueError(f"Unsupported image array shape: {array.shape}")
-    image.save(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        output_format = _normalise_pixel_format_name(pixel_format)
+        if array.ndim == 2:
+            image = Image.fromarray(array)
+        elif array.ndim == 3 and array.shape[2] == 3 and output_format in {"BGR8", "BGR8packed"}:
+            image = Image.fromarray(np.ascontiguousarray(array[:, :, ::-1]), "RGB")
+        elif array.ndim == 3 and array.shape[2] == 3:
+            image = Image.fromarray(np.ascontiguousarray(array), "RGB")
+        else:
+            raise ValueError(f"Unsupported image array shape: {array.shape}")
+        image.save(path)
+    except DatasetWriteError:
+        raise
+    except Exception as exc:
+        raise DatasetWriteError("이미지 파일 저장에 실패했습니다.", str(exc)) from exc
 
 
 def save_original_array(path: Path, array: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if array.ndim == 2:
-        image = Image.fromarray(np.ascontiguousarray(array))
-    elif array.ndim == 3 and array.shape[2] in (3, 4):
-        image = Image.fromarray(np.ascontiguousarray(array))
-    else:
-        raise ValueError(f"Unsupported original image array shape: {array.shape}")
-    image.save(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if array.ndim == 2:
+            image = Image.fromarray(np.ascontiguousarray(array))
+        elif array.ndim == 3 and array.shape[2] in (3, 4):
+            image = Image.fromarray(np.ascontiguousarray(array))
+        else:
+            raise ValueError(f"Unsupported original image array shape: {array.shape}")
+        image.save(path)
+    except DatasetWriteError:
+        raise
+    except Exception as exc:
+        raise DatasetWriteError("원본 이미지 파일 저장에 실패했습니다.", str(exc)) from exc
 
 
 def iso_timestamp() -> str:

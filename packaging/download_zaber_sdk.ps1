@@ -9,15 +9,17 @@ $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 $WheelDir = Join-Path $Root "sdk_downloads\python_wheels\zaber"
 $ZaberDir = Join-Path $Root "sdk_downloads\zaber"
 $DeviceDbUrl = "https://www.zaber.com/software/device-database/devices-public-v2.sqlite.lzma"
-$DeviceDbPath = Join-Path $ZaberDir "devices-public-v2.sqlite.lzma"
+$DeviceDbLzmaPath = Join-Path $ZaberDir "devices-public-v2.sqlite.lzma"
+$DeviceDbSqlitePath = Join-Path $ZaberDir "devices-public-v2.sqlite"
 
 New-Item -ItemType Directory -Force -Path $WheelDir, $ZaberDir | Out-Null
 
+$PythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $PythonExe)) {
+  $PythonExe = "py"
+}
+
 if (-not $SkipWheel) {
-  $PythonExe = Join-Path $Root ".venv\Scripts\python.exe"
-  if (-not (Test-Path -LiteralPath $PythonExe)) {
-    $PythonExe = "py"
-  }
   & $PythonExe -m pip download `
     --only-binary=:all: `
     --no-deps `
@@ -32,7 +34,24 @@ if (-not $SkipWheel) {
   }
 }
 
-Invoke-WebRequest -Uri $DeviceDbUrl -OutFile $DeviceDbPath
+Invoke-WebRequest -Uri $DeviceDbUrl -OutFile $DeviceDbLzmaPath
+
+$DecompressScript = @'
+import lzma
+import pathlib
+import sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+data = lzma.open(src, "rb").read()
+if not data.startswith(b"SQLite format 3\x00"):
+    raise SystemExit(f"Downloaded Zaber Device DB does not decompress to SQLite: {src}")
+dst.write_bytes(data)
+'@
+$DecompressScript | & $PythonExe - $DeviceDbLzmaPath $DeviceDbSqlitePath
+if ($LASTEXITCODE -ne 0) {
+  throw "Failed to decompress and verify the official Zaber Device Database."
+}
 
 $Artifacts = @()
 Get-ChildItem -Path $WheelDir -Filter "zaber_motion-*.whl" -File | ForEach-Object {
@@ -43,12 +62,14 @@ Get-ChildItem -Path $WheelDir -Filter "zaber_motion-*.whl" -File | ForEach-Objec
     size_bytes = $_.Length
   }
 }
-$DeviceDb = Get-Item -LiteralPath $DeviceDbPath
-$Artifacts += [ordered]@{
-  name = $DeviceDb.Name
-  path = $DeviceDb.FullName
-  sha256 = (Get-FileHash -Path $DeviceDb.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-  size_bytes = $DeviceDb.Length
+foreach ($DeviceDbPath in @($DeviceDbLzmaPath, $DeviceDbSqlitePath)) {
+  $DeviceDb = Get-Item -LiteralPath $DeviceDbPath
+  $Artifacts += [ordered]@{
+    name = $DeviceDb.Name
+    path = $DeviceDb.FullName
+    sha256 = (Get-FileHash -Path $DeviceDb.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    size_bytes = $DeviceDb.Length
+  }
 }
 
 $ManifestPath = Join-Path $ZaberDir "zaber_sdk_manifest.json"

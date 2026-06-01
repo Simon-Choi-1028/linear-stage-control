@@ -47,9 +47,9 @@ stage:
   settle_s: 0.2
   # settle_ms: 200
   move_velocity_mm_s:
-  # Uses the official Zaber Device Database bundle when present.
+  # Uses the official uncompressed Zaber Device Database bundle when present.
   use_bundled_device_db: true
-  # Optional override for an explicit device DB file path.
+  # Optional override for an explicit .sqlite DB file path. Legacy .sqlite.lzma is accepted and decompressed.
   device_db_path:
   axes:
     # device_index is zero-based in the order returned by Zaber detection.

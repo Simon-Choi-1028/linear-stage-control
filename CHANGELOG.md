@@ -1,6 +1,26 @@
 # Changelog
 
-## v0.1.5 - 2026-05-29
+## Unreleased
+
+- Added ruff and pyright development checks with a basic typed-core scope.
+- Added an explicit GUI `AppRunState` enum and centralized button enable/disable handling.
+- Added user-facing custom exception classes for camera, stage, dataset, position, and update failures.
+- Added structured JSONL file logging under `%USERPROFILE%/Documents/LinearStageControl/logs/`, including run-specific acquisition logs.
+
+## v0.1.5 - 2026-06-01
+
+- Fixed Zaber Device Database handling by preferring uncompressed `devices-public-v2.sqlite`, safely decompressing legacy `.sqlite.lzma` payloads, and falling back to Zaber Web Service lookup when the local DB is invalid.
+- Added live-safe camera parameter updates so exposure, gain, gamma, black level, and acquisition frame rate can be pushed into the active Live worker without reconnecting.
+- Changed Live status to show measured rolling FPS instead of only the configured target FPS.
+- Reset Live preview zoom/center to full-frame fit when Live starts or returns from saved image preview.
+- Replaced the Live size slider with a bottom-right preview resize handle and relaxed fixed preview height constraints for maximize/restore stability.
+- Reduced main-window minimum width/height pressure so narrow and short windows switch layouts instead of getting stuck behind oversized controls.
+- Blank position labels now fall back to generated `point_####` labels for safer metadata and image filenames.
+- Hardened Zaber stage settings parsing so string booleans such as `"false"` are not treated as enabled axes.
+- Added safer Zaber move handling: if a later axis command fails after an earlier axis has started, the already-started axis is stopped before surfacing the error.
+- Improved stage preflight/user recovery paths for invalid axis mapping, `SerialPortBusyException`, stop failures, and invalid explicit Device DB paths that can fall back to the bundled DB.
+
+## v0.1.5 withdrawn build - 2026-05-29
 
 - Added a GUI diagnostics tab for pylon, Basler camera discovery, Zaber COM/Device DB, output folder, and update access checks.
 - Added a manual Zaber stage control panel for position read, homing, absolute moves, jog moves, and stop requests outside acquisition runs.

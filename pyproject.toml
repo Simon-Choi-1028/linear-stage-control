@@ -16,9 +16,70 @@ dependencies = [
   "zaber-motion==9.3.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "ruff==0.8.6",
+  "pyright[nodejs]==1.1.390",
+]
+
 [build-system]
 requires = ["setuptools>=82", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["linear_stage_control*"]
+
+[tool.setuptools.package-data]
+linear_stage_control = ["py.typed"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = [
+  ".venv",
+  ".pyinstaller_build",
+  "build",
+  "dist",
+  "sdk_downloads",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/launch_gui.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.pyright]
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+include = [
+  "linear_stage_control/camera.py",
+  "linear_stage_control/stage.py",
+  "linear_stage_control/dataset.py",
+  "linear_stage_control/scan.py",
+  "linear_stage_control/position_validation.py",
+  "linear_stage_control/exceptions.py",
+  "linear_stage_control/logging_setup.py",
+  "linear_stage_control/app_state.py",
+]
+exclude = [
+  ".venv",
+  ".pyinstaller_build",
+  "build",
+  "dist",
+  "sdk_downloads",
+]
+reportMissingTypeStubs = false
+reportMissingImports = false
+reportMissingModuleSource = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportUnknownMemberType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportOptionalMemberAccess = false

@@ -207,10 +207,7 @@ def points_from_file(path: str | Path) -> list[ScanPoint]:
         return points_from_data(data, source=source)
     if suffix == ".xlsx":
         return points_from_records(_records_from_xlsx(source), source=source)
-    raise ValueError(
-        f"Unsupported positions file format: {source}. "
-        "Use CSV, TSV, TXT, JSON, JSONL, YAML, or XLSX."
-    )
+    raise ValueError(f"Unsupported positions file format: {source}. " "Use CSV, TSV, TXT, JSON, JSONL, YAML, or XLSX.")
 
 
 def points_from_data(data: Any, source: str | Path | None = None) -> list[ScanPoint]:
@@ -394,11 +391,7 @@ def _records_from_text_file(path: Path) -> list[Mapping[str, Any] | list[str]]:
     if not text.strip():
         raise ValueError(f"Positions file is empty: {path}")
     delimiter = "\t" if path.suffix.lower() == ".tsv" else _sniff_delimiter(text)
-    lines = [
-        line
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
+    lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
     if not lines:
         raise ValueError(f"Positions file has no data rows: {path}")
 
@@ -410,7 +403,8 @@ def _records_from_text_file(path: Path) -> list[Mapping[str, Any] | list[str]]:
     if rows and _headers_have_xy(rows[0]):
         headers = rows[0]
         return [dict(zip(headers, row)) for row in rows[1:] if any(str(value).strip() for value in row)]
-    return rows
+    records: list[Mapping[str, Any] | list[str]] = [list(row) for row in rows]
+    return records
 
 
 def _records_from_jsonl(path: Path) -> list[Any]:
@@ -434,7 +428,8 @@ def _records_from_xlsx(path: Path) -> list[Mapping[str, Any] | list[str]]:
     if _headers_have_xy(rows[0]):
         headers = [str(value) for value in rows[0]]
         return [dict(zip(headers, row)) for row in rows[1:] if any(str(value).strip() for value in row)]
-    return rows
+    records: list[Mapping[str, Any] | list[str]] = [list(row) for row in rows]
+    return records
 
 
 def _point_from_record(record: Any, index: int) -> ScanPoint:
@@ -450,7 +445,7 @@ def _point_from_record(record: Any, index: int) -> ScanPoint:
             index=index,
             x_mm=_float_value(x_value, "X"),
             y_mm=_float_value(y_value, "Y"),
-            label=str(label_value or ""),
+            label=_normalise_point_label(label_value, index),
             move_velocity_mm_s=_optional_positive_float(velocity_value, "move_velocity_mm_s"),
             capture_count=_optional_int_value(capture_count_value, "capture_count", minimum=1),
         )
@@ -465,12 +460,12 @@ def _point_from_record(record: Any, index: int) -> ScanPoint:
                 index=index,
                 x_mm=_float_value(values[0], "X"),
                 y_mm=_float_value(values[1], "Y"),
-                label=label,
+                label=_normalise_point_label(label, index),
                 move_velocity_mm_s=velocity,
                 capture_count=capture_count,
             )
         if len(values) >= 3 and _looks_float(values[1]) and _looks_float(values[2]):
-            label = str(values[0] or "")
+            label = _normalise_point_label(values[0], index)
             velocity = _optional_positive_float(values[3] if len(values) >= 4 else None, "move_velocity_mm_s")
             capture_count = _optional_int_value(values[4] if len(values) >= 5 else None, "capture_count", minimum=1)
             return ScanPoint(
@@ -500,6 +495,11 @@ def _sequence_optional_fields(values: Sequence[Any], start: int) -> tuple[str, f
         minimum=1,
     )
     return label, velocity, capture_count
+
+
+def _normalise_point_label(value: Any, index: int) -> str:
+    text = str(value or "").strip()
+    return text or f"point_{index:04d}"
 
 
 def _field_value(

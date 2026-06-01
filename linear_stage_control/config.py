@@ -5,8 +5,10 @@ from typing import Any
 
 import yaml
 
+from .exceptions import LinearStageControlError
 
-class ConfigError(RuntimeError):
+
+class ConfigError(LinearStageControlError):
     """Raised when a configuration file is missing or malformed."""
 
 

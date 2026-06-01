@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from . import __version__
 from .dataset_exports import (
     DEFAULT_METADATA_FORMATS,
     DEFAULT_SUMMARY_FORMATS,
@@ -28,8 +29,8 @@ from .dataset_exports import (
     write_summary_markdown,
     write_summary_yaml,
 )
+from .exceptions import DatasetWriteError
 from .scan import ScanPoint
-from . import __version__
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,9 @@ def dataset_settings_from_config(
     write_jsonl = bool(dataset.get("write_jsonl", True))
     metadata_formats = normalise_formats(
         dataset.get("metadata_formats"),
-        DEFAULT_METADATA_FORMATS if write_jsonl else tuple(item for item in DEFAULT_METADATA_FORMATS if item != "jsonl"),
+        DEFAULT_METADATA_FORMATS
+        if write_jsonl
+        else tuple(item for item in DEFAULT_METADATA_FORMATS if item != "jsonl"),
         SUPPORTED_METADATA_FORMATS,
     )
     if "csv" not in metadata_formats:
@@ -120,32 +123,42 @@ class DatasetRun:
         self.close(status="failed" if exc_type else "complete")
 
     def open(self) -> None:
-        self.images_dir.mkdir(parents=True, exist_ok=False)
-        if self.settings.save_numpy:
-            self.arrays_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.images_dir.mkdir(parents=True, exist_ok=False)
+            if self.settings.save_numpy:
+                self.arrays_dir.mkdir(parents=True, exist_ok=True)
 
-        self.config_snapshot_path.write_text(
-            yaml.safe_dump(self.config, sort_keys=False, allow_unicode=True),
-            encoding="utf-8",
-        )
-        self._write_manifest(status="running")
+            self.config_snapshot_path.write_text(
+                yaml.safe_dump(self.config, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            self._write_manifest(status="running")
 
-        self._csv_file = self.csv_path.open("w", newline="", encoding="utf-8")
-        self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=CAPTURE_FIELDS)
-        self._csv_writer.writeheader()
-        if self.settings.write_jsonl:
-            self._jsonl_file = self.jsonl_path.open("w", encoding="utf-8")
+            self._csv_file = self.csv_path.open("w", newline="", encoding="utf-8")
+            self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=CAPTURE_FIELDS)
+            self._csv_writer.writeheader()
+            if self.settings.write_jsonl:
+                self._jsonl_file = self.jsonl_path.open("w", encoding="utf-8")
+        except DatasetWriteError:
+            raise
+        except Exception as exc:
+            raise DatasetWriteError("데이터셋 폴더 또는 metadata 파일을 열 수 없습니다.", str(exc)) from exc
 
     def close(self, status: str = "complete") -> None:
-        if self._jsonl_file is not None:
-            self._jsonl_file.close()
-            self._jsonl_file = None
-        if self._csv_file is not None:
-            self._csv_file.close()
-            self._csv_file = None
-        if self.run_dir.exists():
-            self._write_post_run_exports(status=status)
-            self._write_manifest(status=status)
+        try:
+            if self._jsonl_file is not None:
+                self._jsonl_file.close()
+                self._jsonl_file = None
+            if self._csv_file is not None:
+                self._csv_file.close()
+                self._csv_file = None
+            if self.run_dir.exists():
+                self._write_post_run_exports(status=status)
+                self._write_manifest(status=status)
+        except DatasetWriteError:
+            raise
+        except Exception as exc:
+            raise DatasetWriteError("데이터셋 종료 처리 또는 manifest 작성에 실패했습니다.", str(exc)) from exc
 
     def image_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path:
         suffix = self.settings.image_format
@@ -157,16 +170,21 @@ class DatasetRun:
         return self.arrays_dir / f"{point_name(point, timestamp, capture_index)}.npy"
 
     def write_capture(self, record: dict[str, Any]) -> None:
-        clean_record = json_ready(record)
-        self.records.append(clean_record)
-        row = {field: _csv_value(record.get(field, "")) for field in CAPTURE_FIELDS}
-        if self._csv_writer is None:
-            raise RuntimeError("Dataset CSV writer is not open.")
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
-        if self._jsonl_file is not None:
-            self._jsonl_file.write(json.dumps(clean_record, ensure_ascii=False) + "\n")
-            self._jsonl_file.flush()
+        try:
+            clean_record = json_ready(record)
+            self.records.append(clean_record)
+            row = {field: _csv_value(record.get(field, "")) for field in CAPTURE_FIELDS}
+            if self._csv_writer is None:
+                raise RuntimeError("Dataset CSV writer is not open.")
+            self._csv_writer.writerow(row)
+            self._csv_file.flush()
+            if self._jsonl_file is not None:
+                self._jsonl_file.write(json.dumps(clean_record, ensure_ascii=False) + "\n")
+                self._jsonl_file.flush()
+        except DatasetWriteError:
+            raise
+        except Exception as exc:
+            raise DatasetWriteError("캡처 metadata 저장에 실패했습니다.", str(exc)) from exc
 
     def _write_post_run_exports(self, status: str) -> None:
         formats = set(self.settings.metadata_formats)
@@ -349,10 +367,7 @@ def safe_timestamp(value: datetime | None = None) -> str:
 
 def point_name(point: ScanPoint, timestamp: str, capture_index: int = 1) -> str:
     label = sanitize_label(point.label) or f"point{point.index:04d}"
-    return (
-        f"{label}_x{_filename_mm(point.x_mm)}mm_y{_filename_mm(point.y_mm)}mm_"
-        f"{timestamp}_cap{capture_index:03d}"
-    )
+    return f"{label}_x{_filename_mm(point.x_mm)}mm_y{_filename_mm(point.y_mm)}mm_" f"{timestamp}_cap{capture_index:03d}"
 
 
 def sanitize_label(label: str) -> str:
@@ -379,9 +394,7 @@ def _normalise_image_format(value: Any) -> str:
     allowed = {"tiff", "png", "bmp"}
     if image_format not in allowed:
         allowed_text = ", ".join(sorted(allowed))
-        raise ValueError(
-            f"Unsupported image_format: {value}. Use a lossless format: {allowed_text}."
-        )
+        raise ValueError(f"Unsupported image_format: {value}. Use a lossless format: {allowed_text}.")
     return image_format
 
 

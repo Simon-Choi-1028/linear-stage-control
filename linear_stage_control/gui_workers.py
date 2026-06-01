@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections import deque
 from copy import deepcopy
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from PySide6.QtCore import QThread, Signal
@@ -10,6 +13,8 @@ from .camera import BaslerCamera, camera_settings_from_config, enumerate_cameras
 from .dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
 from .diagnostics import collect_diagnostics
 from .error_model import error_budget_from_config, estimate_position_error_um
+from .exceptions import UpdateVerificationError, user_error_message
+from .logging_setup import add_run_file_handler, get_logger, remove_log_handler
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
@@ -52,6 +57,8 @@ class AcquisitionWorker(QThread):
     def run(self) -> None:
         run_dir = ""
         stopped = False
+        run_log_handler = None
+        logger = get_logger("worker.acquisition")
         try:
             dataset_settings = dataset_settings_from_config(self.config, self.output_root)
             stage_settings = stage_settings_from_config(self.config)
@@ -68,6 +75,16 @@ class AcquisitionWorker(QThread):
                 BaslerCamera(camera_settings) as camera,
             ):
                 run_dir = str(dataset.run_dir)
+                run_log_handler = add_run_file_handler(dataset.run_id)
+                logger.info(
+                    "acquisition run started",
+                    extra={
+                        "event": "run_started",
+                        "run_id": dataset.run_id,
+                        "point_count": len(self.points),
+                        "output_dir": run_dir,
+                    },
+                )
                 if stage_settings.home_on_start and not self.skip_home:
                     self.status_changed.emit("XY 스테이지 원점 복귀 중")
                     self.log_message.emit("XY 스테이지 원점 복귀 중")
@@ -100,6 +117,17 @@ class AcquisitionWorker(QThread):
                         self.log_message.emit(
                             f"이동 #{point.index}: X={_mm_text(point.x_mm)}, Y={_mm_text(point.y_mm)}, "
                             f"속도={_velocity_text(move_velocity)}, 캡쳐={capture_count}"
+                        )
+                        logger.info(
+                            "stage move started",
+                            extra={
+                                "event": "stage_move_started",
+                                "point_index": point.index,
+                                "x_mm": point.x_mm,
+                                "y_mm": point.y_mm,
+                                "velocity_mm_s": move_velocity,
+                                "capture_count": capture_count,
+                            },
                         )
                         record["move_started_at"] = iso_timestamp()
                         stage.move_absolute_mm(
@@ -171,6 +199,15 @@ class AcquisitionWorker(QThread):
                             )
                             dataset.write_capture(capture_record)
                             self.capture_done.emit(capture_record)
+                            logger.info(
+                                "capture saved",
+                                extra={
+                                    "event": "capture_saved",
+                                    "point_index": point.index,
+                                    "capture_index": capture_index,
+                                    "image_path": str(capture.image_path),
+                                },
+                            )
                             completed += 1
                             self.progress_changed.emit(completed, total)
                             self.status_changed.emit(f"{completed}/{total} 저장 완료")
@@ -192,13 +229,16 @@ class AcquisitionWorker(QThread):
                     self.log_message.emit(f"카메라 경고: {warning}")
 
             self.status_changed.emit("중지됨" if stopped else "완료")
+            logger.info("acquisition run finished", extra={"event": "run_finished", "stopped": stopped})
             self.run_done.emit(run_dir, stopped)
         except Exception as exc:
             self.status_changed.emit("오류 발생")
-            self.run_failed.emit(str(exc))
+            logger.exception("acquisition run failed", extra={"event": "run_failed"})
+            self.run_failed.emit(user_error_message(exc))
             if run_dir:
                 self.run_done.emit(run_dir, True)
-
+        finally:
+            remove_log_handler(run_log_handler)
 
     def _sleep_interruptible(self, duration_ms: int) -> None:
         remaining_ms = max(0, duration_ms)
@@ -218,9 +258,21 @@ class LivePreviewWorker(QThread):
         self.config = deepcopy(config)
         self.fps = max(1, min(60, int(fps or 10)))
         self._stop_requested = False
+        self._settings_lock = Lock()
+        self._pending_config: dict[str, Any] | None = None
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def request_settings_update(self, config: dict[str, Any]) -> None:
+        with self._settings_lock:
+            self._pending_config = deepcopy(config)
+
+    def _take_pending_config(self) -> dict[str, Any] | None:
+        with self._settings_lock:
+            pending = self._pending_config
+            self._pending_config = None
+        return pending
 
     def run(self) -> None:
         try:
@@ -231,23 +283,48 @@ class LivePreviewWorker(QThread):
             camera_config["timeout_ms"] = int(camera_config.get("timeout_ms", 1000) or 1000)
             settings = camera_settings_from_config(preview_config)
             frame_delay_ms = max(1, int(1000 / self.fps))
+            frame_times: deque[float] = deque(maxlen=max(5, self.fps * 3))
             with BaslerCamera(settings) as camera:
                 self.status_changed.emit("Live 첫 프레임 대기")
                 first_frame = True
                 for array, metadata in camera.live_original_arrays(
                     timeout_ms=settings.timeout_ms,
                     stop_requested=lambda: self._stop_requested,
+                    max_consecutive_failures=5,
                 ):
                     if self._stop_requested:
                         break
+                    pending_config = self._take_pending_config()
+                    if pending_config is not None:
+                        pending_camera_config = pending_config.setdefault("camera", {})
+                        pending_camera_config["use_software_trigger"] = False
+                        pending_camera_config["trigger_mode"] = "Off"
+                        pending_settings = camera_settings_from_config(pending_config)
+                        warnings = camera.apply_live_settings(pending_settings)
+                        if warnings:
+                            self.status_changed.emit("Live 설정 경고")
                     if first_frame:
-                        self.status_changed.emit(f"Live 수신 중 ({self.fps} FPS)")
+                        self.status_changed.emit("Live 수신 중")
                         first_frame = False
+                    now = monotonic()
+                    frame_times.append(now)
+                    metadata = dict(metadata)
+                    metadata["live_fps"] = _rolling_fps(frame_times)
                     self.frame_ready.emit(array, metadata)
                     self.msleep(frame_delay_ms)
         except Exception as exc:
             if not self._stop_requested:
-                self.live_failed.emit(str(exc))
+                get_logger("worker.live").exception("live preview failed", extra={"event": "live_failed"})
+                self.live_failed.emit(user_error_message(exc))
+
+
+def _rolling_fps(frame_times: deque[float]) -> float:
+    if len(frame_times) < 2:
+        return 0.0
+    elapsed = frame_times[-1] - frame_times[0]
+    if elapsed <= 0:
+        return 0.0
+    return (len(frame_times) - 1) / elapsed
 
 
 class CameraDiscoveryWorker(QThread):
@@ -263,7 +340,11 @@ class CameraDiscoveryWorker(QThread):
             cameras = enumerate_cameras()
             self.cameras_found.emit(cameras, self.reason)
         except Exception as exc:
-            self.scan_failed.emit(str(exc), self.reason)
+            get_logger("worker.camera_discovery").exception(
+                "camera discovery failed",
+                extra={"event": "camera_discovery_failed", "reason": self.reason},
+            )
+            self.scan_failed.emit(user_error_message(exc), self.reason)
 
 
 class UpdateCheckWorker(QThread):
@@ -284,7 +365,8 @@ class UpdateCheckWorker(QThread):
             else:
                 self.update_available.emit(update)
         except Exception as exc:
-            self.update_failed.emit(str(exc))
+            get_logger("worker.update").exception("update check failed", extra={"event": "update_check_failed"})
+            self.update_failed.emit(user_error_message(exc))
 
 
 class UpdateDownloadWorker(QThread):
@@ -299,15 +381,20 @@ class UpdateDownloadWorker(QThread):
 
     def run(self) -> None:
         try:
+
             def progress(received: int, total: int | None) -> None:
                 self.progress_changed.emit(received, total or 0)
 
             path = download_file(self.update.setup_url, self.output_path, progress_callback=progress)
             if not self.update.sha256 or not verify_file_sha256(path, self.update.sha256):
-                raise RuntimeError("다운로드한 설치 파일의 SHA256 검증에 실패했습니다.")
+                raise UpdateVerificationError("다운로드한 설치 파일의 SHA256 검증에 실패했습니다.")
             self.download_done.emit(str(path))
         except Exception as exc:
-            self.download_failed.emit(str(exc))
+            get_logger("worker.update").exception(
+                "update download failed",
+                extra={"event": "update_download_failed", "version": self.update.version},
+            )
+            self.download_failed.emit(user_error_message(exc))
 
 
 class DiagnosticsWorker(QThread):
@@ -329,7 +416,8 @@ class DiagnosticsWorker(QThread):
             )
             self.diagnostics_done.emit(results)
         except Exception as exc:
-            self.diagnostics_failed.emit(str(exc))
+            get_logger("worker.diagnostics").exception("diagnostics failed", extra={"event": "diagnostics_failed"})
+            self.diagnostics_failed.emit(user_error_message(exc))
 
 
 class ManualStageWorker(QThread):
@@ -381,9 +469,7 @@ class ManualStageWorker(QThread):
                 if self.action == "move":
                     if self.x_mm is None or self.y_mm is None:
                         raise ValueError("Manual move requires X/Y targets.")
-                    self.status_changed.emit(
-                        f"수동 이동 중 | X={_mm_text(self.x_mm)}, Y={_mm_text(self.y_mm)}"
-                    )
+                    self.status_changed.emit(f"수동 이동 중 | X={_mm_text(self.x_mm)}, Y={_mm_text(self.y_mm)}")
                     stage.move_absolute_mm(
                         self.x_mm,
                         self.y_mm,
@@ -395,4 +481,8 @@ class ManualStageWorker(QThread):
                     return
                 raise ValueError(f"Unknown manual stage action: {self.action}")
         except Exception as exc:
-            self.action_failed.emit(str(exc))
+            get_logger("worker.manual_stage").exception(
+                "manual stage action failed",
+                extra={"event": "manual_stage_failed", "action": self.action},
+            )
+            self.action_failed.emit(user_error_message(exc))

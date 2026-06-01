@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 
@@ -24,6 +24,7 @@ if not getattr(sys, "frozen", False):
 
 _trace("launcher_start")
 from linear_stage_control.gui_app import main
+
 _trace("gui_app_imported")
 
 

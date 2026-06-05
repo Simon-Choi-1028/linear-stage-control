@@ -57,9 +57,18 @@ def show_linear_path_dialog(
     end_x_edit = QLineEdit(mm_text(end_x))
     end_y_edit = QLineEdit(mm_text(end_y))
     basis_combo = QComboBox()
-    basis_combo.addItem("간격 mm/캡쳐", "spacing")
+    basis_combo.addItem("간격/캡쳐", "spacing")
     basis_combo.addItem("위치 수", "count")
     spacing_edit = QLineEdit(mm_text(default_spacing))
+    spacing_unit_combo = QComboBox()
+    spacing_unit_combo.addItem("mm", "mm")
+    spacing_unit_combo.addItem("μm", "um")
+    spacing_row = QWidget()
+    spacing_layout = QHBoxLayout(spacing_row)
+    spacing_layout.setContentsMargins(0, 0, 0, 0)
+    spacing_layout.setSpacing(6)
+    spacing_layout.addWidget(spacing_edit, 1)
+    spacing_layout.addWidget(spacing_unit_combo)
     count_spin = QSpinBox()
     count_spin.setRange(2, 100_000)
     count_spin.setValue(11)
@@ -81,7 +90,7 @@ def show_linear_path_dialog(
     form.addRow("끝 X mm", end_x_edit)
     form.addRow("끝 Y mm", end_y_edit)
     form.addRow("생성 기준", basis_combo)
-    form.addRow("간격 mm/캡쳐", spacing_edit)
+    form.addRow("간격/캡쳐", spacing_row)
     form.addRow("위치 수", count_spin)
     form.addRow("라벨 접두어", label_prefix_edit)
     form.addRow("이동속도 mm/s", velocity_edit)
@@ -117,7 +126,7 @@ def show_linear_path_dialog(
                     y_start=y_start,
                     x_stop=x_stop,
                     y_stop=y_stop,
-                    spacing_mm=float(spacing_edit.text().strip()),
+                    spacing_mm=spacing_value_mm(),
                     label_prefix=label_prefix,
                     start_index=start_index,
                     move_velocity_mm_s=move_velocity,
@@ -138,6 +147,19 @@ def show_linear_path_dialog(
             )
         )
 
+    def spacing_value_mm() -> float:
+        value = float(spacing_edit.text().strip())
+        if spacing_unit_combo.currentData() == "um":
+            return value / 1000.0
+        return value
+
+    def spacing_display_text() -> str:
+        value = float(spacing_edit.text().strip())
+        unit = str(spacing_unit_combo.currentData())
+        if unit == "um":
+            return f"{mm_text(value)} μm"
+        return f"{mm_text(value)} mm"
+
     def update_linear_preview() -> None:
         try:
             points = build_points()
@@ -153,7 +175,8 @@ def show_linear_path_dialog(
             )
             capture_count = optional_int_text(capture_count_edit.text()) or default_capture_count
             total_captures = len(points) * capture_count
-            summary = f"총 거리 {mm_text(distance)} mm | 위치 {len(points)}개 | 예상 {total_captures}장"
+            spacing_text = f" | 간격 {spacing_display_text()}" if basis_combo.currentData() == "spacing" else ""
+            summary = f"총 거리 {mm_text(distance)} mm{spacing_text} | 위치 {len(points)}개 | 예상 {total_captures}장"
             preview_widget.set_path([(point.x_mm, point.y_mm) for point in points], summary)
             preview_status.setText(summary)
             preview_status.setStyleSheet("color: #1f5f43; font-weight: 600;")
@@ -172,7 +195,28 @@ def show_linear_path_dialog(
     def sync_generation_mode() -> None:
         use_spacing = basis_combo.currentData() == "spacing"
         spacing_edit.setEnabled(use_spacing)
+        spacing_unit_combo.setEnabled(use_spacing)
         count_spin.setReadOnly(use_spacing)
+        update_linear_preview()
+
+    spacing_unit = "mm"
+
+    def sync_spacing_unit() -> None:
+        nonlocal spacing_unit
+        previous_unit = spacing_unit
+        next_unit = str(spacing_unit_combo.currentData())
+        try:
+            value = float(spacing_edit.text().strip())
+        except ValueError:
+            spacing_unit = next_unit
+            update_linear_preview()
+            return
+
+        spacing_mm = value / 1000.0 if previous_unit == "um" else value
+        spacing_unit = next_unit
+        spacing_edit.blockSignals(True)
+        spacing_edit.setText(mm_text(spacing_mm * 1000.0 if next_unit == "um" else spacing_mm))
+        spacing_edit.blockSignals(False)
         update_linear_preview()
 
     result: LinearPathDialogResult | None = None
@@ -192,6 +236,7 @@ def show_linear_path_dialog(
         dialog.accept()
 
     basis_combo.currentIndexChanged.connect(sync_generation_mode)
+    spacing_unit_combo.currentIndexChanged.connect(sync_spacing_unit)
     for editor in (
         start_x_edit,
         start_y_edit,

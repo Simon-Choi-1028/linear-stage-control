@@ -30,13 +30,13 @@ from .dataset_exports import (
     write_summary_yaml,
 )
 from .exceptions import DatasetWriteError
-from .scan import ScanPoint
+from .scan import ScanPoint, default_capture_count_from_config, effective_capture_count
 
 
 @dataclass(frozen=True)
 class DatasetSettings:
     output_root: Path
-    image_format: str = "tiff"
+    image_format: str = "png"
     save_numpy: bool = False
     write_jsonl: bool = True
     metadata_formats: tuple[str, ...] = DEFAULT_METADATA_FORMATS
@@ -64,7 +64,7 @@ def dataset_settings_from_config(
         metadata_formats = metadata_formats + ("jsonl",)
     return DatasetSettings(
         output_root=Path(os.path.expandvars(os.path.expanduser(str(output_root or "output/datasets")))),
-        image_format=_normalise_image_format(dataset.get("image_format", "tiff")),
+        image_format=_normalise_image_format(dataset.get("image_format", "png")),
         save_numpy=bool(dataset.get("save_numpy", False)),
         write_jsonl="jsonl" in metadata_formats,
         metadata_formats=metadata_formats,
@@ -124,6 +124,15 @@ class DatasetRun:
 
     def open(self) -> None:
         try:
+            image_plan_errors = validate_image_output_plan(
+                self.points,
+                default_capture_count_from_config(self.config),
+            )
+            if image_plan_errors:
+                raise DatasetWriteError(
+                    "이미지 파일명 계획을 확인하세요.",
+                    "; ".join(image_plan_errors),
+                )
             self.images_dir.mkdir(parents=True, exist_ok=False)
             if self.settings.save_numpy:
                 self.arrays_dir.mkdir(parents=True, exist_ok=True)
@@ -365,9 +374,46 @@ def safe_timestamp(value: datetime | None = None) -> str:
     return dt.strftime("%Y%m%dT%H%M%S_%f%z")
 
 
-def point_name(point: ScanPoint, timestamp: str, capture_index: int = 1) -> str:
-    label = sanitize_label(point.label) or f"point{point.index:04d}"
-    return f"{label}_x{_filename_mm(point.x_mm)}mm_y{_filename_mm(point.y_mm)}mm_" f"{timestamp}_cap{capture_index:03d}"
+def validate_image_output_plan(points: list[ScanPoint], default_capture_count: int = 1) -> list[str]:
+    errors: list[str] = []
+    seen_names: dict[str, ScanPoint] = {}
+    for point in points:
+        capture_count = effective_capture_count(point, default_capture_count)
+        if capture_count > 1:
+            errors.append(
+                f"위치 #{point.index}의 캡쳐 수가 {capture_count}장입니다. "
+                "X000_Y000.png 파일명은 위치당 1장만 저장할 수 있습니다."
+            )
+
+        axis_errors = [
+            f"{axis}={_filename_mm(value)} mm"
+            for axis, value in (("X", point.x_mm), ("Y", point.y_mm))
+            if not _is_integer_mm(value)
+        ]
+        if axis_errors:
+            errors.append(
+                f"위치 #{point.index}의 {', '.join(axis_errors)} 좌표가 정수 mm가 아닙니다. "
+                "X000_Y000.png 파일명은 정수 mm 좌표만 지원합니다."
+            )
+            continue
+
+        filename = f"{point_name(point)}.png"
+        previous = seen_names.get(filename)
+        if previous is not None:
+            errors.append(
+                f"위치 #{previous.index}와 #{point.index}가 같은 이미지 파일명 {filename}을 사용합니다. "
+                "좌표를 중복 없이 지정하세요."
+            )
+        else:
+            seen_names[filename] = point
+    return errors
+
+
+def point_name(point: ScanPoint, timestamp: str | None = None, capture_index: int = 1) -> str:
+    del timestamp, capture_index
+    if not _is_integer_mm(point.x_mm) or not _is_integer_mm(point.y_mm):
+        raise ValueError("X000_Y000 image names require integer millimetre X/Y coordinates.")
+    return f"X{int(point.x_mm):03d}_Y{int(point.y_mm):03d}"
 
 
 def sanitize_label(label: str) -> str:
@@ -379,6 +425,10 @@ def _filename_mm(value: float) -> str:
     return f"{float(value):.3f}"
 
 
+def _is_integer_mm(value: float) -> bool:
+    return float(value).is_integer()
+
+
 def _csv_value(value: Any) -> str:
     if value is None:
         return ""
@@ -388,7 +438,7 @@ def _csv_value(value: Any) -> str:
 
 
 def _normalise_image_format(value: Any) -> str:
-    image_format = str(value or "tiff").strip().lower().lstrip(".")
+    image_format = str(value or "png").strip().lower().lstrip(".")
     aliases = {"tif": "tiff", "jpg": "jpeg"}
     image_format = aliases.get(image_format, image_format)
     allowed = {"tiff", "png", "bmp"}

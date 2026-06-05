@@ -82,14 +82,20 @@ def total_capture_count(points: Iterable[ScanPoint], default_capture_count: int 
 
 def points_from_linear_path(path_config: Mapping[str, Any]) -> list[ScanPoint]:
     spacing_value = _field_value(path_config, LINEAR_SPACING_ALIASES)
-    if spacing_value is not None and str(spacing_value).strip() != "":
+    spacing_um_value = _field_value(path_config, LINEAR_SPACING_UM_ALIASES)
+    if _has_value(spacing_value) or _has_value(spacing_um_value):
+        spacing_mm = (
+            _float_value(spacing_value, "spacing_mm")
+            if _has_value(spacing_value)
+            else _float_value(spacing_um_value, "spacing_um") / 1000.0
+        )
         return list(
             linear_path_points_by_spacing(
                 x_start=_float_value(_field_value(path_config, LINEAR_START_X_ALIASES), "start_x"),
                 y_start=_float_value(_field_value(path_config, LINEAR_START_Y_ALIASES), "start_y"),
                 x_stop=_float_value(_field_value(path_config, LINEAR_END_X_ALIASES), "end_x"),
                 y_stop=_float_value(_field_value(path_config, LINEAR_END_Y_ALIASES), "end_y"),
-                spacing_mm=_float_value(spacing_value, "spacing_mm"),
+                spacing_mm=spacing_mm,
                 label_prefix=str(_field_value(path_config, LINEAR_LABEL_ALIASES, default="line") or "line"),
                 move_velocity_mm_s=_optional_positive_float(
                     _field_value(path_config, VELOCITY_ALIASES),
@@ -383,6 +389,17 @@ LINEAR_SPACING_ALIASES = {
     "해상도",
     "분해능",
 }
+LINEAR_SPACING_UM_ALIASES = {
+    "spacingum",
+    "resolutionum",
+    "intervalum",
+    "umpercapture",
+    "umperimage",
+    "umperpoint",
+    "간격um",
+    "해상도um",
+    "분해능um",
+}
 LINEAR_LABEL_ALIASES = {"labelprefix", "prefix", "nameprefix", "label", "라벨", "접두어"}
 
 
@@ -511,6 +528,10 @@ def _field_value(
         if _normalise_key(key) in aliases:
             return value
     return default
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and str(value).strip() != ""
 
 
 def _mapping_has_xy(record: Mapping[str, Any]) -> bool:

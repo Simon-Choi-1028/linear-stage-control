@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 import sys
 import threading
@@ -54,6 +55,7 @@ from . import __version__
 from .app_state import AppRunState
 from .camera import iso_timestamp
 from .config import ConfigError, load_config
+from .dataset import validate_image_output_plan
 from .dataset_exports import DEFAULT_METADATA_FORMATS, DEFAULT_SUMMARY_FORMATS
 from .error_model import (
     ZABER_LDM210_XY_SPECS,
@@ -103,6 +105,7 @@ from .preview_rendering import qimage_from_array, render_preview_qimage
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
+    effective_move_velocity_mm_s,
     points_from_config,
     points_from_file,
     total_capture_count,
@@ -162,6 +165,98 @@ class PreflightIssue:
     detail: str
 
 
+@dataclass(frozen=True)
+class RunDurationEstimate:
+    seconds: float
+    detail: str
+
+
+def estimate_run_duration(
+    points: list[ScanPoint],
+    config: dict[str, Any],
+    *,
+    skip_home: bool = False,
+) -> RunDurationEstimate:
+    if not points:
+        return RunDurationEstimate(0.0, "위치 없음")
+
+    stage_settings = stage_settings_from_config(config)
+    default_capture_count = default_capture_count_from_config(config)
+    capture_total = total_capture_count(points, default_capture_count)
+    settle_total_s = max(0.0, stage_settings.settle_s) * len(points)
+    exposure_total_s = max(0.0, _float_config_value(config.get("camera", {}).get("exposure_us"), 0.0))
+    exposure_total_s = exposure_total_s * capture_total / 1_000_000.0
+
+    move_total_s = 0.0
+    unknown_start_moves = 0
+    unknown_velocity_moves = 0
+    previous_x: float | None
+    previous_y: float | None
+    previous_known: bool
+    if stage_settings.home_on_start and not skip_home:
+        previous_x = 0.0
+        previous_y = 0.0
+        previous_known = True
+    else:
+        previous_x = None
+        previous_y = None
+        previous_known = False
+
+    for point in points:
+        move_velocity = effective_move_velocity_mm_s(point, stage_settings.move_velocity_mm_s)
+        if move_velocity is None:
+            unknown_velocity_moves += 1
+        elif previous_known and previous_x is not None and previous_y is not None:
+            dx = point.x_mm - previous_x if stage_settings.x.enabled else 0.0
+            dy = point.y_mm - previous_y if stage_settings.y.enabled else 0.0
+            move_total_s += math.hypot(dx, dy) / move_velocity
+        else:
+            unknown_start_moves += 1
+        previous_x = point.x_mm
+        previous_y = point.y_mm
+        previous_known = True
+
+    total_s = settle_total_s + exposure_total_s + move_total_s
+    notes: list[str] = []
+    if stage_settings.home_on_start and not skip_home:
+        notes.append("원점 복귀 시간 제외")
+    elif unknown_start_moves:
+        notes.append("현재 위치-첫 위치 이동 시간 제외")
+    if unknown_velocity_moves:
+        notes.append(f"속도 미지정 이동 {unknown_velocity_moves}개 제외")
+
+    detail = (
+        f"예상 {_duration_text(total_s)} | 안정화 {_duration_text(settle_total_s)} + "
+        f"노출 {_duration_text(exposure_total_s)} + 계산 가능 이동 {_duration_text(move_total_s)}"
+    )
+    if notes:
+        detail += f" | {', '.join(notes)}"
+    return RunDurationEstimate(total_s, detail)
+
+
+def _duration_text(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 1:
+        return f"{_number_text(seconds)}초"
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, second = divmod(remainder, 60)
+    if hours:
+        return f"{hours}시간 {minutes:02d}분 {second:02d}초"
+    if minutes:
+        return f"{minutes}분 {second:02d}초"
+    return f"{second}초"
+
+
+def _float_config_value(value: Any, default: float) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class MainWindow(QMainWindow):
     def __init__(self, start_device_scan: bool = True) -> None:
         super().__init__()
@@ -190,6 +285,10 @@ class MainWindow(QMainWindow):
         self._preferred_camera_serial = ""
         self._camera_user_touched = False
         self._layout_is_narrow: bool | None = None
+        self.run_started_monotonic: float | None = None
+        self.run_completed_captures = 0
+        self.run_total_captures = 0
+        self.run_estimated_total_s = 0.0
         self.preview_base_min_height = 180
         self.preview_user_min_height: int | None = None
         self.preview_source_qimage: QImage | None = None
@@ -206,6 +305,9 @@ class MainWindow(QMainWindow):
         self.responsive_layout_timer.setSingleShot(True)
         self.responsive_layout_timer.setInterval(80)
         self.responsive_layout_timer.timeout.connect(self.update_responsive_layout)
+        self.run_timing_timer = QTimer(self)
+        self.run_timing_timer.setInterval(1000)
+        self.run_timing_timer.timeout.connect(self.update_run_timing_display)
         self._build_ui()
         self._apply_style()
         self._load_initial_config()
@@ -245,13 +347,28 @@ class MainWindow(QMainWindow):
         toolbar = QWidget()
         toolbar.setObjectName("topToolbar")
         toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(14, 9, 14, 9)
+        toolbar_layout.setContentsMargins(14, 7, 14, 7)
         toolbar_layout.setSpacing(8)
-        self.load_config_button = QPushButton("설정 불러오기")
-        self.save_config_button = QPushButton("설정 저장")
-        self.refresh_button = QPushButton("장비 새로고침")
-        self.open_dataset_button = QPushButton("데이터셋 열기")
-        self.update_button = QPushButton("업데이트 확인")
+        title_widget = QWidget()
+        title_layout = QVBoxLayout(title_widget)
+        title_layout.setContentsMargins(0, 0, 10, 0)
+        title_layout.setSpacing(0)
+        self.top_title_label = QLabel("Basler + Zaber")
+        self.top_title_label.setObjectName("topTitle")
+        self.top_title_label.setMinimumWidth(0)
+        self.top_subtitle_label = QLabel("XY stage capture")
+        self.top_subtitle_label.setObjectName("topSubtitle")
+        self.top_subtitle_label.setMinimumWidth(0)
+        title_layout.addWidget(self.top_title_label)
+        title_layout.addWidget(self.top_subtitle_label)
+        title_widget.setMinimumWidth(0)
+        title_widget.setMaximumWidth(210)
+        title_widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.load_config_button = QPushButton("불러오기")
+        self.save_config_button = QPushButton("저장")
+        self.refresh_button = QPushButton("새로고침")
+        self.open_dataset_button = QPushButton("데이터셋")
+        self.update_button = QPushButton("업데이트")
         self.update_status_label = QLabel(f"v{__version__}")
         self.update_status_label.setObjectName("updateStatus")
         self.open_dataset_button.setEnabled(False)
@@ -260,6 +377,11 @@ class MainWindow(QMainWindow):
         _apply_button_icon(self.refresh_button, QStyle.SP_BrowserReload, "카메라와 스테이지 포트 새로고침")
         _apply_button_icon(self.open_dataset_button, QStyle.SP_DirOpenIcon, "최근 데이터셋 폴더 열기")
         _apply_button_icon(self.update_button, QStyle.SP_ArrowUp, "GitHub Release에서 새 버전을 확인합니다.")
+        self.load_config_button.setShortcut("Ctrl+O")
+        self.save_config_button.setShortcut("Ctrl+S")
+        self.refresh_button.setShortcut("F5")
+        self.update_button.setShortcut("Ctrl+U")
+        toolbar_layout.addWidget(title_widget)
         toolbar_layout.addWidget(self.load_config_button)
         toolbar_layout.addWidget(self.save_config_button)
         toolbar_layout.addWidget(self.refresh_button)
@@ -671,6 +793,9 @@ class MainWindow(QMainWindow):
     def _build_settings_group(self) -> QGroupBox:
         group = QGroupBox("촬영 설정")
         form = QFormLayout(group)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(9)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         output_row = QWidget()
         output_layout = QHBoxLayout(output_row)
@@ -964,6 +1089,7 @@ class MainWindow(QMainWindow):
     def _build_positions_group(self) -> QGroupBox:
         group = QGroupBox("이동 위치")
         layout = QVBoxLayout(group)
+        layout.setSpacing(9)
         button_grid = QGridLayout()
         button_grid.setContentsMargins(0, 0, 0, 0)
         button_grid.setHorizontalSpacing(6)
@@ -1003,6 +1129,8 @@ class MainWindow(QMainWindow):
         self.positions_table.setToolTip("속도와 캡쳐 수는 비워 두면 촬영 설정의 이동속도/기본 캡쳐 수를 사용합니다.")
         self.positions_table.verticalHeader().setVisible(False)
         self.positions_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.positions_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.positions_table.setMinimumHeight(190)
         self.positions_table.itemChanged.connect(self.on_position_item_changed)
         self.position_status_label = QLabel(f"위치 범위: {_mm_text(POSITION_MIN_MM)}-{_mm_text(POSITION_MAX_MM)} mm")
         self.position_status_label.setObjectName("positionStatus")
@@ -1023,6 +1151,8 @@ class MainWindow(QMainWindow):
     def _build_run_group(self) -> QGroupBox:
         group = QGroupBox("진행")
         layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
         self.start_button = QPushButton("시작")
         self.stop_button = QPushButton("중지")
         self.start_button.setObjectName("runControlButton")
@@ -1033,11 +1163,14 @@ class MainWindow(QMainWindow):
         self.stop_button.setMinimumHeight(42)
         _apply_button_icon(self.start_button, QStyle.SP_MediaPlay, "촬영 run 시작")
         _apply_button_icon(self.stop_button, QStyle.SP_MediaStop, "현재 run 중지 요청")
+        self.start_button.setShortcut("Ctrl+R")
+        self.stop_button.setShortcut("Esc")
         self.stop_button.setEnabled(False)
         self.run_status_label = QLabel("대기 중")
         self.run_status_label.setObjectName("runStatus")
         self.progress_detail_label = QLabel("0/0")
         self.progress_detail_label.setObjectName("progressDetail")
+        self.progress_detail_label.setWordWrap(True)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
@@ -1078,24 +1211,25 @@ class MainWindow(QMainWindow):
         self.preview_info_label = QLabel("촬영 이미지를 선택하면 아래 칸에 위치와 오차가 표시됩니다")
         self.preview_info_label.setWordWrap(True)
         self.preview_info_label.setObjectName("previewInfo")
-        self.fullscreen_button = QPushButton("전체화면 보기")
+        self.fullscreen_button = QPushButton("전체화면")
         _apply_button_icon(self.fullscreen_button, QStyle.SP_TitleBarMaxButton, "이미지를 전체화면 확대 창으로 열기")
         self.fullscreen_button.setEnabled(False)
         self.fullscreen_button.clicked.connect(self.open_fullscreen_image)
-        self.live_button = QPushButton("Live 보기")
-        self.live_stop_button = QPushButton("Live 정지")
-        self.live_retry_button = QPushButton("Live 재연결")
-        self.live_scan_button = QPushButton("카메라 재검색")
+        self.live_button = QPushButton("Live")
+        self.live_stop_button = QPushButton("정지")
+        self.live_retry_button = QPushButton("재연결")
+        self.live_scan_button = QPushButton("재검색")
         self.live_button.setProperty("variant", "primary")
         self.live_stop_button.setProperty("variant", "danger")
         self.live_retry_button.setProperty("variant", "quiet")
         self.live_scan_button.setProperty("variant", "quiet")
         self.live_status_label = QLabel("Live 대기")
         self.live_status_label.setObjectName("liveStatus")
-        self.live_size_hint_label = QLabel("우하단 핸들을 끌어 크기 조정")
+        self.live_size_hint_label = QLabel("우하단 드래그")
         self.live_size_hint_label.setObjectName("previewInfo")
-        self.live_size_reset_button = QPushButton("기본 크기")
-        self.live_size_reset_button.setMinimumWidth(82)
+        self.live_size_hint_label.setMaximumWidth(110)
+        self.live_size_reset_button = QPushButton("기본")
+        self.live_size_reset_button.setMinimumWidth(64)
         self.live_size_reset_button.setToolTip("Live/이미지 미리보기 높이를 현재 레이아웃의 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
@@ -1114,18 +1248,23 @@ class MainWindow(QMainWindow):
         _apply_button_icon(self.live_size_reset_button, QStyle.SP_BrowserReload, "미리보기 화면 크기 초기화")
         self.live_size_reset_button.clicked.connect(self.reset_preview_height)
         preview_info_widget = QWidget()
+        self.preview_command_bar = preview_info_widget
+        preview_info_widget.setObjectName("previewCommandBar")
+        preview_info_widget.setMinimumWidth(0)
+        preview_info_widget.setMinimumHeight(84)
+        preview_info_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         preview_info_grid = QGridLayout(preview_info_widget)
-        preview_info_grid.setContentsMargins(0, 0, 0, 0)
-        preview_info_grid.setHorizontalSpacing(6)
+        preview_info_grid.setContentsMargins(8, 7, 8, 7)
+        preview_info_grid.setHorizontalSpacing(7)
         preview_info_grid.setVerticalSpacing(6)
-        preview_info_grid.addWidget(self.preview_info_label, 0, 0, 1, 5)
-        preview_info_grid.addWidget(self.live_status_label, 0, 5)
+        preview_info_grid.addWidget(self.preview_info_label, 0, 0, 1, 4)
+        preview_info_grid.addWidget(self.live_status_label, 0, 4, 1, 2)
         preview_info_grid.addWidget(self.live_button, 1, 0)
         preview_info_grid.addWidget(self.live_stop_button, 1, 1)
         preview_info_grid.addWidget(self.live_retry_button, 1, 2)
         preview_info_grid.addWidget(self.live_scan_button, 1, 3)
         preview_info_grid.addWidget(self.fullscreen_button, 1, 4)
-        preview_info_grid.addWidget(self.live_size_reset_button, 1, 5)
+        preview_info_grid.setColumnMinimumWidth(5, 80)
         preview_info_grid.setColumnStretch(0, 1)
         preview_info_grid.setColumnStretch(1, 1)
         preview_info_grid.setColumnStretch(2, 1)
@@ -1139,13 +1278,13 @@ class MainWindow(QMainWindow):
         self.preview_zoom_slider = QSlider(Qt.Horizontal)
         self.preview_zoom_slider.setRange(100, 800)
         self.preview_zoom_slider.setValue(100)
-        self.preview_zoom_slider.setFixedWidth(140)
+        self.preview_zoom_slider.setFixedWidth(108)
         self.preview_zoom_slider.setToolTip(
             "미리보기 디지털 확대 비율입니다. 확대 후 이미지를 클릭하면 해당 지점으로 중심이 이동합니다."
         )
-        self.preview_zoom_reset_button = QPushButton("맞춤")
+        self.preview_zoom_reset_button = QPushButton("100%")
         self.preview_zoom_reset_button.setProperty("variant", "quiet")
-        self.preview_zoom_reset_button.setMinimumWidth(64)
+        self.preview_zoom_reset_button.setMinimumWidth(58)
         self.preview_zoom_reset_button.setToolTip("확대를 100%로 되돌리고 중심을 화면 중앙으로 맞춥니다.")
         self.preview_grid_check = QCheckBox("격자")
         self.preview_grid_check.setToolTip("미리보기 이미지 위에 얇은 흰색 4x4 격자를 겹쳐 표시합니다.")
@@ -1157,7 +1296,18 @@ class MainWindow(QMainWindow):
         self.preview_grid_check.toggled.connect(lambda _checked=False: self.render_preview_source())
         self.preview_cross_check.toggled.connect(lambda _checked=False: self.render_preview_source())
 
-        preview_tools_row = QHBoxLayout()
+        preview_tools_widget = QWidget()
+        self.preview_tool_bar = preview_tools_widget
+        preview_tools_widget.setObjectName("previewToolBar")
+        preview_tools_widget.setMinimumWidth(0)
+        preview_tools_widget.setMinimumHeight(54)
+        preview_tools_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        preview_tools_row = QHBoxLayout(preview_tools_widget)
+        preview_tools_row.setContentsMargins(9, 7, 9, 7)
+        preview_tools_row.setSpacing(8)
+        preview_tools_title = QLabel("검사 도구")
+        preview_tools_title.setObjectName("toolBarTitle")
+        preview_tools_row.addWidget(preview_tools_title)
         preview_tools_row.addStretch(1)
         preview_tools_row.addWidget(QLabel("확대"))
         preview_tools_row.addWidget(self.preview_zoom_slider)
@@ -1165,6 +1315,9 @@ class MainWindow(QMainWindow):
         preview_tools_row.addWidget(self.preview_zoom_reset_button)
         preview_tools_row.addWidget(self.preview_grid_check)
         preview_tools_row.addWidget(self.preview_cross_check)
+        preview_tools_row.addSpacing(8)
+        preview_tools_row.addWidget(self.live_size_hint_label)
+        preview_tools_row.addWidget(self.live_size_reset_button)
 
         self.preview_metrics_table = QTableWidget(1, 11)
         self.preview_metrics_table.setObjectName("previewMetrics")
@@ -1271,7 +1424,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.preview_frame, 3)
         layout.addWidget(preview_info_widget)
-        layout.addLayout(preview_tools_row)
+        layout.addWidget(preview_tools_widget)
         layout.addWidget(self.preview_metrics_table)
         layout.addWidget(tabs, 2)
         return panel
@@ -2301,7 +2454,7 @@ class MainWindow(QMainWindow):
         y_axis["enabled"] = self.y_axis_enabled_check.isChecked()
 
         dataset["output_root"] = self.output_root_edit.text() or "output/datasets"
-        dataset["image_format"] = "tiff"
+        dataset["image_format"] = "png"
         dataset["save_numpy"] = self.save_numpy_check.isChecked()
         dataset["metadata_formats"] = self._checked_formats(self.metadata_format_checks) or ["csv"]
         dataset["summary_formats"] = self._checked_formats(self.summary_format_checks)
@@ -2325,13 +2478,13 @@ class MainWindow(QMainWindow):
         position_validation: PositionValidationResult,
     ) -> list[PreflightIssue]:
         issues: list[PreflightIssue] = []
+        default_capture_count = default_capture_count_from_config(config)
 
         if points:
             min_x = min(point.x_mm for point in points)
             max_x = max(point.x_mm for point in points)
             min_y = min(point.y_mm for point in points)
             max_y = max(point.y_mm for point in points)
-            default_capture_count = default_capture_count_from_config(config)
             total_captures = total_capture_count(points, default_capture_count)
             override_count = sum(
                 1 for point in points if point.move_velocity_mm_s is not None or point.capture_count is not None
@@ -2349,6 +2502,12 @@ class MainWindow(QMainWindow):
             issues.append(PreflightIssue("위치 목록", status, detail))
         else:
             issues.append(PreflightIssue("위치 목록", "오류", "최소 1개 이상의 위치가 필요합니다."))
+
+        image_plan_errors = validate_image_output_plan(points, default_capture_count) if points else []
+        if image_plan_errors:
+            issues.append(PreflightIssue("이미지 파일명", "오류", short_issue_text(image_plan_errors)))
+        elif points:
+            issues.append(PreflightIssue("이미지 파일명", "통과", "PNG X000_Y000.png | 정수 좌표/중복 검사 통과"))
 
         detected_cameras = max(0, self.camera_combo.count() - 1)
         if detected_cameras <= 0:
@@ -2456,6 +2615,15 @@ class MainWindow(QMainWindow):
                 f"안정화 {_settle_display_text(self.settle_seconds())} | 기본 캡쳐 {default_capture_count_from_config(config)}장",
             )
         )
+        try:
+            duration_estimate = estimate_run_duration(
+                points,
+                config,
+                skip_home=self.skip_home_check.isChecked(),
+            )
+            issues.append(PreflightIssue("예상 소요시간", "통과", duration_estimate.detail))
+        except Exception as exc:
+            issues.append(PreflightIssue("예상 소요시간", "경고", f"계산 생략: {exc}"))
         issues.append(
             PreflightIssue(
                 "카메라 파라미터",
@@ -2600,10 +2768,15 @@ class MainWindow(QMainWindow):
         self.error_records = []
         self.update_error_summary()
         capture_total = total_capture_count(points, default_capture_count_from_config(config))
+        duration_estimate = estimate_run_duration(
+            points,
+            config,
+            skip_home=self.skip_home_check.isChecked(),
+        )
         self.progress_bar.setRange(0, capture_total)
         self.progress_bar.setValue(0)
         self.set_run_status("촬영 준비 중")
-        self.progress_detail_label.setText(f"0/{capture_total} 완료")
+        self.start_run_timing(capture_total, duration_estimate.seconds)
         self.apply_state(AppRunState.ACQUIRING)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_status_label.setText("카메라 검색 종료 대기 중...")
@@ -2611,6 +2784,7 @@ class MainWindow(QMainWindow):
         self.current_run_dir = None
         self.open_dataset_button.setEnabled(False)
         self.log("촬영 run 시작")
+        self.log(f"예상 소요시간: {duration_estimate.detail}")
 
         self.worker = AcquisitionWorker(
             config=config,
@@ -2637,7 +2811,44 @@ class MainWindow(QMainWindow):
     def on_progress_changed(self, completed: int, total: int) -> None:
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(completed)
-        self.progress_detail_label.setText(f"{completed}/{total} 완료")
+        self.run_completed_captures = completed
+        self.run_total_captures = total
+        self.update_run_timing_display()
+
+    def start_run_timing(self, total: int, estimated_total_s: float) -> None:
+        self.run_started_monotonic = time.monotonic()
+        self.run_completed_captures = 0
+        self.run_total_captures = total
+        self.run_estimated_total_s = max(0.0, estimated_total_s)
+        self.run_timing_timer.start()
+        self.update_run_timing_display()
+
+    def update_run_timing_display(self) -> None:
+        if self.run_started_monotonic is None:
+            return
+        elapsed_s = max(0.0, time.monotonic() - self.run_started_monotonic)
+        completed = max(0, self.run_completed_captures)
+        total = max(0, self.run_total_captures)
+        if total > 0 and completed > 0:
+            estimated_total_s = max(elapsed_s, elapsed_s * total / completed)
+        else:
+            estimated_total_s = max(elapsed_s, self.run_estimated_total_s)
+        remaining_s = max(0.0, estimated_total_s - elapsed_s)
+        finish_time = time.strftime("%H:%M:%S", time.localtime(time.time() + remaining_s))
+        self.progress_detail_label.setText(
+            f"{completed}/{total} 완료 | 경과 {_duration_text(elapsed_s)} | "
+            f"남은 {_duration_text(remaining_s)} | 예상 종료 {finish_time}"
+        )
+
+    def finish_run_timing(self) -> None:
+        self.run_timing_timer.stop()
+        if self.run_started_monotonic is None:
+            return
+        elapsed_s = max(0.0, time.monotonic() - self.run_started_monotonic)
+        completed = max(0, self.run_completed_captures)
+        total = max(0, self.run_total_captures)
+        self.progress_detail_label.setText(f"{completed}/{total} 완료 | 총 경과 {_duration_text(elapsed_s)}")
+        self.run_started_monotonic = None
 
     def on_capture_done(self, record: dict[str, Any]) -> None:
         row = self.captures_table.rowCount()
@@ -2677,6 +2888,7 @@ class MainWindow(QMainWindow):
         )
 
     def on_run_failed(self, message: str) -> None:
+        self.finish_run_timing()
         self.set_run_status("오류 발생")
         self.apply_state(AppRunState.ERROR)
         self.log(f"오류: {message}")
@@ -2684,6 +2896,7 @@ class MainWindow(QMainWindow):
         self.restart_live_preview_after_run()
 
     def on_run_done(self, run_dir: str, stopped: bool) -> None:
+        self.finish_run_timing()
         self.worker = None
         if run_dir:
             self.current_run_dir = Path(run_dir)

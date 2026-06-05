@@ -71,7 +71,7 @@ updates:
 dataset:
   output_root: "%USERPROFILE%/Documents/LinearStageControl/datasets"
   # Raw image output is kept lossless. Supported: tiff, png, bmp.
-  image_format: tiff
+  image_format: png
   save_numpy: false
   # Metadata formats are generated per run for analysis, archiving, and papers.
   metadata_formats: [csv, jsonl, json, tsv, yaml, xlsx]
@@ -127,8 +127,10 @@ scan:
     # end_x_mm: 1
     # end_y_mm: 0
     # spacing_mm: 0.1
-    # If spacing_mm is set, the app creates one position every spacing_mm and
-    # always includes the end point. If spacing_mm is blank, count is used.
+    # spacing_um: 100
+    # If spacing_mm or spacing_um is set, the app creates one position every
+    # requested spacing and always includes the end point. If spacing is blank,
+    # count is used. spacing_mm takes precedence when both are present.
     # count: 5
     # label_prefix: line
     # move_velocity_mm_s:

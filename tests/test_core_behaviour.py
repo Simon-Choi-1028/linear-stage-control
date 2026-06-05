@@ -14,16 +14,22 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from linear_stage_control.camera import PYLON_IMPORT_ERROR, BaslerCamera, camera_settings_from_config
-from linear_stage_control.dataset import DatasetRun, DatasetSettings, base_capture_record, point_name
+from linear_stage_control.dataset import (
+    DatasetRun,
+    DatasetSettings,
+    base_capture_record,
+    point_name,
+    validate_image_output_plan,
+)
 from linear_stage_control.dataset_exports import (
     DEFAULT_METADATA_FORMATS,
     SUPPORTED_METADATA_FORMATS,
     normalise_formats,
 )
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
-from linear_stage_control.exceptions import StageConnectionError
+from linear_stage_control.exceptions import DatasetWriteError, StageConnectionError
 from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
-from linear_stage_control.scan import linear_path_points_by_spacing, points_from_records
+from linear_stage_control.scan import linear_path_points_by_spacing, points_from_config, points_from_records
 from linear_stage_control.stage import (
     AxisAddress,
     StageMoveCancelled,
@@ -104,6 +110,23 @@ class ScanInputTests(unittest.TestCase):
         self.assertEqual([point.x_mm for point in points], [0, 0.3, 0.6, 0.9, 1.0])
         self.assertTrue(all(point.move_velocity_mm_s == 25 for point in points))
         self.assertTrue(all(point.capture_count == 2 for point in points))
+
+    def test_linear_path_accepts_micrometre_spacing_config(self) -> None:
+        points = points_from_config(
+            {
+                "scan": {
+                    "linear_path": {
+                        "start_x_mm": 0,
+                        "start_y_mm": 0,
+                        "end_x_mm": 1,
+                        "end_y_mm": 0,
+                        "spacing_um": 250,
+                    }
+                }
+            }
+        )
+
+        self.assertEqual([point.x_mm for point in points], [0, 0.25, 0.5, 0.75, 1.0])
 
     def test_position_records_accept_common_column_aliases(self) -> None:
         points = points_from_records(
@@ -532,6 +555,8 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertLessEqual(window.height(), 795)
         self.assertGreaterEqual(window.preview_label.height(), 150)
         self.assertGreaterEqual(window.preview_tabs.height(), 160)
+        self.assertGreaterEqual(window.preview_command_bar.height(), 78)
+        self.assertGreaterEqual(window.preview_tool_bar.height(), 48)
 
         window.resize(1440, 640)
         app.processEvents()
@@ -608,6 +633,64 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(any("X" in detail for detail in conflict_details))
         window.close()
 
+    def test_preflight_reports_image_filename_conflicts_and_estimated_time(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        points = points_from_records([{"x_mm": 0, "y_mm": 0}, {"x_mm": 0, "y_mm": 0}])
+        config = {
+            "camera": {"pixel_format": "Mono8", "exposure_us": 5000},
+            "dataset": {"output_root": str(Path(tempfile.gettempdir()) / "LinearStageControl-QC")},
+            "scan": {"default_capture_count": 1},
+            "stage": {
+                "serial_port": "COM_TEST",
+                "settle_s": 0.2,
+                "move_velocity_mm_s": 10,
+                "axes": {
+                    "x": {"enabled": True, "device_index": 0, "axis_number": 1},
+                    "y": {"enabled": True, "device_index": 0, "axis_number": 2},
+                },
+            },
+            "updates": {"enabled": False},
+        }
+
+        issues = window.collect_preflight_issues(points, config, validate_scan_points(points))
+
+        filename_errors = [
+            issue.detail for issue in issues if issue.item == "이미지 파일명" and issue.status == "오류"
+        ]
+        duration_details = [issue.detail for issue in issues if issue.item == "예상 소요시간"]
+        self.assertTrue(filename_errors)
+        self.assertTrue(any("같은 이미지 파일명" in detail for detail in filename_errors))
+        self.assertTrue(duration_details)
+        self.assertTrue(any("안정화" in detail for detail in duration_details))
+        window.close()
+
+    def test_run_duration_estimate_includes_settle_exposure_and_known_moves(self) -> None:
+        from linear_stage_control.gui_app import estimate_run_duration
+
+        points = points_from_records([{"x_mm": 3, "y_mm": 4}, {"x_mm": 6, "y_mm": 8}])
+        config = {
+            "camera": {"exposure_us": 10_000},
+            "scan": {"default_capture_count": 1},
+            "stage": {
+                "serial_port": "COM_TEST",
+                "home_on_start": True,
+                "settle_s": 0.2,
+                "move_velocity_mm_s": 10,
+                "axes": {
+                    "x": {"enabled": True, "device_index": 0, "axis_number": 1},
+                    "y": {"enabled": True, "device_index": 0, "axis_number": 2},
+                },
+            },
+        }
+
+        estimate = estimate_run_duration(points, config)
+
+        self.assertAlmostEqual(estimate.seconds, 1.42, places=6)
+        self.assertIn("안정화 0.4초", estimate.detail)
+
     def test_preview_zoom_grid_and_cross_render_without_hardware(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
@@ -678,19 +761,44 @@ class GuiSmokeTests(unittest.TestCase):
 
 
 class DatasetNamingTests(unittest.TestCase):
-    def test_point_name_includes_label_position_timestamp_and_capture_index(self) -> None:
-        point = points_from_records([{"label": "sample a", "x_mm": "0.5", "y_mm": "-1.25"}])[0]
+    def test_point_name_uses_zero_padded_integer_xy(self) -> None:
+        first = points_from_records([{"label": "sample a", "x_mm": "0", "y_mm": "0"}])[0]
+        second = points_from_records([{"label": "sample b", "x_mm": "1", "y_mm": "210"}])[0]
 
-        name = point_name(point, "20260528T153012_123456+0900", 7)
+        self.assertEqual(point_name(first, "20260528T153012_123456+0900", 7), "X000_Y000")
+        self.assertEqual(point_name(second), "X001_Y210")
 
-        self.assertEqual(
-            name,
-            "sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap007",
-        )
+    def test_dataset_image_path_uses_png_integer_xy_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            point = points_from_records([{"label": "sample a", "x_mm": "1", "y_mm": "210"}])[0]
+            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+
+            with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml") as dataset:
+                image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
+
+            self.assertEqual(image_path.name, "X001_Y210.png")
+
+    def test_image_output_plan_rejects_fractional_duplicate_and_multi_capture_names(self) -> None:
+        fractional = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])
+        duplicate = points_from_records([{"x_mm": "0", "y_mm": "0"}, {"x_mm": "0", "y_mm": "0"}])
+        multi_capture = points_from_records([{"x_mm": "1", "y_mm": "1", "capture_count": "2"}])
+
+        self.assertTrue(any("정수 mm" in error for error in validate_image_output_plan(fractional)))
+        self.assertTrue(any("같은 이미지 파일명" in error for error in validate_image_output_plan(duplicate)))
+        self.assertTrue(any("위치당 1장" in error for error in validate_image_output_plan(multi_capture)))
+
+    def test_dataset_open_rejects_invalid_image_output_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            point = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])[0]
+            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+
+            with self.assertRaises(DatasetWriteError):
+                with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml"):
+                    pass
 
     def test_dataset_manifest_includes_version_record_count_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            point = points_from_records([{"label": "sample a", "x_mm": "0.5", "y_mm": "-1.25"}])[0]
+            point = points_from_records([{"label": "sample a", "x_mm": "0", "y_mm": "0"}])[0]
             settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
 
             with DatasetRun(settings, {"dataset": {}}, [point], "config.yaml") as dataset:

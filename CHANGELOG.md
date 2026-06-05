@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refined the white-mode UI with a compact app header, shorter toolbar actions, grouped preview command/tool bars, and larger parameter step buttons.
+- Reduced preview panel minimum width so narrow windows can switch to the vertical responsive layout without being held open by toolbar controls.
 - Added ruff and pyright development checks with a basic typed-core scope.
 - Added an explicit GUI `AppRunState` enum and centralized button enable/disable handling.
 - Added user-facing custom exception classes for camera, stage, dataset, position, and update failures.

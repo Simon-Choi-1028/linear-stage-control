@@ -20,6 +20,16 @@ QWidget#topToolbar {
     background: #ffffff;
     border-bottom: 1px solid #e1e7ef;
 }
+QLabel#topTitle {
+    color: #102033;
+    font-size: 11pt;
+    font-weight: 900;
+}
+QLabel#topSubtitle {
+    color: #697586;
+    font-size: 8pt;
+    font-weight: 600;
+}
 QWidget#controlPanel, QWidget#previewPanel {
     background: #f6f8fb;
 }
@@ -27,8 +37,8 @@ QGroupBox {
     background: #ffffff;
     border: 1px solid #dde5ee;
     border-radius: 8px;
-    margin-top: 18px;
-    padding: 15px 12px 12px 12px;
+    margin-top: 16px;
+    padding: 17px 13px 13px 13px;
     font-weight: 700;
 }
 QGroupBox::title {
@@ -41,6 +51,12 @@ QGroupBox::title {
 }
 QWidget#parameterRow, QWidget#parameterRow QWidget {
     background: transparent;
+}
+QWidget#parameterButtonGroup {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 7px;
+    padding: 4px;
 }
 QPushButton {
     background: #ffffff;
@@ -90,7 +106,7 @@ QPushButton#parameterButton {
     border: 1px solid #c7d0dc;
     border-radius: 5px;
     padding: 3px 0;
-    min-height: 23px;
+    min-height: 24px;
     font-weight: 700;
     font-size: 8pt;
 }
@@ -104,7 +120,7 @@ QPushButton#runControlButton {
     font-size: 10pt;
 }
 QLabel#parameterLabel {
-    min-width: 58px;
+    min-width: 68px;
     font-weight: 700;
     color: #263242;
 }
@@ -205,6 +221,23 @@ QLabel#preview {
     color: #cfd6df;
     border-radius: 9px;
     border: 1px solid #202833;
+}
+QWidget#previewCommandBar, QWidget#previewToolBar {
+    background: #ffffff;
+    border: 1px solid #dbe3ed;
+    border-radius: 8px;
+}
+QWidget#previewCommandBar QLabel#previewInfo, QWidget#previewCommandBar QLabel#liveStatus {
+    border: 0;
+    background: transparent;
+    padding: 4px 6px;
+}
+QWidget#previewToolBar QLabel {
+    background: transparent;
+}
+QLabel#toolBarTitle {
+    color: #435164;
+    font-weight: 800;
 }
 QWidget#previewResizeHandle {
     background: rgba(17, 20, 24, 120);

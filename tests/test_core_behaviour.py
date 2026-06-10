@@ -53,17 +53,22 @@ class _FakeAxis:
         fail_on_move: bool = False,
         fail_on_position: bool = False,
         move_exception: Exception | None = None,
+        home_exception: Exception | None = None,
         stop_exception: Exception | None = None,
         stays_busy_until_stopped: bool = False,
         position: float = 0.0,
+        homed: bool = True,
     ):
         self.fail_on_move = fail_on_move
         self.fail_on_position = fail_on_position
         self.move_exception = move_exception
+        self.home_exception = home_exception
         self.stop_exception = stop_exception
         self.stays_busy_until_stopped = stays_busy_until_stopped
         self.position = position
+        self.homed = homed
         self.move_calls = 0
+        self.home_calls = 0
         self.stop_calls = 0
         self.stopped = False
         self.moved = False
@@ -91,6 +96,27 @@ class _FakeAxis:
         if self.fail_on_position:
             raise RuntimeError("inactive axis should not be read")
         return self.position
+
+    def is_homed(self) -> bool:
+        return self.homed
+
+    def home(self) -> None:
+        self.home_calls += 1
+        if self.home_exception is not None:
+            raise self.home_exception
+        self.homed = True
+
+
+class _FakeDevice:
+    def __init__(self, axes: dict[int, _FakeAxis]):
+        self._axes = axes
+        self.axis_count = max(axes) if axes else 0
+        self.device_address = 1
+        self.serial_number = 12345
+        self.name = "Fake Zaber"
+
+    def get_axis(self, axis_number: int) -> _FakeAxis:
+        return self._axes[axis_number]
 
 
 class ScanInputTests(unittest.TestCase):
@@ -224,13 +250,13 @@ class ExportFormatTests(unittest.TestCase):
 
 
 class StageAxisSettingsTests(unittest.TestCase):
-    def test_stage_settings_parse_enabled_axes_and_default_two_axis_controller(self) -> None:
+    def test_stage_settings_parse_enabled_axes_and_default_chained_stages(self) -> None:
         settings = stage_settings_from_config({"stage": {"serial_port": "COM9", "axes": {"y": {"enabled": False}}}})
 
         self.assertTrue(settings.x.enabled)
         self.assertFalse(settings.y.enabled)
         self.assertEqual((settings.x.device_index, settings.x.axis_number), (0, 1))
-        self.assertEqual((settings.y.device_index, settings.y.axis_number), (0, 2))
+        self.assertEqual((settings.y.device_index, settings.y.axis_number), (1, 1))
 
     def test_stage_settle_ms_alias_is_used_when_settle_s_is_blank(self) -> None:
         settings = stage_settings_from_config({"stage": {"settle_s": "", "settle_ms": 250}})
@@ -354,6 +380,71 @@ class StageAxisSettingsTests(unittest.TestCase):
                 os.chdir(old_cwd)
 
             self.assertEqual(resolved, sqlite_path.resolve())
+
+    def test_stage_resolves_legacy_y_axis_to_second_chained_device(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, True),
+            )
+        )
+        x_axis = _FakeAxis()
+        y_axis = _FakeAxis()
+        stage.devices = [_FakeDevice({1: x_axis}), _FakeDevice({1: y_axis})]
+
+        self.assertIs(stage._resolve_axis(stage.settings.x, "X"), x_axis)
+        self.assertIs(stage._resolve_axis(stage.settings.y, "Y"), y_axis)
+
+    def test_stage_resolves_default_chained_y_axis_to_single_two_axis_controller(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(1, 1, True),
+            )
+        )
+        x_axis = _FakeAxis()
+        y_axis = _FakeAxis()
+        stage.devices = [_FakeDevice({1: x_axis, 2: y_axis})]
+
+        self.assertIs(stage._resolve_axis(stage.settings.x, "X"), x_axis)
+        self.assertIs(stage._resolve_axis(stage.settings.y, "Y"), y_axis)
+
+    def test_stage_axis_count_mismatch_reports_mapping_guidance(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 3, True),
+            )
+        )
+        stage.devices = [_FakeDevice({1: _FakeAxis(), 2: _FakeAxis()})]
+
+        with self.assertRaises(StageConnectionError) as context:
+            stage._resolve_axis(stage.settings.y, "Y")
+
+        self.assertIn("device 1 axis 1", context.exception.user_message)
+
+    def test_stage_home_axis_mismatch_becomes_user_mapping_error(self) -> None:
+        from zaber_motion.exceptions import InvalidDataException
+
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        stage.x_axis = _FakeAxis(
+            homed=False,
+            home_exception=InvalidDataException("Response device or axis does not match: 1 != 1 || 0 != 2"),
+        )  # type: ignore[assignment]
+
+        with self.assertRaises(StageConnectionError) as context:
+            stage.home()
+
+        self.assertIn("device 1 axis 1", context.exception.user_message)
 
     def test_stage_move_stops_started_axis_when_second_axis_command_fails(self) -> None:
         stage = ZaberXYStage(StageSettings(serial_port="COM_TEST"))
@@ -518,22 +609,38 @@ class GuiSmokeTests(unittest.TestCase):
         window.live_worker = None
         window.close()
 
-    def test_live_preview_resize_handle_changes_preview_height(self) -> None:
+    def test_live_preview_defaults_to_four_by_three_frame(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
         app = QApplication.instance() or QApplication([])
         window = MainWindow(start_device_scan=False)
-        base_height = window.preview_label.minimumHeight()
-        window.resize_preview_by_drag(120)
         app.processEvents()
 
-        self.assertGreater(window.preview_label.minimumHeight(), base_height)
+        self.assertEqual(window.preview_label.width() * 3, window.preview_label.height() * 4)
+        self.assertIn("4:3", window.live_size_hint_label.text())
+        window.close()
+
+    def test_live_preview_resize_handle_changes_preview_size(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        base_size = window.preview_label.size()
+        window.resize_preview_by_drag(80, 60)
+        app.processEvents()
+
+        self.assertGreater(window.preview_label.width(), base_size.width())
+        self.assertGreater(window.preview_label.height(), base_size.height())
+        self.assertIsNotNone(window.preview_user_size)
         self.assertIsNotNone(window.preview_user_min_height)
+        self.assertIn("custom", window.live_size_hint_label.text())
 
         window.live_size_reset_button.click()
         app.processEvents()
+        self.assertIsNone(window.preview_user_size)
         self.assertIsNone(window.preview_user_min_height)
         self.assertEqual(window.preview_label.minimumHeight(), window.preview_base_min_height)
+        self.assertEqual(window.preview_label.width() * 3, window.preview_label.height() * 4)
         window.close()
 
     def test_responsive_layout_allows_narrow_and_short_windows(self) -> None:

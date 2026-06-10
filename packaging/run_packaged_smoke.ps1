@@ -6,11 +6,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Remove-Item -LiteralPath $TracePath -ErrorAction SilentlyContinue
-$env:QT_QPA_PLATFORM = "offscreen"
-$env:LINEAR_STAGE_SMOKE_TRACE = $TracePath
+$ResolvedAppExe = (Resolve-Path -LiteralPath $AppExe).Path
+if ([System.IO.Path]::IsPathRooted($TracePath)) {
+  $ResolvedTracePath = $TracePath
+} else {
+  $ResolvedTracePath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $TracePath))
+}
+$TraceDir = Split-Path -Parent $ResolvedTracePath
+if (-not (Test-Path -LiteralPath $TraceDir)) {
+  New-Item -ItemType Directory -Path $TraceDir | Out-Null
+}
 
-$smoke = Start-Process -FilePath $AppExe -ArgumentList "--smoke-test" -PassThru -WindowStyle Normal
+Remove-Item -LiteralPath $ResolvedTracePath -ErrorAction SilentlyContinue
+$env:QT_QPA_PLATFORM = "offscreen"
+$env:LINEAR_STAGE_SMOKE_TRACE = $ResolvedTracePath
+
+$smoke = Start-Process `
+  -FilePath $ResolvedAppExe `
+  -ArgumentList "--smoke-test" `
+  -PassThru `
+  -WindowStyle Hidden `
+  -WorkingDirectory (Split-Path -Parent $ResolvedAppExe)
 if (-not $smoke.WaitForExit($TimeoutMs)) {
   Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 5

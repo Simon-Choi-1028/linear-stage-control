@@ -132,6 +132,13 @@ from .updater import UpdateInfo, update_settings_from_config
 
 APP_TITLE = "XY 스테이지 캡처"
 POSITION_PLACEHOLDER_ROLE = Qt.UserRole + 50
+PREVIEW_ASPECT_WIDTH = 4
+PREVIEW_ASPECT_HEIGHT = 3
+PREVIEW_DEFAULT_WIDTH = 640
+PREVIEW_MIN_WIDTH = 240
+PREVIEW_MAX_WIDTH = 1600
+PREVIEW_MIN_HEIGHT = 180
+PREVIEW_MAX_HEIGHT = 1200
 CAMERA_PARAMETER_FIELDS = (
     ("gain", "Gain", "예: 0"),
     ("acquisition_frame_rate", "FrameRate", "Hz"),
@@ -289,7 +296,9 @@ class MainWindow(QMainWindow):
         self.run_completed_captures = 0
         self.run_total_captures = 0
         self.run_estimated_total_s = 0.0
-        self.preview_base_min_height = 180
+        self.preview_base_size = QSize(PREVIEW_DEFAULT_WIDTH, self._aspect_height(PREVIEW_DEFAULT_WIDTH))
+        self.preview_base_min_height = self.preview_base_size.height()
+        self.preview_user_size: QSize | None = None
         self.preview_user_min_height: int | None = None
         self.preview_source_qimage: QImage | None = None
         self.preview_crop_rect: tuple[int, int, int, int] | None = None
@@ -311,6 +320,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_style()
         self._load_initial_config()
+        self._apply_preview_size()
         self.apply_state(AppRunState.IDLE)
         self.logger.info(
             "gui started",
@@ -517,42 +527,163 @@ class MainWindow(QMainWindow):
     def _worker_running(worker: object) -> bool:
         return bool(worker is not None and hasattr(worker, "isRunning") and worker.isRunning())
 
+    @staticmethod
+    def _aspect_height(width: int) -> int:
+        return int(round(width * PREVIEW_ASPECT_HEIGHT / PREVIEW_ASPECT_WIDTH))
+
+    @staticmethod
+    def _aspect_width(height: int) -> int:
+        return int(round(height * PREVIEW_ASPECT_WIDTH / PREVIEW_ASPECT_HEIGHT))
+
+    def _fit_preview_aspect(self, max_width: int, max_height: int) -> QSize:
+        width_limit = min(max_width, self._aspect_width(max_height))
+        width = max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, width_limit))
+        width -= width % PREVIEW_ASPECT_WIDTH
+        if width < PREVIEW_MIN_WIDTH:
+            width = PREVIEW_MIN_WIDTH
+        height = self._aspect_height(width)
+        if height > max_height:
+            height = max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, max_height))
+            height -= height % PREVIEW_ASPECT_HEIGHT
+            if height < PREVIEW_MIN_HEIGHT:
+                height = PREVIEW_MIN_HEIGHT
+            width = self._aspect_width(height)
+        return QSize(width, height)
+
+    def _preview_available_width(self) -> int:
+        if hasattr(self, "preview_panel") and self.preview_panel.isVisible() and self.preview_panel.width() > 0:
+            width = self.preview_panel.width() - 32
+        else:
+            width = int(max(PREVIEW_DEFAULT_WIDTH, self.width() * 0.52))
+        return max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, width))
+
+    def _preview_reserved_height(self) -> int:
+        reserved = 25 + 36  # panel margins plus vertical spacing between preview controls
+        for attr_name, fallback in (
+            ("preview_command_bar", 84),
+            ("preview_tool_bar", 54),
+            ("preview_metrics_table", 82),
+            ("preview_tabs", 180),
+        ):
+            widget = getattr(self, attr_name, None)
+            if widget is None:
+                reserved += fallback
+                continue
+            height = max(fallback, widget.minimumHeight())
+            if attr_name != "preview_tabs":
+                height = max(height, widget.sizeHint().height())
+            if widget.maximumHeight() < 100_000:
+                height = min(height, widget.maximumHeight())
+            reserved += height
+        return reserved + 18
+
+    def _preview_available_height(self) -> int:
+        if hasattr(self, "preview_panel") and self.preview_panel.isVisible() and self.preview_panel.height() > 0:
+            height = self.preview_panel.height() - self._preview_reserved_height()
+        else:
+            height = self.height() - self._preview_reserved_height()
+        return max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, height))
+
+    def _clamp_preview_size(self, size: QSize, *, preserve_aspect: bool = False) -> QSize:
+        max_width = self._preview_available_width()
+        max_height = self._preview_available_height()
+        width = max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, max_width, int(size.width())))
+        height = max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, max_height, int(size.height())))
+        if preserve_aspect:
+            return self._fit_preview_aspect(width, height)
+        return QSize(width, height)
+
+    def _preview_default_size(self) -> QSize:
+        width = int(
+            min(
+            PREVIEW_DEFAULT_WIDTH,
+            self._preview_available_width(),
+            self._aspect_width(self._preview_available_height()),
+            )
+        )
+        return self._fit_preview_aspect(width, self._aspect_height(width))
+
     def _set_preview_base_height(self, height: int) -> None:
-        self.preview_base_min_height = int(height)
-        self._apply_preview_height()
+        self.preview_base_min_height = max(PREVIEW_MIN_HEIGHT, int(height))
+        self.preview_base_size = self._preview_default_size()
+        self._apply_preview_size()
 
     def set_live_preview_scale(self, value: int) -> None:
         scale = int(value)
-        self.preview_user_min_height = max(160, int(self.preview_base_min_height * scale / 100))
+        base = self.preview_user_size or self.preview_base_size
+        width = max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, int(base.width() * scale / 100)))
+        height = max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, self._aspect_height(width)))
+        self.preview_user_size = self._clamp_preview_size(QSize(width, height), preserve_aspect=True)
+        height = self.preview_user_size.height()
+        self.preview_user_min_height = height
         if hasattr(self, "live_size_hint_label"):
-            self.live_size_hint_label.setText(f"사용자 지정 높이 {self.preview_user_min_height}px")
-        self._apply_preview_height()
+            self.live_size_hint_label.setText(self._preview_size_text(self.preview_user_size))
+        self._apply_preview_size()
 
-    def resize_preview_by_drag(self, delta_y: int) -> None:
+    def resize_preview_by_drag(self, delta_x: int = 0, delta_y: int | None = None) -> None:
         if not hasattr(self, "preview_label"):
             return
-        current = self.preview_label.minimumHeight() or self.preview_base_min_height
-        self.preview_user_min_height = max(160, min(980, current + int(delta_y)))
+        if delta_y is None:
+            delta_y = int(delta_x)
+            delta_x = 0
+        current = self.preview_user_size or QSize(
+            self.preview_label.width() or self.preview_base_size.width(),
+            self.preview_label.height() or self.preview_base_size.height(),
+        )
+        width = current.width() + int(delta_x)
+        height = current.height() + int(delta_y)
+        if int(delta_x) == 0 and int(delta_y) != 0:
+            width = self._aspect_width(height)
+        if int(delta_y) == 0 and int(delta_x) != 0:
+            height = self._aspect_height(width)
+        preserve_aspect = int(delta_x) == 0 or int(delta_y) == 0
+        self.preview_user_size = self._clamp_preview_size(QSize(width, height), preserve_aspect=preserve_aspect)
+        width = self.preview_user_size.width()
+        height = self.preview_user_size.height()
+        self.preview_user_min_height = height
         if hasattr(self, "live_size_hint_label"):
-            self.live_size_hint_label.setText(f"사용자 지정 높이 {self.preview_user_min_height}px")
-        self._apply_preview_height()
+            self.live_size_hint_label.setText(self._preview_size_text(self.preview_user_size))
+        self.logger.info(
+            "preview resized",
+            extra={"event": "preview_resized", "width": width, "height": height, "mode": self.preview_mode},
+        )
+        self._apply_preview_size()
 
     def reset_preview_height(self) -> None:
+        self.preview_user_size = None
         self.preview_user_min_height = None
         if hasattr(self, "live_size_hint_label"):
-            self.live_size_hint_label.setText("우하단 핸들을 끌어 크기 조정")
-        self._apply_preview_height()
+            self.live_size_hint_label.setText(self._preview_size_text(self.preview_base_size))
+        self._apply_preview_size()
 
     def _apply_preview_height(self) -> None:
+        self._apply_preview_size()
+
+    def _apply_preview_size(self) -> None:
         if not hasattr(self, "preview_label"):
             return
-        height = max(160, int(self.preview_user_min_height or self.preview_base_min_height))
-        self.preview_label.setMinimumHeight(height)
-        self.preview_label.setMaximumHeight(16777215)
+        if self.preview_user_size is None:
+            self.preview_base_size = self._preview_default_size()
+        size = self._clamp_preview_size(
+            self.preview_user_size or self.preview_base_size,
+            preserve_aspect=self.preview_user_size is None,
+        )
+        if self.preview_user_size is not None:
+            self.preview_user_size = size
+        else:
+            self.preview_base_size = size
+        self.preview_base_min_height = self.preview_base_size.height()
+        self.preview_user_min_height = self.preview_user_size.height() if self.preview_user_size is not None else None
+        self.preview_label.setFixedSize(size)
         if hasattr(self, "preview_frame"):
-            self.preview_frame.setMinimumHeight(height)
-            self.preview_frame.setMaximumHeight(16777215)
+            self.preview_frame.setFixedSize(size)
+        if hasattr(self, "live_size_hint_label") and self.preview_user_size is None:
+            self.live_size_hint_label.setText(self._preview_size_text(size))
         self.render_preview_source()
+
+    def _preview_size_text(self, size: QSize) -> str:
+        ratio = f"{PREVIEW_ASPECT_WIDTH}:{PREVIEW_ASPECT_HEIGHT}" if self.preview_user_size is None else "custom"
+        return f"{size.width()}x{size.height()} {ratio}"
 
     def set_preview_zoom(self, value: int) -> None:
         zoom = int(value)
@@ -1184,9 +1315,15 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_preview_panel(self) -> QWidget:
-        panel = QWidget()
+        panel = QScrollArea()
         panel.setObjectName("previewPanel")
-        layout = QVBoxLayout(panel)
+        panel.setWidgetResizable(True)
+        panel.setFrameShape(QScrollArea.NoFrame)
+        panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        panel.setMinimumWidth(0)
+        content = QWidget()
+        content.setObjectName("previewPanelContent")
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 14, 14)
         layout.setSpacing(9)
 
@@ -1422,11 +1559,12 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_diagnostics_tab(), "진단")
         tabs.addTab(log_tab, "로그")
 
-        layout.addWidget(self.preview_frame, 3)
+        layout.addWidget(self.preview_frame, 3, Qt.AlignHCenter | Qt.AlignTop)
         layout.addWidget(preview_info_widget)
         layout.addWidget(preview_tools_widget)
         layout.addWidget(self.preview_metrics_table)
         layout.addWidget(tabs, 2)
+        panel.setWidget(content)
         return panel
 
     def _build_diagnostics_tab(self) -> QWidget:
@@ -1768,6 +1906,17 @@ class MainWindow(QMainWindow):
             self.live_status_label.setText("Live 설정 오류")
             self.preview_label.setText(f"Live 설정 오류\n{exc}")
             return
+        self.logger.info(
+            "live preview starting",
+            extra={
+                "event": "live_preview_starting",
+                "camera_serial": live_config.get("camera", {}).get("serial_number"),
+                "pixel_format": live_config.get("camera", {}).get("pixel_format"),
+                "preview_width": self.preview_label.width(),
+                "preview_height": self.preview_label.height(),
+                "fps": self.live_preview_fps(),
+            },
+        )
         self.live_worker = LivePreviewWorker(live_config, fps=self.live_preview_fps())
         self.live_worker.frame_ready.connect(self.on_live_frame)
         self.live_worker.status_changed.connect(self.live_status_label.setText)
@@ -1801,7 +1950,23 @@ class MainWindow(QMainWindow):
         self.live_first_frame_pending = False
         if reset_center:
             self.reset_live_preview_view()
-        self.set_preview_source(qimage_from_array(array), reset_center=reset_center)
+        qimage = qimage_from_array(array)
+        self.set_preview_source(qimage, reset_center=reset_center)
+        if reset_center:
+            shape = getattr(array, "shape", None)
+            self.logger.info(
+                "live first frame",
+                extra={
+                    "event": "live_first_frame",
+                    "frame_shape": str(shape),
+                    "source_width": qimage.width(),
+                    "source_height": qimage.height(),
+                    "preview_width": self.preview_label.width(),
+                    "preview_height": self.preview_label.height(),
+                    "target_width": self.preview_target_size().width(),
+                    "target_height": self.preview_target_size().height(),
+                },
+            )
         fps_value = metadata.get("live_fps")
         try:
             fps_text = f"{float(fps_value):.1f} FPS" if fps_value else "수신 중"
@@ -2448,8 +2613,8 @@ class MainWindow(QMainWindow):
         y_axis = axes.setdefault("y", {})
         x_axis.setdefault("device_index", 0)
         x_axis.setdefault("axis_number", 1)
-        y_axis.setdefault("device_index", 0)
-        y_axis.setdefault("axis_number", 2)
+        y_axis.setdefault("device_index", 1)
+        y_axis.setdefault("axis_number", 1)
         x_axis["enabled"] = self.x_axis_enabled_check.isChecked()
         y_axis["enabled"] = self.y_axis_enabled_check.isChecked()
 

@@ -53,16 +53,17 @@ stage:
   device_db_path:
   axes:
     # device_index is zero-based in the order returned by Zaber detection.
-    # For one 2-axis controller, set both device_index values to 0 and use
-    # axis_number 1 for X, axis_number 2 for Y.
+    # For the chained X/Y stage, use the first device axis 1 for X and
+    # the second device axis 1 for Y. For one 2-axis controller, use
+    # Y device_index 0 and axis_number 2.
     x:
       enabled: true
       device_index: 0
       axis_number: 1
     y:
       enabled: true
-      device_index: 0
-      axis_number: 2
+      device_index: 1
+      axis_number: 1
 
 updates:
   enabled: true

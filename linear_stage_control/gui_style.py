@@ -30,8 +30,11 @@ QLabel#topSubtitle {
     font-size: 8pt;
     font-weight: 600;
 }
-QWidget#controlPanel, QWidget#previewPanel {
+QWidget#controlPanel, QWidget#previewPanelContent, QScrollArea#previewPanel {
     background: #f6f8fb;
+}
+QScrollArea#previewPanel {
+    border: none;
 }
 QGroupBox {
     background: #ffffff;

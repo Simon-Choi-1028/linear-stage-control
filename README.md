@@ -40,8 +40,8 @@
 | 오프라인 설치본 | [LinearStageControlSetup-Offline.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup-Offline.exe) | 현장 PC가 인터넷 접근이 어렵거나 pylon Runtime을 미리 묶어야 할 때 | 온라인 설치본 + Basler pylon Runtime installer |
 | 검증 manifest | [update_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/update_manifest.json) | 자동 업데이트 SHA256 검증 | 설치 파일 hash, 크기, 채널 정보 |
 
-- Current public release: `v0.1.5`
-- Current local verification candidate: `v0.1.5`
+- Current public release: `v0.1.6`
+- Current local verification candidate: `v0.1.6`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -133,9 +133,11 @@ GUI의 실행 상태는 `AppRunState` enum으로 관리합니다. 촬영, 취소
   run_<run_id>.log
 ```
 
-v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 크기는 우하단 resize handle을 대각선으로 끌어 조정하고, 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 화면은 기본 4:3 frame으로 표시되며, 우하단 resize handle을 대각선으로 끌어 가로/세로 크기를 조정하고 더블클릭으로 기본 4:3 크기로 되돌릴 수 있습니다. 짧은 창에서는 preview panel 내부 스크롤을 사용해 Live 컨트롤과 검사 도구가 카메라 화면 위로 겹치지 않도록 합니다. Live 시작과 첫 프레임의 원본 크기, preview 크기, 렌더 target 크기는 JSONL 로그에 남습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
 
 Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
+
+체인 연결된 단축 X/Y 스테이지는 `X=device_index 0, axis_number 1`, `Y=device_index 1, axis_number 1`로 설정합니다. 하나의 2축 컨트롤러를 쓰는 구성만 `Y=device_index 0, axis_number 2`를 사용합니다.
 
 ## Calibration Error
 
@@ -272,7 +274,7 @@ stage:
   device_db_path:
   axes:
     x: {enabled: true, device_index: 0, axis_number: 1}
-    y: {enabled: true, device_index: 0, axis_number: 2}
+    y: {enabled: true, device_index: 1, axis_number: 1}
 
 updates:
   enabled: true

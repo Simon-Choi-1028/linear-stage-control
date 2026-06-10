@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.1.6 - 2026-06-10
+
+- Changed the Basler preview area to a 4:3 default frame with a bottom-right corner drag handle for width/height resizing and added preview/live frame diagnostics to the JSONL logs.
+- Added preview panel size clamping and panel scrolling so short or narrow windows do not let the camera frame overlap the Live controls, inspection tools, metrics table, or tabs.
+- Fixed Zaber chained single-axis XY stage mapping by defaulting Y to device 1 axis 1, auto-remapping the legacy Y device 0 axis 2 setting when two one-axis devices are detected, and surfacing axis mismatch errors with mapping guidance.
+- Added `scripts/release_verification.py`, a hardware-free release harness that runs 10+ independent Zaber chain-link simulations through the production stage API and 10+ offscreen GUI interaction/screenshot checks with overlap detection.
 - Refined the white-mode UI with a compact app header, shorter toolbar actions, grouped preview command/tool bars, and larger parameter step buttons.
 - Reduced preview panel minimum width so narrow windows can switch to the vertical responsive layout without being held open by toolbar controls.
 - Added ruff and pyright development checks with a basic typed-core scope.

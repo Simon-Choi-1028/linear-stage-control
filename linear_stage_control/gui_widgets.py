@@ -38,42 +38,47 @@ class ImagePreviewLabel(QLabel):
 
 
 class PreviewResizeHandle(QWidget):
-    dragged = Signal(int)
+    dragged = Signal(int, int)
     reset_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
-        self._last_y: float | None = None
-        self.setFixedSize(22, 22)
+        self._last_position: QPointF | None = None
+        self.setFixedSize(28, 28)
         self.setCursor(Qt.SizeFDiagCursor)
         self.setToolTip(
             "미리보기 영역 우하단을 끌어 Live/이미지 화면 높이를 조정합니다. 더블클릭하면 기본 크기로 돌아갑니다."
         )
+        self.setToolTip(
+            "미리보기 화면 우하단 모서리를 대각선으로 끌어 Live/이미지 화면 크기를 조정합니다. "
+            "더블클릭하면 4:3 기본 크기로 돌아갑니다."
+        )
         self.setObjectName("previewResizeHandle")
 
     def mousePressEvent(self, event: object) -> None:
-        self._last_y = _event_y(event)
+        self._last_position = _event_position(event)
         if hasattr(event, "accept"):
             event.accept()
 
     def mouseMoveEvent(self, event: object) -> None:
-        y = _event_y(event)
-        if y is None or self._last_y is None:
+        position = _event_position(event)
+        if position is None or self._last_position is None:
             return
-        delta = int(round(y - self._last_y))
-        if delta:
-            self.dragged.emit(delta)
-            self._last_y = y
+        delta_x = int(round(position.x() - self._last_position.x()))
+        delta_y = int(round(position.y() - self._last_position.y()))
+        if delta_x or delta_y:
+            self.dragged.emit(delta_x, delta_y)
+            self._last_position = position
         if hasattr(event, "accept"):
             event.accept()
 
     def mouseReleaseEvent(self, event: object) -> None:
-        self._last_y = None
+        self._last_position = None
         if hasattr(event, "accept"):
             event.accept()
 
     def mouseDoubleClickEvent(self, event: object) -> None:
-        self._last_y = None
+        self._last_position = None
         self.reset_requested.emit()
         if hasattr(event, "accept"):
             event.accept()
@@ -87,17 +92,17 @@ class PreviewResizeHandle(QWidget):
         painter.end()
 
 
-def _event_y(event: object) -> float | None:
+def _event_position(event: object) -> QPointF | None:
     position_getter = getattr(event, "position", None)
     if callable(position_getter):
         position = position_getter()
         if position is not None:
-            return float(position.y())
+            return QPointF(float(position.x()), float(position.y()))
     pos_getter = getattr(event, "pos", None)
     if callable(pos_getter):
         position = pos_getter()
         if position is not None:
-            return float(position.y())
+            return QPointF(float(position.x()), float(position.y()))
     return None
 
 

@@ -351,6 +351,11 @@ class FullscreenImageWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def closeEvent(self, event: object) -> None:
+        self.image_label.clear()
+        self.original_pixmap = QPixmap()
+        super().closeEvent(event)
+
     def set_fit_mode(self) -> None:
         self.fit_to_window = True
         self.update_image()
@@ -475,9 +480,10 @@ class ErrorChartWidget(QWidget):
 
 
 def _pixmap_from_image_path(path: Path) -> QPixmap:
-    image = Image.open(path).convert("RGB")
-    data = image.tobytes("raw", "RGB")
-    qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
+    with Image.open(path) as source_image:
+        image = source_image.convert("RGB")
+        data = image.tobytes("raw", "RGB")
+        qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(qimage)
 
 

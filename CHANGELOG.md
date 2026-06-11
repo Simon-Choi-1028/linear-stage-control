@@ -4,6 +4,8 @@
 
 ## v0.1.6 - 2026-06-10
 
+- Hotfix: stabilized live preview memory use by coalescing queued frames to the latest frame only, reducing large NumPy array buildup when the GUI thread is busy.
+- Hotfix: reduced image preview memory retention by explicitly clearing preview/fullscreen pixmaps on close and cleaning up finished Qt worker objects with `deleteLater()`.
 - Hotfix: added a default-on 180-degree Basler camera orientation correction that applies consistently to live preview, saved PNG images, and saved NPY arrays.
 - Hotfix: changed the manual stage Home button to run homing and then move to X=105 mm, Y=105 mm at a fixed 50 mm/s center-return speed.
 - Hotfix: stabilized acquisition worker cleanup so the GUI does not drop the QThread reference between run completion and the Qt `finished` signal, preventing intermittent app exits after saving.

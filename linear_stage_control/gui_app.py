@@ -375,7 +375,17 @@ class MainWindow(QMainWindow):
         for worker in (self.update_check_worker, self.update_download_worker):
             if worker is not None and worker.isRunning():
                 worker.wait(1000)
+        if self.image_viewer is not None:
+            self.image_viewer.close()
+            self.image_viewer.deleteLater()
+            self.image_viewer = None
+        self.clear_preview_source()
         super().closeEvent(event)
+
+    def _delete_worker_later(self, worker: object | None) -> None:
+        delete_later = getattr(worker, "deleteLater", None)
+        if callable(delete_later):
+            delete_later()
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)
@@ -774,6 +784,12 @@ class MainWindow(QMainWindow):
             self.preview_center_x = 0.5
             self.preview_center_y = 0.5
         self.render_preview_source()
+
+    def clear_preview_source(self) -> None:
+        self.preview_source_qimage = None
+        self.preview_crop_rect = None
+        if hasattr(self, "preview_label"):
+            self.preview_label.clear()
 
     def render_preview_source(self) -> None:
         if not hasattr(self, "preview_label") or self.preview_source_qimage is None:
@@ -1837,7 +1853,9 @@ class MainWindow(QMainWindow):
             self.log(f"카메라 검색 실패: {message}")
 
     def on_camera_scan_finished(self) -> None:
+        worker = self.camera_scan_worker
         self.camera_scan_worker = None
+        self._delete_worker_later(worker)
         self.apply_ambient_state()
 
     def _set_camera_scan_state(self, state: str, label: str, detail: str) -> None:
@@ -1963,7 +1981,7 @@ class MainWindow(QMainWindow):
             },
         )
         self.live_worker = LivePreviewWorker(live_config, fps=self.live_preview_fps())
-        self.live_worker.frame_ready.connect(self.on_live_frame)
+        self.live_worker.frame_available.connect(self.on_live_frame_available)
         self.live_worker.status_changed.connect(self.live_status_label.setText)
         self.live_worker.live_failed.connect(self.on_live_failed)
         self.live_worker.finished.connect(self.on_live_finished)
@@ -1987,6 +2005,16 @@ class MainWindow(QMainWindow):
             self.live_status_label.setText("Live 정지")
         if self.app_state == AppRunState.LIVE_PREVIEW:
             self.apply_ambient_state()
+
+    def on_live_frame_available(self) -> None:
+        worker = self.live_worker
+        if worker is None:
+            return
+        frame = worker.take_latest_frame()
+        if frame is None:
+            return
+        array, metadata = frame
+        self.on_live_frame(array, metadata)
 
     def on_live_frame(self, array: object, metadata: dict[str, Any]) -> None:
         if self.preview_mode != "live":
@@ -2030,7 +2058,9 @@ class MainWindow(QMainWindow):
         self.apply_state(AppRunState.ERROR)
 
     def on_live_finished(self) -> None:
+        worker = self.live_worker or self.sender()
         self.live_worker = None
+        self._delete_worker_later(worker)
         if self.app_state == AppRunState.LIVE_PREVIEW:
             self.apply_ambient_state()
 
@@ -2089,7 +2119,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "업데이트 확인 실패", message)
 
     def on_update_check_finished(self) -> None:
+        worker = self.update_check_worker
         self.update_check_worker = None
+        self._delete_worker_later(worker)
         self.apply_ambient_state()
 
     def start_update_download(self, update: UpdateInfo) -> None:
@@ -2124,7 +2156,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "업데이트 실패", message)
 
     def on_update_download_finished(self) -> None:
+        worker = self.update_download_worker
         self.update_download_worker = None
+        self._delete_worker_later(worker)
         self.apply_ambient_state()
 
     def run_diagnostics(self) -> None:
@@ -2175,7 +2209,9 @@ class MainWindow(QMainWindow):
         self.log(f"진단 실패: {message}")
 
     def on_diagnostics_finished(self) -> None:
+        worker = self.diagnostics_worker
         self.diagnostics_worker = None
+        self._delete_worker_later(worker)
         self.apply_ambient_state()
 
     def browse_output_root(self) -> None:
@@ -2596,7 +2632,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "수동 스테이지 오류", message)
 
     def on_manual_stage_finished(self) -> None:
+        worker = self.manual_stage_worker
         self.manual_stage_worker = None
+        self._delete_worker_later(worker)
         self.apply_ambient_state()
 
     def _set_manual_stage_enabled(self, enabled: bool) -> None:
@@ -3171,10 +3209,10 @@ class MainWindow(QMainWindow):
         try:
             self.preview_mode = "capture"
             self.current_image_path = path
-            image = Image.open(path)
-            image = image.convert("RGB")
-            data = image.tobytes("raw", "RGB")
-            qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
+            with Image.open(path) as source_image:
+                image = source_image.convert("RGB")
+                data = image.tobytes("raw", "RGB")
+                qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
             self.set_preview_source(qimage, reset_center=True)
             self.fullscreen_button.setEnabled(True)
         except Exception as exc:

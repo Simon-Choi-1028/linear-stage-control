@@ -208,7 +208,7 @@ class BaslerCamera:
                     f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                 )
             image = self.converter.Convert(grab_result)
-            return apply_camera_orientation(image.GetArray().copy(), rotate_180=self.settings.rotate_180)
+            return apply_camera_orientation(image.GetArray(), rotate_180=self.settings.rotate_180)
         finally:
             grab_result.Release()
 
@@ -226,7 +226,6 @@ class BaslerCamera:
     ) -> CaptureResult:
         """Capture one frame and save the unconverted camera array losslessly."""
         array, metadata = self.grab_original_array(timeout_ms=timeout_ms)
-        array = apply_camera_orientation(array, rotate_180=self.settings.rotate_180)
         image_path = Path(output_path)
         save_original_array(image_path, array)
 
@@ -274,7 +273,7 @@ class BaslerCamera:
                         "Basler 카메라 캡처에 실패했습니다.",
                         f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                     )
-                array = grab_result.GetArray().copy()
+                array = apply_camera_orientation(grab_result.GetArray(), rotate_180=self.settings.rotate_180)
                 metadata = _grab_metadata(grab_result, captured_at, completed_at)
                 return array, metadata
             finally:
@@ -327,7 +326,7 @@ class BaslerCamera:
                         continue
                     consecutive_failures = 0
                     yield (
-                        apply_camera_orientation(grab_result.GetArray().copy(), rotate_180=self.settings.rotate_180),
+                        apply_camera_orientation(grab_result.GetArray(), rotate_180=self.settings.rotate_180),
                         _grab_metadata(
                             grab_result,
                             captured_at,
@@ -673,11 +672,10 @@ def _normalise_pixel_format_name(value: Any) -> str:
 
 
 def apply_camera_orientation(array: np.ndarray, *, rotate_180: bool) -> np.ndarray:
-    if not rotate_180:
-        return np.ascontiguousarray(array)
-    if array.ndim < 2:
-        return np.ascontiguousarray(array)
-    return np.ascontiguousarray(np.flip(array, axis=(0, 1)))
+    arr = np.asarray(array)
+    if not rotate_180 or arr.ndim < 2:
+        return np.ascontiguousarray(arr)
+    return np.ascontiguousarray(np.flip(arr, axis=(0, 1)))
 
 
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:

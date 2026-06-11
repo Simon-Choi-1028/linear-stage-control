@@ -712,6 +712,29 @@ class GuiSmokeTests(unittest.TestCase):
             gui_app.QMessageBox.critical = original_critical
             window.close()
 
+    def test_live_worker_coalesces_pending_frames(self) -> None:
+        from linear_stage_control.gui_workers import LivePreviewWorker
+
+        worker = LivePreviewWorker({"camera": {}}, fps=10)
+        first = np.zeros((2, 2), dtype=np.uint8)
+        second = np.ones((2, 2), dtype=np.uint8)
+        third = np.full((2, 2), 2, dtype=np.uint8)
+
+        self.assertTrue(worker._store_latest_frame(first, {"frame": 1}))
+        self.assertFalse(worker._store_latest_frame(second, {"frame": 2}))
+        frame = worker.take_latest_frame()
+        self.assertIsNotNone(frame)
+        array, metadata = frame
+        np.testing.assert_array_equal(array, second)
+        self.assertEqual(metadata["frame"], 2)
+
+        self.assertTrue(worker._store_latest_frame(third, {"frame": 3}))
+        frame = worker.take_latest_frame()
+        self.assertIsNotNone(frame)
+        array, metadata = frame
+        np.testing.assert_array_equal(array, third)
+        self.assertEqual(metadata["frame"], 3)
+
     def test_responsive_layout_allows_narrow_and_short_windows(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 

@@ -254,6 +254,7 @@ class AcquisitionWorker(QThread):
 
 class LivePreviewWorker(QThread):
     frame_ready = Signal(object, dict)
+    frame_available = Signal()
     status_changed = Signal(str)
     live_failed = Signal(str)
 
@@ -264,9 +265,13 @@ class LivePreviewWorker(QThread):
         self._stop_requested = False
         self._settings_lock = Lock()
         self._pending_config: dict[str, Any] | None = None
+        self._frame_lock = Lock()
+        self._latest_frame: tuple[object, dict[str, Any]] | None = None
+        self._frame_signal_pending = False
 
     def request_stop(self) -> None:
         self._stop_requested = True
+        self.clear_latest_frame()
 
     def request_settings_update(self, config: dict[str, Any]) -> None:
         with self._settings_lock:
@@ -277,6 +282,26 @@ class LivePreviewWorker(QThread):
             pending = self._pending_config
             self._pending_config = None
         return pending
+
+    def take_latest_frame(self) -> tuple[object, dict[str, Any]] | None:
+        with self._frame_lock:
+            frame = self._latest_frame
+            self._latest_frame = None
+            self._frame_signal_pending = False
+        return frame
+
+    def clear_latest_frame(self) -> None:
+        with self._frame_lock:
+            self._latest_frame = None
+            self._frame_signal_pending = False
+
+    def _store_latest_frame(self, array: object, metadata: dict[str, Any]) -> bool:
+        with self._frame_lock:
+            self._latest_frame = (array, metadata)
+            if self._frame_signal_pending:
+                return False
+            self._frame_signal_pending = True
+            return True
 
     def run(self) -> None:
         try:
@@ -314,12 +339,15 @@ class LivePreviewWorker(QThread):
                     frame_times.append(now)
                     metadata = dict(metadata)
                     metadata["live_fps"] = _rolling_fps(frame_times)
-                    self.frame_ready.emit(array, metadata)
+                    if self._store_latest_frame(array, metadata):
+                        self.frame_available.emit()
                     self.msleep(frame_delay_ms)
         except Exception as exc:
             if not self._stop_requested:
                 get_logger("worker.live").exception("live preview failed", extra={"event": "live_failed"})
                 self.live_failed.emit(user_error_message(exc))
+        finally:
+            self.clear_latest_frame()
 
 
 def _rolling_fps(frame_times: deque[float]) -> float:

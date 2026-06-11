@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QThread
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -27,7 +27,7 @@ from linear_stage_control.dataset_exports import (
     normalise_formats,
 )
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
-from linear_stage_control.exceptions import DatasetWriteError, StageConnectionError
+from linear_stage_control.exceptions import StageConnectionError
 from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
 from linear_stage_control.scan import linear_path_points_by_spacing, points_from_config, points_from_records
 from linear_stage_control.stage import (
@@ -626,11 +626,12 @@ class GuiSmokeTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         window = MainWindow(start_device_scan=False)
         base_size = window.preview_label.size()
-        window.resize_preview_by_drag(80, 60)
+        window.resize_preview_by_drag(70, 120)
         app.processEvents()
 
         self.assertGreater(window.preview_label.width(), base_size.width())
         self.assertGreater(window.preview_label.height(), base_size.height())
+        self.assertNotEqual(window.preview_label.width() * 3, window.preview_label.height() * 4)
         self.assertIsNotNone(window.preview_user_size)
         self.assertIsNotNone(window.preview_user_min_height)
         self.assertIn("custom", window.live_size_hint_label.text())
@@ -642,6 +643,55 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(window.preview_label.minimumHeight(), window.preview_base_min_height)
         self.assertEqual(window.preview_label.width() * 3, window.preview_label.height() * 4)
         window.close()
+
+    def test_acquisition_worker_reference_survives_run_done_until_finished(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        worker = QThread()
+        window.worker = worker  # type: ignore[assignment]
+        window.on_run_done("C:/tmp/run", False)
+        app.processEvents()
+
+        self.assertIs(window.worker, worker)
+        self.assertEqual(window.pending_run_result, ("C:/tmp/run", False))
+
+        window.cleanup_finished_worker()
+        app.processEvents()
+
+        self.assertIsNone(window.worker)
+        self.assertIsNone(window.pending_run_result)
+        window.close()
+
+    def test_failed_run_restarts_live_only_after_worker_cleanup(self) -> None:
+        from linear_stage_control import gui_app
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        worker = QThread()
+        window.worker = worker  # type: ignore[assignment]
+        restart_calls: list[bool] = []
+        original_critical = gui_app.QMessageBox.critical
+        gui_app.QMessageBox.critical = lambda *args, **kwargs: None  # type: ignore[assignment]
+        window.restart_live_preview_after_run = lambda: restart_calls.append(True)  # type: ignore[method-assign]
+        try:
+            window.on_run_failed("boom")
+            window.on_run_done("", True)
+            app.processEvents()
+
+            self.assertIs(window.worker, worker)
+            self.assertEqual(restart_calls, [])
+
+            window.cleanup_finished_worker()
+            app.processEvents()
+
+            self.assertIsNone(window.worker)
+            self.assertEqual(len(restart_calls), 1)
+        finally:
+            gui_app.QMessageBox.critical = original_critical
+            window.close()
 
     def test_responsive_layout_allows_narrow_and_short_windows(self) -> None:
         from linear_stage_control.gui_app import MainWindow
@@ -740,7 +790,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(any("X" in detail for detail in conflict_details))
         window.close()
 
-    def test_preflight_reports_image_filename_conflicts_and_estimated_time(self) -> None:
+    def test_preflight_allows_decimal_filename_suffixes_and_reports_estimated_time(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
         QApplication.instance() or QApplication([])
@@ -764,12 +814,11 @@ class GuiSmokeTests(unittest.TestCase):
 
         issues = window.collect_preflight_issues(points, config, validate_scan_points(points))
 
-        filename_errors = [
-            issue.detail for issue in issues if issue.item == "이미지 파일명" and issue.status == "오류"
-        ]
+        filename_errors = [issue.detail for issue in issues if issue.item == "이미지 파일명" and issue.status == "오류"]
+        filename_passes = [issue.detail for issue in issues if issue.item == "이미지 파일명" and issue.status == "통과"]
         duration_details = [issue.detail for issue in issues if issue.item == "예상 소요시간"]
-        self.assertTrue(filename_errors)
-        self.assertTrue(any("같은 이미지 파일명" in detail for detail in filename_errors))
+        self.assertFalse(filename_errors)
+        self.assertTrue(filename_passes)
         self.assertTrue(duration_details)
         self.assertTrue(any("안정화" in detail for detail in duration_details))
         window.close()
@@ -868,40 +917,51 @@ class GuiSmokeTests(unittest.TestCase):
 
 
 class DatasetNamingTests(unittest.TestCase):
-    def test_point_name_uses_zero_padded_integer_xy(self) -> None:
-        first = points_from_records([{"label": "sample a", "x_mm": "0", "y_mm": "0"}])[0]
-        second = points_from_records([{"label": "sample b", "x_mm": "1", "y_mm": "210"}])[0]
+    def test_point_name_uses_truncated_decimal_xy(self) -> None:
+        first = points_from_records([{"label": "sample a", "x_mm": "33.3339", "y_mm": "0.0009"}])[0]
+        second = points_from_records([{"label": "sample b", "x_mm": "0.5", "y_mm": "210"}])[0]
 
-        self.assertEqual(point_name(first, "20260528T153012_123456+0900", 7), "X000_Y000")
-        self.assertEqual(point_name(second), "X001_Y210")
+        self.assertEqual(point_name(first, "20260528T153012_123456+0900", 1), "X033.333_Y000.000")
+        self.assertEqual(point_name(first, "20260528T153012_123456+0900", 2), "X033.333_Y000.000_C02")
+        self.assertEqual(point_name(second), "X000.500_Y210.000")
 
-    def test_dataset_image_path_uses_png_integer_xy_name(self) -> None:
+    def test_dataset_image_path_uses_decimal_xy_and_collision_suffixes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            point = points_from_records([{"label": "sample a", "x_mm": "1", "y_mm": "210"}])[0]
+            points = points_from_records(
+                [
+                    {"label": "sample a", "x_mm": "33.3339", "y_mm": "0", "capture_count": "2"},
+                    {"label": "sample b", "x_mm": "33.3339", "y_mm": "0"},
+                ]
+            )
+            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+
+            with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
+                first = dataset.image_path(points[0], "20260528T153012_123456+0900", 1)
+                second_capture = dataset.image_path(points[0], "20260528T153012_123456+0900", 2)
+                duplicate_point = dataset.image_path(points[1], "20260528T153012_123456+0900", 1)
+
+            self.assertEqual(first.name, "X033.333_Y000.000.png")
+            self.assertEqual(second_capture.name, "X033.333_Y000.000_C02.png")
+            self.assertEqual(duplicate_point.name, "X033.333_Y000.000_P0002.png")
+
+    def test_image_output_plan_allows_fractional_duplicate_and_multi_capture_names(self) -> None:
+        points = points_from_records(
+            [
+                {"x_mm": "0.5", "y_mm": "0", "capture_count": "2"},
+                {"x_mm": "0.5", "y_mm": "0"},
+            ]
+        )
+        self.assertEqual(validate_image_output_plan(points), [])
+
+    def test_dataset_open_accepts_fractional_image_output_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            point = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])[0]
             settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
 
             with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml") as dataset:
                 image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
 
-            self.assertEqual(image_path.name, "X001_Y210.png")
-
-    def test_image_output_plan_rejects_fractional_duplicate_and_multi_capture_names(self) -> None:
-        fractional = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])
-        duplicate = points_from_records([{"x_mm": "0", "y_mm": "0"}, {"x_mm": "0", "y_mm": "0"}])
-        multi_capture = points_from_records([{"x_mm": "1", "y_mm": "1", "capture_count": "2"}])
-
-        self.assertTrue(any("정수 mm" in error for error in validate_image_output_plan(fractional)))
-        self.assertTrue(any("같은 이미지 파일명" in error for error in validate_image_output_plan(duplicate)))
-        self.assertTrue(any("위치당 1장" in error for error in validate_image_output_plan(multi_capture)))
-
-    def test_dataset_open_rejects_invalid_image_output_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            point = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])[0]
-            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
-
-            with self.assertRaises(DatasetWriteError):
-                with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml"):
-                    pass
+            self.assertEqual(image_path.name, "X000.500_Y000.000.png")
 
     def test_dataset_manifest_includes_version_record_count_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

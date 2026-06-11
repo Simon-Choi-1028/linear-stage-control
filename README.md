@@ -233,10 +233,10 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
   summary.yaml
   summary.md
   images/
-    X000_Y000.png
+    X000.000_Y000.000.png
 ```
 
-`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 이미지 파일명은 기본적으로 `X000_Y000.png` 형태로 저장됩니다. X/Y는 정수 mm만 지원하며, 같은 파일명이 생기는 중복 좌표나 위치당 2장 이상 캡쳐 설정은 시작 전 점검에서 오류로 막습니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다. `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 크기와 SHA256 hash가 저장됩니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
+`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 이미지 파일명은 기본적으로 `X000.000_Y000.000.png` 형태로 저장됩니다. X/Y는 소수점 3자리까지 반올림 없이 절삭되며, 같은 좌표에서 여러 장을 촬영하거나 중복 좌표가 있으면 `_C02`, `_P0002` 같은 suffix가 필요한 경우에만 붙습니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다. `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 크기와 SHA256 hash가 저장됩니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
 
 ## 원본 이미지
 

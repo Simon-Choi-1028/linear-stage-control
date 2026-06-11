@@ -15,10 +15,13 @@ from PIL import Image, ImageDraw
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import linear_stage_control.gui_workers as worker_module
 import linear_stage_control.stage as stage_module
+from linear_stage_control.camera import CaptureResult, iso_timestamp
 from linear_stage_control.gui_app import MainWindow
+from linear_stage_control.gui_workers import AcquisitionWorker
 from linear_stage_control.position_validation import validate_scan_points
-from linear_stage_control.scan import points_from_records
+from linear_stage_control.scan import effective_capture_count, points_from_records
 from linear_stage_control.stage import StageSettings, ZaberXYStage
 
 
@@ -87,6 +90,78 @@ class VirtualConnection:
         self.closed = True
 
 
+class FakeAcquisitionStage:
+    def __init__(self, _settings: object) -> None:
+        self.x_mm = 0.0
+        self.y_mm = 0.0
+        self.home_calls = 0
+        self.move_calls = 0
+
+    def __enter__(self) -> FakeAcquisitionStage:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return
+
+    def home(self) -> None:
+        self.home_calls += 1
+        self.x_mm = 0.0
+        self.y_mm = 0.0
+
+    def move_absolute_mm(
+        self,
+        x_mm: float | None,
+        y_mm: float | None,
+        *,
+        velocity_mm_s: float | None = None,
+        cancel_requested: object = None,
+    ) -> None:
+        _ = velocity_mm_s, cancel_requested
+        self.move_calls += 1
+        if x_mm is not None:
+            self.x_mm = float(x_mm)
+        if y_mm is not None:
+            self.y_mm = float(y_mm)
+
+    def position_mm(self) -> tuple[float, float]:
+        return self.x_mm, self.y_mm
+
+
+class FakeAcquisitionCamera:
+    warnings: list[str] = []
+
+    def __init__(self, _settings: object) -> None:
+        return
+
+    def __enter__(self) -> FakeAcquisitionCamera:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return
+
+    def capture_original_to(self, image_path: Path, npy_path: Path | None = None) -> CaptureResult:
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        array = np.arange(48 * 64, dtype=np.uint16).reshape(48, 64)
+        Image.fromarray((array / 16).astype(np.uint8), mode="L").save(image_path)
+        if npy_path is not None:
+            npy_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(npy_path, array)
+        timestamp = iso_timestamp()
+        return CaptureResult(
+            image_path=image_path,
+            npy_path=npy_path,
+            captured_at=timestamp,
+            completed_at=timestamp,
+            dtype=str(array.dtype),
+            shape=tuple(array.shape),
+            pixel_type="Mono16",
+            width=array.shape[1],
+            height=array.shape[0],
+            camera_timestamp_ns=None,
+            block_id=None,
+        )
+
+
 @contextmanager
 def patched_virtual_serial(axes: tuple[VirtualAxis, VirtualAxis]) -> Iterator[None]:
     original = stage_module.Connection.open_serial_port
@@ -100,6 +175,19 @@ def patched_virtual_serial(axes: tuple[VirtualAxis, VirtualAxis]) -> Iterator[No
         yield
     finally:
         stage_module.Connection.open_serial_port = original  # type: ignore[method-assign]
+
+
+@contextmanager
+def patched_acquisition_devices() -> Iterator[None]:
+    original_stage = worker_module.ZaberXYStage
+    original_camera = worker_module.BaslerCamera
+    worker_module.ZaberXYStage = FakeAcquisitionStage  # type: ignore[assignment]
+    worker_module.BaslerCamera = FakeAcquisitionCamera  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        worker_module.ZaberXYStage = original_stage  # type: ignore[assignment]
+        worker_module.BaslerCamera = original_camera  # type: ignore[assignment]
 
 
 def run_zaber_experiments(iterations: int) -> list[dict[str, Any]]:
@@ -229,6 +317,88 @@ def run_gui_experiments(iterations: int, output_dir: Path) -> list[dict[str, Any
     return results
 
 
+def run_acquisition_experiments(iterations: int, output_dir: Path) -> list[dict[str, Any]]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    results: list[dict[str, Any]] = []
+    acquisition_root = output_dir / "acquisition"
+    acquisition_root.mkdir(parents=True, exist_ok=True)
+    with patched_acquisition_devices():
+        for index in range(iterations):
+            window = MainWindow(start_device_scan=False)
+            points = points_from_records(
+                [
+                    {"label": "fractional", "x_mm": "33.3339", "y_mm": "0", "capture_count": "2"},
+                    {"label": "duplicate", "x_mm": "33.3339", "y_mm": "0"},
+                ]
+            )
+            config = window.build_config(points)
+            config.setdefault("dataset", {})["output_root"] = str(acquisition_root / f"iter_{index + 1:02d}")
+            config.setdefault("stage", {})["home_on_start"] = False
+            config.setdefault("stage", {})["settle_s"] = 0
+            window.pending_run_result = None
+            window.pending_run_failed = False
+            window.restart_live_after_worker = False
+            window.worker = AcquisitionWorker(
+                config=config,
+                points=points,
+                config_path=window.config_path,
+                output_root=str(config["dataset"]["output_root"]),
+                skip_home=True,
+            )
+            window.worker.log_message.connect(window.log)
+            window.worker.status_changed.connect(window.set_run_status)
+            window.worker.capture_done.connect(window.on_capture_done)
+            window.worker.progress_changed.connect(window.on_progress_changed)
+            window.worker.run_failed.connect(window.on_run_failed)
+            window.worker.run_done.connect(window.on_run_done)
+            window.worker.finished.connect(window.on_worker_finished)
+            window.worker.start()
+            deadline_ms = 8000
+            elapsed_ms = 0
+            while window.worker is not None and elapsed_ms < deadline_ms:
+                app.processEvents()
+                QTest.qWait(20)
+                elapsed_ms += 20
+            app.processEvents()
+
+            run_dir = window.current_run_dir
+            expected_names = [
+                "X033.333_Y000.000.png",
+                "X033.333_Y000.000_C02.png",
+                "X033.333_Y000.000_P0002.png",
+            ]
+            image_paths = [run_dir / "images" / name for name in expected_names] if run_dir else []
+            manifest_path = run_dir / "dataset_manifest.json" if run_dir else None
+            manifest = (
+                json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_path is not None and manifest_path.exists()
+                else {}
+            )
+            passed = (
+                window.worker is None
+                and run_dir is not None
+                and all(path.exists() and path.stat().st_size > 0 for path in image_paths)
+                and manifest.get("status") == "complete"
+                and manifest.get("record_count") == sum(effective_capture_count(point, 1) for point in points)
+                and window.isVisible() is False
+            )
+            results.append(
+                {
+                    "iteration": index + 1,
+                    "run_dir": str(run_dir) if run_dir else "",
+                    "worker_cleaned": window.worker is None,
+                    "expected_images": [str(path) for path in image_paths],
+                    "manifest_status": manifest.get("status", ""),
+                    "record_count": manifest.get("record_count", 0),
+                    "passed": passed,
+                }
+            )
+            window.close()
+            app.processEvents()
+    return results
+
+
 def make_contact_sheet(screenshots: list[Path], output_path: Path) -> None:
     thumbs: list[Image.Image] = []
     for path in screenshots:
@@ -265,6 +435,7 @@ def main() -> int:
 
     zaber_results = run_zaber_experiments(iterations)
     gui_results = run_gui_experiments(iterations, output_dir)
+    acquisition_results = run_acquisition_experiments(iterations, output_dir)
     screenshots = [Path(item["screenshot"]) for item in gui_results]
     contact_sheet = output_dir / "gui_contact_sheet.png"
     make_contact_sheet(screenshots, contact_sheet)
@@ -278,6 +449,7 @@ def main() -> int:
         ],
         "zaber": zaber_results,
         "gui": gui_results,
+        "acquisition": acquisition_results,
         "contact_sheet": str(contact_sheet),
     }
     report_path = output_dir / "release_verification_report.json"
@@ -285,10 +457,11 @@ def main() -> int:
 
     zaber_passed = all(item["passed"] for item in zaber_results)
     gui_passed = all(item["passed"] for item in gui_results)
+    acquisition_passed = all(item["passed"] for item in acquisition_results)
     print(f"report={report_path}")
     print(f"contact_sheet={contact_sheet}")
-    print(f"zaber_passed={zaber_passed} gui_passed={gui_passed}")
-    return 0 if zaber_passed and gui_passed else 1
+    print(f"zaber_passed={zaber_passed} gui_passed={gui_passed} acquisition_passed={acquisition_passed}")
+    return 0 if zaber_passed and gui_passed and acquisition_passed else 1
 
 
 if __name__ == "__main__":

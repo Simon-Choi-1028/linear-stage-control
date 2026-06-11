@@ -4,6 +4,9 @@
 
 ## v0.1.6 - 2026-06-10
 
+- Hotfix: stabilized acquisition worker cleanup so the GUI does not drop the QThread reference between run completion and the Qt `finished` signal, preventing intermittent app exits after saving.
+- Hotfix: changed capture filenames to decimal coordinate stems such as `X033.333_Y000.000.png`, truncating beyond three decimal places and adding `_Cxx` / `_Pxxxx` suffixes only when needed for collisions.
+- Hotfix: restored free preview resizing so bottom-right drag changes width and height independently while reset still returns to the 4:3 default frame.
 - Changed the Basler preview area to a 4:3 default frame with a bottom-right corner drag handle for width/height resizing and added preview/live frame diagnostics to the JSONL logs.
 - Added preview panel size clamping and panel scrolling so short or narrow windows do not let the camera frame overlap the Live controls, inspection tools, metrics table, or tabs.
 - Fixed Zaber chained single-axis XY stage mapping by defaulting Y to device 1 axis 1, auto-remapping the legacy Y device 0 axis 2 setting when two one-axis devices are detected, and surfacing axis mismatch errors with mapping guidance.

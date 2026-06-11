@@ -25,7 +25,6 @@ $smoke = Start-Process `
   -FilePath $ResolvedAppExe `
   -ArgumentList "--smoke-test" `
   -PassThru `
-  -WindowStyle Hidden `
   -WorkingDirectory (Split-Path -Parent $ResolvedAppExe)
 if (-not $smoke.WaitForExit($TimeoutMs)) {
   Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue

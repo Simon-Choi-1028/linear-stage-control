@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,8 @@ class DatasetRun:
         self.run_dir = self.settings.output_root / self.run_id
         self.images_dir = self.run_dir / "images"
         self.arrays_dir = self.run_dir / "arrays"
+        self.default_capture_count = default_capture_count_from_config(config)
+        self.image_name_stems = planned_image_name_stems(points, self.default_capture_count)
         self.csv_path = self.run_dir / "captures.csv"
         self.jsonl_path = self.run_dir / "captures.jsonl"
         self.metadata_paths = {
@@ -126,7 +129,7 @@ class DatasetRun:
         try:
             image_plan_errors = validate_image_output_plan(
                 self.points,
-                default_capture_count_from_config(self.config),
+                self.default_capture_count,
             )
             if image_plan_errors:
                 raise DatasetWriteError(
@@ -170,13 +173,18 @@ class DatasetRun:
             raise DatasetWriteError("데이터셋 종료 처리 또는 manifest 작성에 실패했습니다.", str(exc)) from exc
 
     def image_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path:
+        del timestamp
         suffix = self.settings.image_format
-        return self.images_dir / f"{point_name(point, timestamp, capture_index)}.{suffix}"
+        return self.images_dir / f"{self._image_name_stem(point, capture_index)}.{suffix}"
 
     def npy_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path | None:
+        del timestamp
         if not self.settings.save_numpy:
             return None
-        return self.arrays_dir / f"{point_name(point, timestamp, capture_index)}.npy"
+        return self.arrays_dir / f"{self._image_name_stem(point, capture_index)}.npy"
+
+    def _image_name_stem(self, point: ScanPoint, capture_index: int) -> str:
+        return self.image_name_stems.get((point.index, capture_index), point_name(point, capture_index=capture_index))
 
     def write_capture(self, record: dict[str, Any]) -> None:
         try:
@@ -376,44 +384,53 @@ def safe_timestamp(value: datetime | None = None) -> str:
 
 def validate_image_output_plan(points: list[ScanPoint], default_capture_count: int = 1) -> list[str]:
     errors: list[str] = []
-    seen_names: dict[str, ScanPoint] = {}
-    for point in points:
-        capture_count = effective_capture_count(point, default_capture_count)
-        if capture_count > 1:
-            errors.append(
-                f"위치 #{point.index}의 캡쳐 수가 {capture_count}장입니다. "
-                "X000_Y000.png 파일명은 위치당 1장만 저장할 수 있습니다."
-            )
-
-        axis_errors = [
-            f"{axis}={_filename_mm(value)} mm"
-            for axis, value in (("X", point.x_mm), ("Y", point.y_mm))
-            if not _is_integer_mm(value)
-        ]
-        if axis_errors:
-            errors.append(
-                f"위치 #{point.index}의 {', '.join(axis_errors)} 좌표가 정수 mm가 아닙니다. "
-                "X000_Y000.png 파일명은 정수 mm 좌표만 지원합니다."
-            )
-            continue
-
-        filename = f"{point_name(point)}.png"
+    try:
+        stems = planned_image_name_stems(points, default_capture_count)
+    except ValueError as exc:
+        return [str(exc)]
+    seen_names: dict[str, tuple[int, int]] = {}
+    for key, stem in stems.items():
+        filename = f"{stem}.png"
         previous = seen_names.get(filename)
         if previous is not None:
+            previous_point, previous_capture = previous
+            point_index, capture_index = key
             errors.append(
-                f"위치 #{previous.index}와 #{point.index}가 같은 이미지 파일명 {filename}을 사용합니다. "
-                "좌표를 중복 없이 지정하세요."
+                f"위치 #{previous_point}({previous_capture})와 #{point_index}({capture_index})가 "
+                f"같은 이미지 파일명 {filename}을 사용합니다."
             )
         else:
-            seen_names[filename] = point
+            seen_names[filename] = key
     return errors
 
 
+def planned_image_name_stems(points: list[ScanPoint], default_capture_count: int = 1) -> dict[tuple[int, int], str]:
+    stems: dict[tuple[int, int], str] = {}
+    coordinate_stem_counts: dict[str, int] = {}
+    used_stems: set[str] = set()
+    for point in points:
+        base_stem = _coordinate_stem(point)
+        coordinate_stem_counts[base_stem] = coordinate_stem_counts.get(base_stem, 0) + 1
+        occurrence_index = coordinate_stem_counts[base_stem]
+        point_suffix = f"_P{occurrence_index:04d}" if occurrence_index > 1 else ""
+        for capture_index in range(1, effective_capture_count(point, default_capture_count) + 1):
+            capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
+            stem = f"{base_stem}{point_suffix}{capture_suffix}"
+            if stem in used_stems:
+                stem = f"{base_stem}_P{occurrence_index:04d}{capture_suffix}"
+            duplicate_index = 2
+            while stem in used_stems:
+                stem = f"{base_stem}_P{occurrence_index:04d}_D{duplicate_index:02d}{capture_suffix}"
+                duplicate_index += 1
+            stems[(point.index, capture_index)] = stem
+            used_stems.add(stem)
+    return stems
+
+
 def point_name(point: ScanPoint, timestamp: str | None = None, capture_index: int = 1) -> str:
-    del timestamp, capture_index
-    if not _is_integer_mm(point.x_mm) or not _is_integer_mm(point.y_mm):
-        raise ValueError("X000_Y000 image names require integer millimetre X/Y coordinates.")
-    return f"X{int(point.x_mm):03d}_Y{int(point.y_mm):03d}"
+    del timestamp
+    capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
+    return f"{_coordinate_stem(point)}{capture_suffix}"
 
 
 def sanitize_label(label: str) -> str:
@@ -421,12 +438,18 @@ def sanitize_label(label: str) -> str:
     return normalized.strip("._")[:80]
 
 
-def _filename_mm(value: float) -> str:
-    return f"{float(value):.3f}"
+def _coordinate_stem(point: ScanPoint) -> str:
+    return f"X{_filename_coordinate(point.x_mm)}_Y{_filename_coordinate(point.y_mm)}"
 
 
-def _is_integer_mm(value: float) -> bool:
-    return float(value).is_integer()
+def _filename_coordinate(value: float) -> str:
+    try:
+        coordinate = Decimal(str(value)).quantize(Decimal("0.001"), rounding=ROUND_DOWN)
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"Invalid image coordinate: {value}") from exc
+    if coordinate < 0:
+        raise ValueError(f"Image coordinate cannot be negative: {value}")
+    return f"{coordinate:07.3f}"
 
 
 def _csv_value(value: Any) -> str:

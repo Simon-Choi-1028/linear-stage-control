@@ -56,12 +56,12 @@ class PreviewResizeHandle(QWidget):
         self.setObjectName("previewResizeHandle")
 
     def mousePressEvent(self, event: object) -> None:
-        self._last_position = _event_position(event)
+        self._last_position = _event_global_position(event) or _event_position(event)
         if hasattr(event, "accept"):
             event.accept()
 
     def mouseMoveEvent(self, event: object) -> None:
-        position = _event_position(event)
+        position = _event_global_position(event) or _event_position(event)
         if position is None or self._last_position is None:
             return
         delta_x = int(round(position.x() - self._last_position.x()))
@@ -99,6 +99,20 @@ def _event_position(event: object) -> QPointF | None:
         if position is not None:
             return QPointF(float(position.x()), float(position.y()))
     pos_getter = getattr(event, "pos", None)
+    if callable(pos_getter):
+        position = pos_getter()
+        if position is not None:
+            return QPointF(float(position.x()), float(position.y()))
+    return None
+
+
+def _event_global_position(event: object) -> QPointF | None:
+    position_getter = getattr(event, "globalPosition", None)
+    if callable(position_getter):
+        position = position_getter()
+        if position is not None:
+            return QPointF(float(position.x()), float(position.y()))
+    pos_getter = getattr(event, "globalPos", None)
     if callable(pos_getter):
         position = pos_getter()
         if position is not None:

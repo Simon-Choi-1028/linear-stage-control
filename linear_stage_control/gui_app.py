@@ -282,6 +282,9 @@ class MainWindow(QMainWindow):
         self.manual_stage_worker: ManualStageWorker | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
+        self.pending_run_result: tuple[str, bool] | None = None
+        self.pending_run_failed = False
+        self.restart_live_after_worker = False
         self.latest_update_info: UpdateInfo | None = None
         self.current_run_dir: Path | None = None
         self.current_image_path: Path | None = None
@@ -333,6 +336,17 @@ class MainWindow(QMainWindow):
             self._set_camera_scan_state("idle", "대기", "스모크 테스트 모드")
 
     def closeEvent(self, event: object) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self.logger.info("close requested during acquisition", extra={"event": "run_close_requested"})
+            self.worker.request_stop()
+            self.set_run_status("종료 전 촬영 정리 중")
+            if not self.worker.wait(5000):
+                self.logger.warning("close deferred while acquisition worker is still running", extra={"event": "run_close_deferred"})
+                if hasattr(event, "ignore"):
+                    event.ignore()
+                return
+        if self.worker is not None and not self.worker.isRunning():
+            self.cleanup_finished_worker()
         self.stop_live_preview(wait_ms=1500)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_scan_worker.wait(2000)
@@ -584,9 +598,15 @@ class MainWindow(QMainWindow):
             height = self.height() - self._preview_reserved_height()
         return max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, height))
 
-    def _clamp_preview_size(self, size: QSize, *, preserve_aspect: bool = False) -> QSize:
-        max_width = self._preview_available_width()
-        max_height = self._preview_available_height()
+    def _clamp_preview_size(
+        self,
+        size: QSize,
+        *,
+        preserve_aspect: bool = False,
+        fit_available: bool = True,
+    ) -> QSize:
+        max_width = self._preview_available_width() if fit_available else PREVIEW_MAX_WIDTH
+        max_height = self._preview_available_height() if fit_available else PREVIEW_MAX_HEIGHT
         width = max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, max_width, int(size.width())))
         height = max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, max_height, int(size.height())))
         if preserve_aspect:
@@ -632,12 +652,7 @@ class MainWindow(QMainWindow):
         )
         width = current.width() + int(delta_x)
         height = current.height() + int(delta_y)
-        if int(delta_x) == 0 and int(delta_y) != 0:
-            width = self._aspect_width(height)
-        if int(delta_y) == 0 and int(delta_x) != 0:
-            height = self._aspect_height(width)
-        preserve_aspect = int(delta_x) == 0 or int(delta_y) == 0
-        self.preview_user_size = self._clamp_preview_size(QSize(width, height), preserve_aspect=preserve_aspect)
+        self.preview_user_size = self._clamp_preview_size(QSize(width, height), fit_available=False)
         width = self.preview_user_size.width()
         height = self.preview_user_size.height()
         self.preview_user_min_height = height
@@ -667,6 +682,7 @@ class MainWindow(QMainWindow):
         size = self._clamp_preview_size(
             self.preview_user_size or self.preview_base_size,
             preserve_aspect=self.preview_user_size is None,
+            fit_available=self.preview_user_size is None,
         )
         if self.preview_user_size is not None:
             self.preview_user_size = size
@@ -2672,7 +2688,7 @@ class MainWindow(QMainWindow):
         if image_plan_errors:
             issues.append(PreflightIssue("이미지 파일명", "오류", short_issue_text(image_plan_errors)))
         elif points:
-            issues.append(PreflightIssue("이미지 파일명", "통과", "PNG X000_Y000.png | 정수 좌표/중복 검사 통과"))
+            issues.append(PreflightIssue("이미지 파일명", "통과", "PNG X000.000_Y000.000.png | 소수점 3자리 절삭 저장"))
 
         detected_cameras = max(0, self.camera_combo.count() - 1)
         if detected_cameras <= 0:
@@ -2947,6 +2963,9 @@ class MainWindow(QMainWindow):
             self.camera_status_label.setText("카메라 검색 종료 대기 중...")
             self.camera_scan_worker.wait(2000)
         self.current_run_dir = None
+        self.pending_run_result = None
+        self.pending_run_failed = False
+        self.restart_live_after_worker = False
         self.open_dataset_button.setEnabled(False)
         self.log("촬영 run 시작")
         self.log(f"예상 소요시간: {duration_estimate.detail}")
@@ -2964,6 +2983,7 @@ class MainWindow(QMainWindow):
         self.worker.progress_changed.connect(self.on_progress_changed)
         self.worker.run_failed.connect(self.on_run_failed)
         self.worker.run_done.connect(self.on_run_done)
+        self.worker.finished.connect(self.on_worker_finished)
         self.worker.start()
 
     def stop_run(self) -> None:
@@ -3053,23 +3073,54 @@ class MainWindow(QMainWindow):
         )
 
     def on_run_failed(self, message: str) -> None:
+        self.pending_run_failed = True
+        self.restart_live_after_worker = True
         self.finish_run_timing()
         self.set_run_status("오류 발생")
         self.apply_state(AppRunState.ERROR)
         self.log(f"오류: {message}")
         QMessageBox.critical(self, "실행 실패", message)
-        self.restart_live_preview_after_run()
 
     def on_run_done(self, run_dir: str, stopped: bool) -> None:
+        self.pending_run_result = (run_dir, stopped)
+        self.restart_live_after_worker = True
+        self.logger.info(
+            "acquisition run_done received",
+            extra={"event": "run_done_received", "run_dir": run_dir, "stopped": stopped},
+        )
         self.finish_run_timing()
-        self.worker = None
         if run_dir:
             self.current_run_dir = Path(run_dir)
         if self.run_status_label.text() != "오류 발생":
             self.set_run_status("중지됨" if stopped else "완료")
         self.log("촬영 중지됨" if stopped else "촬영 완료")
-        self.apply_ambient_state()
-        self.restart_live_preview_after_run()
+
+    def on_worker_finished(self) -> None:
+        self.cleanup_finished_worker()
+
+    def cleanup_finished_worker(self) -> None:
+        worker = self.worker
+        if worker is None or worker.isRunning():
+            return
+        run_result = self.pending_run_result
+        run_failed = self.pending_run_failed
+        restart_live = self.restart_live_after_worker
+        self.logger.info(
+            "acquisition worker finished",
+            extra={"event": "worker_finished", "has_run_result": run_result is not None, "failed": run_failed},
+        )
+        self.worker = None
+        self.pending_run_result = None
+        self.pending_run_failed = False
+        self.restart_live_after_worker = False
+        worker.deleteLater()
+        self.logger.info("acquisition worker cleanup complete", extra={"event": "worker_cleanup"})
+        if run_failed:
+            self.apply_state(AppRunState.ERROR)
+        else:
+            self.apply_ambient_state()
+        if restart_live:
+            self.restart_live_preview_after_run()
 
     def restart_live_preview_after_run(self) -> None:
         if self.live_preview_enabled() and self.camera_combo.count() > 1:

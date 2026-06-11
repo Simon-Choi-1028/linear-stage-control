@@ -33,6 +33,8 @@ camera:
   trigger_mode: Off
   output_pixel_format: Mono8
   timeout_ms: 5000
+  # The lab camera is mounted upside down; true rotates live preview and saved images by 180 degrees.
+  rotate_180: true
   pylon_runtime_url: https://www.baslerweb.com/en/downloads/software-downloads/
   live_preview:
     enabled: true

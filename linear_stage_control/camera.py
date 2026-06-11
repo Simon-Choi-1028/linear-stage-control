@@ -71,6 +71,7 @@ class CameraSettings:
     use_software_trigger: bool = False
     output_pixel_format: str = "Mono8"
     timeout_ms: int = 5000
+    rotate_180: bool = True
 
 
 def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
@@ -101,9 +102,10 @@ def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
         trigger_mode=none_if_blank(camera.get("trigger_mode", "Off")),
         trigger_selector=str(camera.get("trigger_selector", "FrameStart")),
         trigger_source=str(camera.get("trigger_source", "Software")),
-        use_software_trigger=bool(camera.get("use_software_trigger", False)),
+        use_software_trigger=_bool_value(camera.get("use_software_trigger", False), False, "camera.use_software_trigger"),
         output_pixel_format=camera.get("output_pixel_format", "Mono8"),
         timeout_ms=int(camera.get("timeout_ms", 5000)),
+        rotate_180=_bool_value(camera.get("rotate_180", True), True, "camera.rotate_180"),
     )
 
 
@@ -206,7 +208,7 @@ class BaslerCamera:
                     f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                 )
             image = self.converter.Convert(grab_result)
-            return image.GetArray().copy()
+            return apply_camera_orientation(image.GetArray().copy(), rotate_180=self.settings.rotate_180)
         finally:
             grab_result.Release()
 
@@ -224,6 +226,7 @@ class BaslerCamera:
     ) -> CaptureResult:
         """Capture one frame and save the unconverted camera array losslessly."""
         array, metadata = self.grab_original_array(timeout_ms=timeout_ms)
+        array = apply_camera_orientation(array, rotate_180=self.settings.rotate_180)
         image_path = Path(output_path)
         save_original_array(image_path, array)
 
@@ -324,7 +327,7 @@ class BaslerCamera:
                         continue
                     consecutive_failures = 0
                     yield (
-                        grab_result.GetArray().copy(),
+                        apply_camera_orientation(grab_result.GetArray().copy(), rotate_180=self.settings.rotate_180),
                         _grab_metadata(
                             grab_result,
                             captured_at,
@@ -645,8 +648,36 @@ def _optional_int(value: Any) -> int | None:
     return int(number)
 
 
+def _bool_value(value: Any, default: bool, field_name: str) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise CameraConnectionError(
+        f"{field_name} must be true or false.",
+        f"Invalid boolean for {field_name}: {value!r}",
+    )
+
+
 def _normalise_pixel_format_name(value: Any) -> str:
     return str(value or "").strip().replace(" ", "")
+
+
+def apply_camera_orientation(array: np.ndarray, *, rotate_180: bool) -> np.ndarray:
+    if not rotate_180:
+        return np.ascontiguousarray(array)
+    if array.ndim < 2:
+        return np.ascontiguousarray(array)
+    return np.ascontiguousarray(np.flip(array, axis=(0, 1)))
 
 
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:

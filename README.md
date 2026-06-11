@@ -105,7 +105,7 @@ GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접
 
 `시작`을 누르면 촬영 전 점검 창이 먼저 열립니다. 이 창은 위치 범위, Basler 카메라 감지 여부, Zaber COM 포트, X/Y 축 매핑 중복, 저장 폴더 생성 가능 여부, 이동 속도, 촬영 설정, 고정 오차 기준을 한 번에 확인합니다. 오류가 있으면 시작 버튼이 비활성화되고, 경고만 있을 때는 사용자가 내용을 확인한 뒤 계속 진행할 수 있습니다.
 
-촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`이 들어갑니다. 기본 메타데이터 출력은 `captures.csv`, `captures.jsonl`, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`이고, 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
+촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`이 들어갑니다. 기본 메타데이터 출력은 `captures.csv`, `captures.jsonl`, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`이고, 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
 
 화면에 보이는 숫자는 불필요한 0을 줄여 표시합니다. mm 위치값은 최대 4자리, um 오차값은 최대 2자리까지만 보여주며, `captures.csv`와 `captures.jsonl`에는 계산 원본 값이 그대로 저장됩니다.
 
@@ -119,7 +119,7 @@ GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접
 
 `장비` 영역의 `자동검색` 버튼을 누르면 LAN/GigE Basler 카메라를 한 번 검색합니다. 검색 상태는 별도 배지로 `탐색중`, `성공`, `실패`가 표시되고 상태별 색상으로 구분됩니다. `a2A2464-115g5mBAS`처럼 LAN/GigE 포트에 연결되는 카메라가 감지되면 `카메라` 드롭다운에 모델명, serial, IP, device class가 추가되어 선택할 수 있습니다. GUI가 주기적으로 카메라 검색을 반복하지 않으므로 촬영 중 pypylon 장치 열기와 충돌할 가능성을 줄입니다.
 
-`수동 스테이지` 영역에서는 촬영 run을 시작하기 전에 현재 위치 읽기, 활성 축 원점 복귀, 절대 좌표 이동, X/Y jog 이동, 수동 정지를 실행할 수 있습니다. 촬영 run 중에는 별도 serial connection 충돌을 막기 위해 수동 명령 버튼이 비활성화됩니다.
+`수동 스테이지` 영역에서는 촬영 run을 시작하기 전에 현재 위치 읽기, 활성 축 원점 복귀, 절대 좌표 이동, X/Y jog 이동, 수동 정지를 실행할 수 있습니다. 원점 복귀 버튼은 home 완료 후 기본으로 X=105 mm, Y=105 mm 위치까지 50 mm/s로 이동합니다. 촬영 run 중에는 별도 serial connection 충돌을 막기 위해 수동 명령 버튼이 비활성화됩니다.
 
 오른쪽 `진단` 탭은 pypylon import, Basler 카메라 탐색, Zaber COM 포트, Zaber Device Database, 저장 폴더 쓰기 권한, GitHub 업데이트 접근성을 한 번에 점검합니다. 현장 PC에서 live가 뜨지 않거나 장비 연결이 애매할 때 먼저 실행해 결과를 로그와 표로 확인하면 됩니다.
 
@@ -133,7 +133,7 @@ GUI의 실행 상태는 `AppRunState` enum으로 관리합니다. 촬영, 취소
   run_<run_id>.log
 ```
 
-v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 화면은 기본 4:3 frame으로 표시되며, 우하단 resize handle을 대각선으로 끌어 가로/세로 크기를 조정하고 더블클릭으로 기본 4:3 크기로 되돌릴 수 있습니다. 짧은 창에서는 preview panel 내부 스크롤을 사용해 Live 컨트롤과 검사 도구가 카메라 화면 위로 겹치지 않도록 합니다. Live 시작과 첫 프레임의 원본 크기, preview 크기, 렌더 target 크기는 JSONL 로그에 남습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 실험 장치의 뒤집힌 카메라 장착을 보정하기 위해 `camera.rotate_180` 기본값은 `true`이며, Live preview와 저장 PNG/NPY에 같은 180도 회전이 적용됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 화면은 기본 4:3 frame으로 표시되며, 우하단 resize handle을 대각선으로 끌어 가로/세로 크기를 조정하고 더블클릭으로 기본 4:3 크기로 되돌릴 수 있습니다. 짧은 창에서는 preview panel 내부 스크롤을 사용해 Live 컨트롤과 검사 도구가 카메라 화면 위로 겹치지 않도록 합니다. Live 시작과 첫 프레임의 원본 크기, preview 크기, 렌더 target 크기는 JSONL 로그에 남습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
 
 Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
 
@@ -262,6 +262,7 @@ camera:
   trigger_source: Software
   exposure_us: 5000
   timeout_ms: 5000
+  rotate_180: true
   live_preview:
     enabled: true
     fps: 10

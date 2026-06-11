@@ -4,6 +4,8 @@
 
 ## v0.1.6 - 2026-06-10
 
+- Hotfix: added a default-on 180-degree Basler camera orientation correction that applies consistently to live preview, saved PNG images, and saved NPY arrays.
+- Hotfix: changed the manual stage Home button to run homing and then move to X=105 mm, Y=105 mm at a fixed 50 mm/s center-return speed.
 - Hotfix: stabilized acquisition worker cleanup so the GUI does not drop the QThread reference between run completion and the Qt `finished` signal, preventing intermittent app exits after saving.
 - Hotfix: changed capture filenames to decimal coordinate stems such as `X033.333_Y000.000.png`, truncating beyond three decimal places and adding `_Cxx` / `_Pxxxx` suffixes only when needed for collisions.
 - Hotfix: restored free preview resizing so bottom-right drag changes width and height independently while reset still returns to the 4:3 default frame.

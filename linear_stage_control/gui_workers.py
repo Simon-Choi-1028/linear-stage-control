@@ -26,6 +26,10 @@ from .stage import StageMoveCancelled, ZaberXYStage, stage_settings_from_config
 from .text_formatting import mm_text as _mm_text, velocity_text as _velocity_text
 from .updater import UpdateInfo, download_file, fetch_latest_update, verify_file_sha256
 
+MANUAL_HOME_CENTER_X_MM = 105.0
+MANUAL_HOME_CENTER_Y_MM = 105.0
+MANUAL_HOME_CENTER_VELOCITY_MM_S = 50.0
+
 
 class AcquisitionWorker(QThread):
     log_message = Signal(str)
@@ -458,8 +462,20 @@ class ManualStageWorker(QThread):
                 if self.action == "home":
                     self.status_changed.emit("원점 복귀 중")
                     stage.home()
+                    self.status_changed.emit(
+                        "원점 복귀 후 중앙 이동 중 | "
+                        f"X={_mm_text(MANUAL_HOME_CENTER_X_MM)}, "
+                        f"Y={_mm_text(MANUAL_HOME_CENTER_Y_MM)}, "
+                        f"속도={_velocity_text(MANUAL_HOME_CENTER_VELOCITY_MM_S)}"
+                    )
+                    stage.move_absolute_mm(
+                        MANUAL_HOME_CENTER_X_MM,
+                        MANUAL_HOME_CENTER_Y_MM,
+                        velocity_mm_s=MANUAL_HOME_CENTER_VELOCITY_MM_S,
+                        cancel_requested=lambda: self._stop_requested,
+                    )
                     self.position_done.emit(stage.position_mm())
-                    self.action_done.emit("원점 복귀 완료")
+                    self.action_done.emit("원점 복귀 및 중앙 이동 완료")
                     return
                 if self.action == "stop":
                     self.status_changed.emit("스테이지 정지 명령 전송")

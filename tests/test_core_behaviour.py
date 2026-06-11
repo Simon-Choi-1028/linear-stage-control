@@ -13,7 +13,12 @@ from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from linear_stage_control.camera import PYLON_IMPORT_ERROR, BaslerCamera, camera_settings_from_config
+from linear_stage_control.camera import (
+    PYLON_IMPORT_ERROR,
+    BaslerCamera,
+    apply_camera_orientation,
+    camera_settings_from_config,
+)
 from linear_stage_control.dataset import (
     DatasetRun,
     DatasetSettings,
@@ -229,6 +234,20 @@ class CameraCompatibilityTests(unittest.TestCase):
         self.assertEqual(settings.binning_y, 2)
         self.assertIsNone(settings.decimation_x)
         self.assertIsNone(settings.decimation_y)
+
+    def test_camera_settings_default_to_rotated_lab_mount(self) -> None:
+        self.assertTrue(camera_settings_from_config({"camera": {}}).rotate_180)
+        self.assertFalse(camera_settings_from_config({"camera": {"rotate_180": "false"}}).rotate_180)
+
+    def test_camera_orientation_rotates_arrays_180_degrees(self) -> None:
+        array = np.arange(12, dtype=np.uint8).reshape(3, 4)
+
+        rotated = apply_camera_orientation(array, rotate_180=True)
+        unchanged = apply_camera_orientation(array, rotate_180=False)
+
+        np.testing.assert_array_equal(rotated, array[::-1, ::-1])
+        np.testing.assert_array_equal(unchanged, array)
+        self.assertTrue(rotated.flags.c_contiguous)
 
     def test_output_pixel_format_aliases_resolve_to_pylon_pixel_types(self) -> None:
         if PYLON_IMPORT_ERROR is not None:
@@ -739,6 +758,77 @@ class GuiSmokeTests(unittest.TestCase):
         window.manual_y_edit.setText("-2.0")
         self.assertEqual(window._manual_target_values(), (1.5, -2.0))
         window.close()
+
+    def test_gui_build_config_defaults_camera_rotate_180_enabled(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+
+        config = window.build_config([])
+        self.assertTrue(config["camera"]["rotate_180"])
+
+        window.camera_rotate_180_check.setChecked(False)
+        config = window.build_config([])
+        self.assertFalse(config["camera"]["rotate_180"])
+        window.close()
+
+    def test_manual_home_moves_to_center_at_fixed_velocity(self) -> None:
+        from linear_stage_control import gui_workers
+
+        class FakeStage:
+            instances: list[FakeStage] = []
+
+            def __init__(self, _settings: object) -> None:
+                self.home_calls = 0
+                self.moves: list[tuple[float, float, float | None]] = []
+                FakeStage.instances.append(self)
+
+            def __enter__(self) -> FakeStage:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                pass
+
+            def home(self) -> None:
+                self.home_calls += 1
+
+            def move_absolute_mm(
+                self,
+                x_mm: float,
+                y_mm: float,
+                *,
+                velocity_mm_s: float | None = None,
+                cancel_requested: object = None,
+            ) -> None:
+                del cancel_requested
+                self.moves.append((x_mm, y_mm, velocity_mm_s))
+
+            def position_mm(self) -> tuple[float, float]:
+                return (105.0, 105.0)
+
+        original_stage = gui_workers.ZaberXYStage
+        gui_workers.ZaberXYStage = FakeStage  # type: ignore[assignment]
+        done_messages: list[str] = []
+        positions: list[object] = []
+        try:
+            worker = gui_workers.ManualStageWorker(
+                {"stage": {"serial_port": "COM_TEST"}},
+                "home",
+                velocity_mm_s=1.0,
+            )
+            worker.action_done.connect(done_messages.append)
+            worker.position_done.connect(positions.append)
+
+            worker.run()
+
+            stage = FakeStage.instances[-1]
+            self.assertEqual(stage.home_calls, 1)
+            self.assertEqual(stage.moves, [(105.0, 105.0, 50.0)])
+            self.assertEqual(positions[-1], (105.0, 105.0))
+            self.assertIn("중앙 이동", done_messages[-1])
+        finally:
+            gui_workers.ZaberXYStage = original_stage
 
     def test_app_state_centralizes_button_enablement(self) -> None:
         from linear_stage_control.app_state import AppRunState

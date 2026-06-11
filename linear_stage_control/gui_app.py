@@ -264,6 +264,23 @@ def _float_config_value(value: Any, default: float) -> float:
         return default
 
 
+def _bool_config_value(value: Any, default: bool) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 class MainWindow(QMainWindow):
     def __init__(self, start_device_scan: bool = True) -> None:
         super().__init__()
@@ -901,7 +918,7 @@ class MainWindow(QMainWindow):
         )
         self.manual_step_spin.setToolTip("X+/X-/Y+/Y- 버튼으로 이동할 상대 거리입니다.")
         _apply_button_icon(self.manual_position_button, QStyle.SP_BrowserReload, "현재 Zaber 위치 읽기")
-        _apply_button_icon(self.manual_home_button, QStyle.SP_DialogResetButton, "활성 축 원점 복귀")
+        _apply_button_icon(self.manual_home_button, QStyle.SP_DialogResetButton, "활성 축 원점 복귀 후 X105/Y105로 이동")
         _apply_button_icon(self.manual_move_button, QStyle.SP_ArrowForward, "입력한 X/Y 목표 좌표로 이동")
         _apply_button_icon(self.manual_stop_button, QStyle.SP_MediaStop, "현재 수동 이동 정지 요청")
         _apply_button_icon(self.manual_x_minus_button, QStyle.SP_ArrowLeft, "X축 음의 방향으로 jog 이동")
@@ -1000,6 +1017,8 @@ class MainWindow(QMainWindow):
         self.software_trigger_check = QCheckBox("소프트웨어 트리거")
         self.save_numpy_check = QCheckBox("NPY 저장")
         self.skip_home_check = QCheckBox("원점 복귀 생략")
+        self.camera_rotate_180_check = QCheckBox("카메라 180도 반전")
+        self.camera_rotate_180_check.setChecked(True)
         self.metadata_format_checks = self._format_checks(DEFAULT_METADATA_FORMATS)
         self.summary_format_checks = self._format_checks(DEFAULT_SUMMARY_FORMATS)
         self.exposure_row = ParameterAdjustRow(
@@ -1057,6 +1076,7 @@ class MainWindow(QMainWindow):
         self.pixel_format_combo.currentTextChanged.connect(
             lambda _text="": self.schedule_live_parameter_update(restart_required=True)
         )
+        self.camera_rotate_180_check.toggled.connect(lambda _checked=False: self.schedule_live_parameter_update())
         for key, edit in self.camera_parameter_edits.items():
             edit.editingFinished.connect(
                 lambda key=key: self.schedule_live_parameter_update(
@@ -1092,7 +1112,14 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 7, 8, 7)
         layout.setHorizontalSpacing(10)
         layout.setVerticalSpacing(5)
-        for index, check in enumerate((self.software_trigger_check, self.save_numpy_check, self.skip_home_check)):
+        for index, check in enumerate(
+            (
+                self.software_trigger_check,
+                self.save_numpy_check,
+                self.skip_home_check,
+                self.camera_rotate_180_check,
+            )
+        ):
             layout.addWidget(check, index // 2, index % 2)
         return widget
 
@@ -1130,6 +1157,7 @@ class MainWindow(QMainWindow):
         self.software_trigger_check.setToolTip("카메라 FrameStart software trigger를 사용합니다. 기본값: 켜짐")
         self.save_numpy_check.setToolTip("원본 배열을 NPY로 추가 저장합니다. 기본값: 꺼짐")
         self.skip_home_check.setToolTip("run 시작 시 Zaber 원점 복귀를 생략합니다. 기본값: 꺼짐")
+        self.camera_rotate_180_check.setToolTip("뒤집혀 장착된 Basler 카메라 화면과 저장 이미지를 180도 회전합니다.")
         for name, check in self.metadata_format_checks.items():
             check.setToolTip(f"run 종료 후 captures.{name} 메타데이터를 저장합니다.")
         for name, check in self.summary_format_checks.items():
@@ -1667,7 +1695,8 @@ class MainWindow(QMainWindow):
         self.capture_count_spin.setValue(default_capture_count_from_config(config))
         self.pixel_format_combo.setCurrentText(str(camera.get("pixel_format", "Mono8")))
         self._apply_camera_parameter_values(camera)
-        self.software_trigger_check.setChecked(bool(camera.get("use_software_trigger", True)))
+        self.software_trigger_check.setChecked(_bool_config_value(camera.get("use_software_trigger", True), True))
+        self.camera_rotate_180_check.setChecked(_bool_config_value(camera.get("rotate_180", True), True))
         self.save_numpy_check.setChecked(bool(dataset.get("save_numpy", False)))
         self.skip_home_check.setChecked(False)
         axes = stage.get("axes", {})
@@ -2478,7 +2507,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "원점 복귀",
-            "활성화된 Zaber 축을 원점 복귀할까요?",
+            "활성화된 Zaber 축을 원점 복귀한 뒤 X=105, Y=105 mm로 50 mm/s 이동할까요?",
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.start_manual_stage_action("home")
@@ -2611,6 +2640,7 @@ class MainWindow(QMainWindow):
         camera["exposure_us"] = self.exposure_spin.value()
         self._apply_camera_parameter_config(camera)
         camera["use_software_trigger"] = self.software_trigger_check.isChecked()
+        camera["rotate_180"] = self.camera_rotate_180_check.isChecked()
         camera.setdefault("trigger_selector", "FrameStart")
         camera.setdefault("trigger_source", "Software")
         camera.setdefault("timeout_ms", 5000)

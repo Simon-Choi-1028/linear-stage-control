@@ -220,7 +220,7 @@ function Publish-GitHubRestRelease {
     }
 
     $remoteAsset = $existingAssets[$localAsset.Name]
-    if ([int64]$remoteAsset.size -eq [int64]$localAsset.Length) {
+    if ($localAsset.Name -ne "update_manifest.json" -and [int64]$remoteAsset.size -eq [int64]$localAsset.Length) {
       Write-Host "Release asset already exists with matching size, skipping: $($localAsset.Name)"
       continue
     }

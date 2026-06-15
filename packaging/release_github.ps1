@@ -3,6 +3,7 @@ param(
   [string]$Repo = "Simon-Choi-1028/linear-stage-control",
   [switch]$PortableOnly,
   [switch]$IncludePortable,
+  [switch]$ForceReplaceAssets,
   [switch]$DryRun
 )
 
@@ -224,7 +225,8 @@ function Publish-GitHubRestRelease {
     }
 
     $remoteAsset = $existingAssets[$localAsset.Name]
-    if ($localAsset.Name -ne "update_manifest.json" -and [int64]$remoteAsset.size -eq [int64]$localAsset.Length) {
+    $manifestLike = $localAsset.Name -in @("update_manifest.json", "portable_manifest.json")
+    if (-not $ForceReplaceAssets -and -not $manifestLike -and [int64]$remoteAsset.size -eq [int64]$localAsset.Length) {
       Write-Host "Release asset already exists with matching size, skipping: $($localAsset.Name)"
       continue
     }

@@ -802,7 +802,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertLessEqual(window.height(), 795)
         self.assertGreaterEqual(window.preview_label.height(), 150)
         self.assertGreaterEqual(window.preview_tabs.height(), 160)
-        self.assertGreaterEqual(window.preview_command_bar.height(), 78)
+        self.assertGreaterEqual(window.preview_command_bar.height(), 106)
         self.assertGreaterEqual(window.preview_tool_bar.height(), 48)
 
         window.resize(1440, 640)
@@ -853,6 +853,9 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertFalse(live_config["camera"]["rotate_180"])
         self.assertTrue(live_config["camera"]["flip_horizontal"])
         self.assertTrue(live_config["camera"]["flip_vertical"])
+        self.assertIs(window.camera_rotate_180_check.parentWidget(), window.live_orientation_bar)
+        self.assertIs(window.camera_flip_horizontal_check.parentWidget(), window.live_orientation_bar)
+        self.assertIs(window.camera_flip_vertical_check.parentWidget(), window.live_orientation_bar)
         window.close()
 
     def test_manual_home_moves_to_center_at_fixed_velocity(self) -> None:

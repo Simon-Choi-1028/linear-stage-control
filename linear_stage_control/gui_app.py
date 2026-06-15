@@ -747,7 +747,7 @@ class MainWindow(QMainWindow):
     def _preview_reserved_height(self) -> int:
         reserved = 25 + 36  # panel margins plus vertical spacing between preview controls
         for attr_name, fallback in (
-            ("preview_command_bar", 84),
+            ("preview_command_bar", 112),
             ("preview_tool_bar", 54),
             ("preview_metrics_table", 82),
             ("preview_tabs", 180),
@@ -1283,9 +1283,6 @@ class MainWindow(QMainWindow):
                 self.software_trigger_check,
                 self.save_numpy_check,
                 self.skip_home_check,
-                self.camera_rotate_180_check,
-                self.camera_flip_horizontal_check,
-                self.camera_flip_vertical_check,
             )
         ):
             layout.addWidget(check, index // 2, index % 2)
@@ -1606,7 +1603,7 @@ class MainWindow(QMainWindow):
         self.preview_command_bar = preview_info_widget
         preview_info_widget.setObjectName("previewCommandBar")
         preview_info_widget.setMinimumWidth(0)
-        preview_info_widget.setMinimumHeight(84)
+        preview_info_widget.setMinimumHeight(112)
         preview_info_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         preview_info_grid = QGridLayout(preview_info_widget)
         preview_info_grid.setContentsMargins(8, 7, 8, 7)
@@ -1620,6 +1617,19 @@ class MainWindow(QMainWindow):
         preview_info_grid.addWidget(self.live_retry_button, 1, 3)
         preview_info_grid.addWidget(self.live_scan_button, 1, 4)
         preview_info_grid.addWidget(self.fullscreen_button, 1, 5)
+        self.live_orientation_bar = QWidget()
+        self.live_orientation_bar.setObjectName("liveOrientationBar")
+        live_orientation_layout = QHBoxLayout(self.live_orientation_bar)
+        live_orientation_layout.setContentsMargins(0, 0, 0, 0)
+        live_orientation_layout.setSpacing(10)
+        live_orientation_label = QLabel("방향")
+        live_orientation_label.setObjectName("toolBarTitle")
+        live_orientation_layout.addWidget(live_orientation_label)
+        live_orientation_layout.addWidget(self.camera_rotate_180_check)
+        live_orientation_layout.addWidget(self.camera_flip_horizontal_check)
+        live_orientation_layout.addWidget(self.camera_flip_vertical_check)
+        live_orientation_layout.addStretch(1)
+        preview_info_grid.addWidget(self.live_orientation_bar, 2, 0, 1, 6)
         preview_info_grid.setColumnMinimumWidth(5, 80)
         preview_info_grid.setColumnStretch(0, 1)
         preview_info_grid.setColumnStretch(1, 1)

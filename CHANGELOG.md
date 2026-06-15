@@ -9,6 +9,7 @@
 - Reworked ETA estimation from a capture-count shortcut into a phase-based timing model covering setup, homing, known and unknown-start movement, position readback/error calculation, settle time, trigger/exposure, image/metadata/UI save overhead, and post-run exports.
 - Updated in-run remaining-time calculation to scale the remaining phase plan from completed capture checkpoints instead of spreading startup and homing time across every capture.
 - Added installer-free portable ZIP release packaging for environments where endpoint protection removes generated setup executables.
+- Hotfix: moved camera orientation and flip controls into the Live command area so they are visible while adjusting the preview.
 
 ## v0.1.6 - 2026-06-10
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.1.7 - 2026-06-15
+
+- Added independent horizontal and vertical Basler image flip controls that apply consistently to live preview, saved PNG images, and saved NPY arrays alongside the existing 180-degree rotation.
+- Added a `Live 캡처` action that saves the currently visible preview image, including zoom and overlays, to `live_captures` and lists it in the capture table without adding scientific scan metadata.
+- Reworked ETA estimation from a capture-count shortcut into a phase-based timing model covering setup, homing, known and unknown-start movement, position readback/error calculation, settle time, trigger/exposure, image/metadata/UI save overhead, and post-run exports.
+- Updated in-run remaining-time calculation to scale the remaining phase plan from completed capture checkpoints instead of spreading startup and homing time across every capture.
+- Added installer-free portable ZIP release packaging for environments where endpoint protection removes generated setup executables.
+
 ## v0.1.6 - 2026-06-10
 
 - Hotfix: stabilized live preview memory use by coalescing queued frames to the latest frame only, reducing large NumPy array buildup when the GUI thread is busy.

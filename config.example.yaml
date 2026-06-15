@@ -33,8 +33,10 @@ camera:
   trigger_mode: Off
   output_pixel_format: Mono8
   timeout_ms: 5000
-  # The lab camera is mounted upside down; true rotates live preview and saved images by 180 degrees.
+  # Orientation corrections are applied to both live preview and saved images.
   rotate_180: true
+  flip_horizontal: false
+  flip_vertical: false
   pylon_runtime_url: https://www.baslerweb.com/en/downloads/software-downloads/
   live_preview:
     enabled: true
@@ -101,6 +103,18 @@ calibration:
 scan:
   # Used when a position row does not define capture_count.
   default_capture_count: 1
+  # ETA model terms. Tune these on the lab PC after comparing a few real runs.
+  estimated_setup_s: 2.0
+  estimated_home_s: 8.0
+  estimated_default_move_velocity_mm_s: 10.0
+  estimated_move_overhead_s: 0.10
+  estimated_position_overhead_s: 0.10
+  estimated_capture_trigger_overhead_s: 0.05
+  estimated_capture_overhead_s: 0.35
+  estimated_npy_save_overhead_s: 0.15
+  estimated_ui_capture_overhead_s: 0.03
+  estimated_export_overhead_s: 0.50
+  estimated_export_per_capture_s: 0.02
   # Preferred: enter a fixed position list here, or set positions_file below.
   positions:
     - label: origin

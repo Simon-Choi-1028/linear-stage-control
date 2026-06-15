@@ -59,8 +59,14 @@ if ((Test-Path -LiteralPath $PylonRuntime) -and -not $IncludePylonRuntime) {
 }
 
 & $Iscc "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "LinearStageControl.iss")
+if ($LASTEXITCODE -ne 0) {
+  throw "Inno Setup failed with exit code $LASTEXITCODE"
+}
 
 $SetupPath = Join-Path $Root "dist\LinearStageControlSetup.exe"
+if (-not (Test-Path -LiteralPath $SetupPath)) {
+  throw "Inno Setup did not produce expected installer: $SetupPath"
+}
 if (Test-Path -LiteralPath $SetupPath) {
   $Hash = (Get-FileHash -Path $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
   $Size = (Get-Item -LiteralPath $SetupPath).Length

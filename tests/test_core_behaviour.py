@@ -236,8 +236,16 @@ class CameraCompatibilityTests(unittest.TestCase):
         self.assertIsNone(settings.decimation_y)
 
     def test_camera_settings_default_to_rotated_lab_mount(self) -> None:
-        self.assertTrue(camera_settings_from_config({"camera": {}}).rotate_180)
-        self.assertFalse(camera_settings_from_config({"camera": {"rotate_180": "false"}}).rotate_180)
+        defaults = camera_settings_from_config({"camera": {}})
+        self.assertTrue(defaults.rotate_180)
+        self.assertFalse(defaults.flip_horizontal)
+        self.assertFalse(defaults.flip_vertical)
+        settings = camera_settings_from_config(
+            {"camera": {"rotate_180": "false", "flip_horizontal": "true", "flip_vertical": "1"}}
+        )
+        self.assertFalse(settings.rotate_180)
+        self.assertTrue(settings.flip_horizontal)
+        self.assertTrue(settings.flip_vertical)
 
     def test_camera_orientation_rotates_arrays_180_degrees(self) -> None:
         array = np.arange(12, dtype=np.uint8).reshape(3, 4)
@@ -248,6 +256,18 @@ class CameraCompatibilityTests(unittest.TestCase):
         np.testing.assert_array_equal(rotated, array[::-1, ::-1])
         np.testing.assert_array_equal(unchanged, array)
         self.assertTrue(rotated.flags.c_contiguous)
+
+    def test_camera_orientation_flips_arrays_after_rotation(self) -> None:
+        array = np.arange(12, dtype=np.uint8).reshape(3, 4)
+
+        horizontal = apply_camera_orientation(array, rotate_180=False, flip_horizontal=True)
+        vertical = apply_camera_orientation(array, rotate_180=False, flip_vertical=True)
+        combined = apply_camera_orientation(array, rotate_180=True, flip_vertical=True, flip_horizontal=True)
+
+        np.testing.assert_array_equal(horizontal, array[:, ::-1])
+        np.testing.assert_array_equal(vertical, array[::-1, :])
+        np.testing.assert_array_equal(combined, array)
+        self.assertTrue(combined.flags.c_contiguous)
 
     def test_output_pixel_format_aliases_resolve_to_pylon_pixel_types(self) -> None:
         if PYLON_IMPORT_ERROR is not None:
@@ -585,6 +605,34 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(window.live_status_label.text(), "Live 9.8 FPS")
         window.close()
 
+    def test_live_capture_saves_visible_preview_pixmap(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(start_device_scan=False)
+            window.output_root_edit.setText(directory)
+            window.preview_mode = "live"
+            window.preview_zoom_slider.setValue(200)
+            window.preview_grid_check.setChecked(True)
+            window.preview_cross_check.setChecked(True)
+            window.on_live_frame(np.arange(48 * 64, dtype=np.uint16).reshape(48, 64), {"live_fps": 10})
+            app.processEvents()
+            saved_size = window.preview_label.pixmap().size()
+
+            window.capture_live_preview()
+            app.processEvents()
+
+            files = list((Path(directory) / "live_captures").glob("live_*.png"))
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].exists())
+            self.assertEqual(window.preview_mode, "live")
+            self.assertEqual(window.captures_table.rowCount(), 1)
+            loaded = QPixmap(str(files[0]))
+            self.assertFalse(loaded.isNull())
+            self.assertEqual(loaded.size(), saved_size)
+            window.close()
+
     def test_live_first_frame_resets_to_full_frame_fit(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
@@ -790,10 +838,21 @@ class GuiSmokeTests(unittest.TestCase):
 
         config = window.build_config([])
         self.assertTrue(config["camera"]["rotate_180"])
+        self.assertFalse(config["camera"]["flip_horizontal"])
+        self.assertFalse(config["camera"]["flip_vertical"])
 
         window.camera_rotate_180_check.setChecked(False)
+        window.camera_flip_horizontal_check.setChecked(True)
+        window.camera_flip_vertical_check.setChecked(True)
         config = window.build_config([])
         self.assertFalse(config["camera"]["rotate_180"])
+        self.assertTrue(config["camera"]["flip_horizontal"])
+        self.assertTrue(config["camera"]["flip_vertical"])
+
+        live_config = window.build_live_config()
+        self.assertFalse(live_config["camera"]["rotate_180"])
+        self.assertTrue(live_config["camera"]["flip_horizontal"])
+        self.assertTrue(live_config["camera"]["flip_vertical"])
         window.close()
 
     def test_manual_home_moves_to_center_at_fixed_velocity(self) -> None:
@@ -936,7 +995,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(any("안정화" in detail for detail in duration_details))
         window.close()
 
-    def test_run_duration_estimate_includes_settle_exposure_and_known_moves(self) -> None:
+    def test_run_duration_estimate_includes_all_planned_phases(self) -> None:
         from linear_stage_control.gui_app import estimate_run_duration
 
         points = points_from_records([{"x_mm": 3, "y_mm": 4}, {"x_mm": 6, "y_mm": 8}])
@@ -957,8 +1016,32 @@ class GuiSmokeTests(unittest.TestCase):
 
         estimate = estimate_run_duration(points, config)
 
-        self.assertAlmostEqual(estimate.seconds, 1.42, places=6)
+        self.assertAlmostEqual(estimate.seconds, 13.34, places=6)
+        self.assertEqual(len(estimate.capture_cumulative_s), 2)
+        self.assertLess(estimate.capture_cumulative_s[-1], estimate.seconds)
+        self.assertIn("준비 2초", estimate.detail)
+        self.assertIn("원점 8초", estimate.detail)
         self.assertIn("안정화 0.4초", estimate.detail)
+        self.assertIn("위치 0.2초", estimate.detail)
+        self.assertIn("저장/UI 0.76초", estimate.detail)
+        self.assertIn("종료 0.66초", estimate.detail)
+
+    def test_run_timing_display_scales_remaining_from_phase_plan(self) -> None:
+        import time
+
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.start_run_timing(2, 20.0, (10.0, 15.0))
+        window.run_started_monotonic = time.monotonic() - 5.0
+        window.run_completed_captures = 1
+
+        window.update_run_timing_display()
+        app.processEvents()
+
+        self.assertIn("남은 5초", window.progress_detail_label.text())
+        window.close()
 
     def test_preview_zoom_grid_and_cross_render_without_hardware(self) -> None:
         from linear_stage_control.gui_app import MainWindow

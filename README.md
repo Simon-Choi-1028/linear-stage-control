@@ -24,11 +24,8 @@
   <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest">
     <img src="https://img.shields.io/github/v/release/Simon-Choi-1028/linear-stage-control?label=release" alt="latest release">
   </a>
-  <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup.exe">
-    <img src="https://img.shields.io/badge/download-online%20setup-2f8f68" alt="download online setup">
-  </a>
-  <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup-Offline.exe">
-    <img src="https://img.shields.io/badge/download-offline%20setup-5b6ee1" alt="download offline setup">
+  <a href="https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControl-Portable.zip">
+    <img src="https://img.shields.io/badge/download-portable%20zip-2f8f68" alt="download portable zip">
   </a>
 </p>
 
@@ -36,12 +33,11 @@
 
 | 구분 | 다운로드 | 용도 | 포함 항목 |
 | --- | --- | --- | --- |
-| 온라인 설치본 | [LinearStageControlSetup.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup.exe) | 인터넷 연결이 가능한 PC의 기본 설치 | 앱, Zaber Motion Library, Zaber Device Database |
-| 오프라인 설치본 | [LinearStageControlSetup-Offline.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup-Offline.exe) | 현장 PC가 인터넷 접근이 어렵거나 pylon Runtime을 미리 묶어야 할 때 | 온라인 설치본 + Basler pylon Runtime installer |
-| 검증 manifest | [update_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/update_manifest.json) | 자동 업데이트 SHA256 검증 | 설치 파일 hash, 크기, 채널 정보 |
+| Portable ZIP | [LinearStageControl-Portable.zip](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControl-Portable.zip) | 설치기 EXE 없이 압축 해제 후 실행 | 앱, Zaber Motion Library, Zaber Device Database |
+| Portable manifest | [portable_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/portable_manifest.json) | portable ZIP SHA256 검증 | ZIP 파일 hash, 크기, 진입점 |
 
-- Current public release: `v0.1.6`
-- Current local verification candidate: `v0.1.6`
+- Current public release: `v0.1.7`
+- Current local verification candidate: `v0.1.7`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -99,13 +95,13 @@ GUI 실행은 아래 명령을 사용합니다.
 python scripts\launch_gui.py
 ```
 
-GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접 입력, CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 위치 import, CSV export, 데이터셋 저장 위치 선택, 촬영 시작/중지, 촬영 이미지 미리보기, 캡처 목록 확인을 할 수 있습니다. 촬영 전 점검에는 안정화 시간을 포함한 예상 소요시간이 표시되고, 촬영 중에는 `진행` 영역에 연결, 원점 복귀, 위치 이동, 안정화 대기, 촬영, 저장 같은 현재 단계와 완료 개수, 경과 시간, 남은 시간, 예상 종료시각이 표시됩니다. 촬영된 이미지는 오른쪽 `촬영 목록`을 클릭하면 다시 볼 수 있고, 선택한 사진의 target/actual 위치와 um 단위 오차는 미리보기 아래의 표 칸에 나뉘어 표시됩니다.
+GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접 입력, CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 위치 import, CSV export, 데이터셋 저장 위치 선택, 촬영 시작/중지, 촬영 이미지 미리보기, 캡처 목록 확인을 할 수 있습니다. 촬영 전 점검에는 준비, 원점 복귀, 이동, 위치 확인, 안정화, 촬영, 저장/UI, 종료 export를 포함한 예상 소요시간이 표시되고, 촬영 중에는 `진행` 영역에 연결, 원점 복귀, 위치 이동, 안정화 대기, 촬영, 저장 같은 현재 단계와 완료 개수, 경과 시간, 남은 시간, 예상 종료시각이 표시됩니다. 촬영된 이미지는 오른쪽 `촬영 목록`을 클릭하면 다시 볼 수 있고, 선택한 사진의 target/actual 위치와 um 단위 오차는 미리보기 아래의 표 칸에 나뉘어 표시됩니다.
 
 위치 테이블은 Zaber 210 mm XY 스테이지 이동 범위 기준으로 `0-210 mm`를 즉시 검사합니다. 각 행에는 `X`, `Y`뿐 아니라 선택 입력인 `속도 mm/s`, `캡쳐 수`를 넣을 수 있습니다. 속도나 캡쳐 수를 비우면 촬영 설정의 이동속도와 기본 캡쳐 수를 사용합니다. 범위를 벗어난 X/Y 셀은 빨간색, 중복 좌표나 빈 라벨 같은 확인 항목은 노란색으로 표시되며, 테이블 아래 상태 줄에 오류/경고 요약이 표시됩니다.
 
 `시작`을 누르면 촬영 전 점검 창이 먼저 열립니다. 이 창은 위치 범위, Basler 카메라 감지 여부, Zaber COM 포트, X/Y 축 매핑 중복, 저장 폴더 생성 가능 여부, 이동 속도, 촬영 설정, 고정 오차 기준을 한 번에 확인합니다. 오류가 있으면 시작 버튼이 비활성화되고, 경고만 있을 때는 사용자가 내용을 확인한 뒤 계속 진행할 수 있습니다.
 
-촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`이 들어갑니다. 기본 메타데이터 출력은 `captures.csv`, `captures.jsonl`, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`이고, 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
+촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`, `좌우 반전`, `상하 반전`이 들어갑니다. 기본 메타데이터 출력은 `captures.csv`, `captures.jsonl`, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`이고, 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
 
 화면에 보이는 숫자는 불필요한 0을 줄여 표시합니다. mm 위치값은 최대 4자리, um 오차값은 최대 2자리까지만 보여주며, `captures.csv`와 `captures.jsonl`에는 계산 원본 값이 그대로 저장됩니다.
 
@@ -133,7 +129,7 @@ GUI의 실행 상태는 `AppRunState` enum으로 관리합니다. 촬영, 취소
   run_<run_id>.log
 ```
 
-v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 실험 장치의 뒤집힌 카메라 장착을 보정하기 위해 `camera.rotate_180` 기본값은 `true`이며, Live preview와 저장 PNG/NPY에 같은 180도 회전이 적용됩니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 화면은 기본 4:3 frame으로 표시되며, 우하단 resize handle을 대각선으로 끌어 가로/세로 크기를 조정하고 더블클릭으로 기본 4:3 크기로 되돌릴 수 있습니다. 짧은 창에서는 preview panel 내부 스크롤을 사용해 Live 컨트롤과 검사 도구가 카메라 화면 위로 겹치지 않도록 합니다. Live 시작과 첫 프레임의 원본 크기, preview 크기, 렌더 target 크기는 JSONL 로그에 남습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
+v0.1.4부터 카메라 연결 성공 후 `TriggerMode Off` 상태의 continuous live grabbing 세션이 자동으로 시작됩니다. Live worker는 Basler `GrabStrategy_LatestImageOnly` 방식으로 첫 프레임 대기, 수신 중, 오류 상태를 구분 표시합니다. v0.1.5부터 Live 상태에는 설정값이 아니라 실제 rolling FPS가 표시되고, 노출/Gain/Gamma/Black Level/FrameRate는 Live 중 debounce update로 즉시 반영됩니다. 실험 장치의 장착 방향을 보정하기 위해 `camera.rotate_180` 기본값은 `true`이며, 필요하면 `camera.flip_horizontal`, `camera.flip_vertical`로 좌우/상하 반전을 추가할 수 있습니다. Live preview와 저장 PNG/NPY에는 같은 회전/반전 보정이 적용됩니다. `Live 캡처`는 현재 미리보기 화면을 줌/격자/중앙선 포함 그대로 `live_captures` 폴더에 PNG로 저장하고 촬영 목록에 추가합니다. 저장된 이미지를 보고 있는 중에도 `Live 보기`로 즉시 실시간 영상으로 돌아갈 수 있고, 이때 preview zoom/center는 전체 frame fit으로 초기화됩니다. 미리보기 화면은 기본 4:3 frame으로 표시되며, 우하단 resize handle을 대각선으로 끌어 가로/세로 크기를 조정하고 더블클릭으로 기본 4:3 크기로 되돌릴 수 있습니다. 짧은 창에서는 preview panel 내부 스크롤을 사용해 Live 컨트롤과 검사 도구가 카메라 화면 위로 겹치지 않도록 합니다. Live 시작과 첫 프레임의 원본 크기, preview 크기, 렌더 target 크기는 JSONL 로그에 남습니다. 미리보기에는 100-800% 디지털 확대, 클릭 지점 중심 이동, 얇은 흰색 4x4 격자 오버레이, 얇은 흰색 중앙 가로/세로선 표시를 적용할 수 있습니다. 촬영 run을 시작할 때는 live worker를 먼저 정지해 실제 software trigger 캡처와 카메라 점유가 충돌하지 않도록 합니다.
 
 Zaber 축은 `X축 사용`, `Y축 사용` 체크박스로 독립 제어할 수 있습니다. X만 또는 Y만 연결된 현장에서는 비활성 축에 대해 home/move/position 명령을 보내지 않으며, 비활성 축 좌표가 위치 목록 안에서 여러 값으로 바뀌면 preflight 오류로 막습니다. 단일축 run의 비활성 축 actual/error metadata는 빈 값으로 저장됩니다.
 
@@ -190,6 +186,17 @@ GUI의 `Error` 탭에는 캡처별 오차 예측 범위가 캔들차트로 표�
 ```yaml
 scan:
   default_capture_count: 1
+  estimated_setup_s: 2.0
+  estimated_home_s: 8.0
+  estimated_default_move_velocity_mm_s: 10.0
+  estimated_move_overhead_s: 0.10
+  estimated_position_overhead_s: 0.10
+  estimated_capture_trigger_overhead_s: 0.05
+  estimated_capture_overhead_s: 0.35
+  estimated_npy_save_overhead_s: 0.15
+  estimated_ui_capture_overhead_s: 0.03
+  estimated_export_overhead_s: 0.50
+  estimated_export_per_capture_s: 0.02
   positions:
     - label: origin
       x_mm: 0
@@ -263,6 +270,8 @@ camera:
   exposure_us: 5000
   timeout_ms: 5000
   rotate_180: true
+  flip_horizontal: false
+  flip_vertical: false
   live_preview:
     enabled: true
     fps: 10
@@ -306,6 +315,19 @@ powershell -ExecutionPolicy Bypass -File packaging\download_zaber_sdk.ps1
 
 ```text
 dist/LinearStageControl/LinearStageControl.exe
+```
+
+Release portable ZIP build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_portable_release.ps1
+```
+
+Release portable ZIP output:
+
+```text
+dist/LinearStageControl-Portable.zip
+dist/portable_manifest.json
 ```
 
 설치 프로그램이 필요하면 Inno Setup 6을 설치한 뒤 아래 명령을 실행합니다.

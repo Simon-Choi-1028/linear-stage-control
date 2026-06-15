@@ -36,6 +36,7 @@ if (Test-Path -LiteralPath $distTarget) {
 $pyinstallerArgs = @(
   "--noconfirm",
   "--clean",
+  "--noupx",
   "--windowed",
   "--name", "LinearStageControl",
   "--paths", ".",

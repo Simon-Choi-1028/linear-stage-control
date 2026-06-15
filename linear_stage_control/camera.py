@@ -72,6 +72,8 @@ class CameraSettings:
     output_pixel_format: str = "Mono8"
     timeout_ms: int = 5000
     rotate_180: bool = True
+    flip_horizontal: bool = False
+    flip_vertical: bool = False
 
 
 def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
@@ -106,6 +108,8 @@ def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
         output_pixel_format=camera.get("output_pixel_format", "Mono8"),
         timeout_ms=int(camera.get("timeout_ms", 5000)),
         rotate_180=_bool_value(camera.get("rotate_180", True), True, "camera.rotate_180"),
+        flip_horizontal=_bool_value(camera.get("flip_horizontal", False), False, "camera.flip_horizontal"),
+        flip_vertical=_bool_value(camera.get("flip_vertical", False), False, "camera.flip_vertical"),
     )
 
 
@@ -208,7 +212,12 @@ class BaslerCamera:
                     f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                 )
             image = self.converter.Convert(grab_result)
-            return apply_camera_orientation(image.GetArray(), rotate_180=self.settings.rotate_180)
+            return apply_camera_orientation(
+                image.GetArray(),
+                rotate_180=self.settings.rotate_180,
+                flip_horizontal=self.settings.flip_horizontal,
+                flip_vertical=self.settings.flip_vertical,
+            )
         finally:
             grab_result.Release()
 
@@ -273,7 +282,12 @@ class BaslerCamera:
                         "Basler 카메라 캡처에 실패했습니다.",
                         f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                     )
-                array = apply_camera_orientation(grab_result.GetArray(), rotate_180=self.settings.rotate_180)
+                array = apply_camera_orientation(
+                    grab_result.GetArray(),
+                    rotate_180=self.settings.rotate_180,
+                    flip_horizontal=self.settings.flip_horizontal,
+                    flip_vertical=self.settings.flip_vertical,
+                )
                 metadata = _grab_metadata(grab_result, captured_at, completed_at)
                 return array, metadata
             finally:
@@ -326,7 +340,12 @@ class BaslerCamera:
                         continue
                     consecutive_failures = 0
                     yield (
-                        apply_camera_orientation(grab_result.GetArray(), rotate_180=self.settings.rotate_180),
+                        apply_camera_orientation(
+                            grab_result.GetArray(),
+                            rotate_180=self.settings.rotate_180,
+                            flip_horizontal=self.settings.flip_horizontal,
+                            flip_vertical=self.settings.flip_vertical,
+                        ),
                         _grab_metadata(
                             grab_result,
                             captured_at,
@@ -671,11 +690,23 @@ def _normalise_pixel_format_name(value: Any) -> str:
     return str(value or "").strip().replace(" ", "")
 
 
-def apply_camera_orientation(array: np.ndarray, *, rotate_180: bool) -> np.ndarray:
+def apply_camera_orientation(
+    array: np.ndarray,
+    *,
+    rotate_180: bool,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+) -> np.ndarray:
     arr = np.asarray(array)
-    if not rotate_180 or arr.ndim < 2:
+    if arr.ndim < 2:
         return np.ascontiguousarray(arr)
-    return np.ascontiguousarray(np.flip(arr, axis=(0, 1)))
+    if rotate_180:
+        arr = np.flip(arr, axis=(0, 1))
+    if flip_vertical:
+        arr = np.flip(arr, axis=0)
+    if flip_horizontal:
+        arr = np.flip(arr, axis=1)
+    return np.ascontiguousarray(arr)
 
 
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:

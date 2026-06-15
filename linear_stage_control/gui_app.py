@@ -55,7 +55,7 @@ from . import __version__
 from .app_state import AppRunState
 from .camera import iso_timestamp
 from .config import ConfigError, load_config
-from .dataset import validate_image_output_plan
+from .dataset import safe_timestamp, validate_image_output_plan
 from .dataset_exports import DEFAULT_METADATA_FORMATS, DEFAULT_SUMMARY_FORMATS
 from .error_model import (
     ZABER_LDM210_XY_SPECS,
@@ -105,6 +105,7 @@ from .preview_rendering import qimage_from_array, render_preview_qimage
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
+    effective_capture_count,
     effective_move_velocity_mm_s,
     points_from_config,
     points_from_file,
@@ -139,6 +140,17 @@ PREVIEW_MIN_WIDTH = 240
 PREVIEW_MAX_WIDTH = 1600
 PREVIEW_MIN_HEIGHT = 180
 PREVIEW_MAX_HEIGHT = 1200
+DEFAULT_ESTIMATED_SETUP_S = 2.0
+DEFAULT_ESTIMATED_HOME_S = 8.0
+DEFAULT_ESTIMATED_DEFAULT_MOVE_VELOCITY_MM_S = 10.0
+DEFAULT_ESTIMATED_MOVE_OVERHEAD_S = 0.10
+DEFAULT_ESTIMATED_POSITION_OVERHEAD_S = 0.10
+DEFAULT_ESTIMATED_CAPTURE_TRIGGER_OVERHEAD_S = 0.05
+DEFAULT_ESTIMATED_CAPTURE_OVERHEAD_S = 0.35
+DEFAULT_ESTIMATED_NPY_SAVE_OVERHEAD_S = 0.15
+DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S = 0.03
+DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S = 0.50
+DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S = 0.02
 CAMERA_PARAMETER_FIELDS = (
     ("gain", "Gain", "예: 0"),
     ("acquisition_frame_rate", "FrameRate", "Hz"),
@@ -176,6 +188,7 @@ class PreflightIssue:
 class RunDurationEstimate:
     seconds: float
     detail: str
+    capture_cumulative_s: tuple[float, ...] = ()
 
 
 def estimate_run_duration(
@@ -189,14 +202,63 @@ def estimate_run_duration(
 
     stage_settings = stage_settings_from_config(config)
     default_capture_count = default_capture_count_from_config(config)
+    scan = config.get("scan", {})
+    dataset = config.get("dataset", {})
     capture_total = total_capture_count(points, default_capture_count)
-    settle_total_s = max(0.0, stage_settings.settle_s) * len(points)
-    exposure_total_s = max(0.0, _float_config_value(config.get("camera", {}).get("exposure_us"), 0.0))
-    exposure_total_s = exposure_total_s * capture_total / 1_000_000.0
+    camera = config.get("camera", {})
+    exposure_per_capture_s = max(0.0, _float_config_value(camera.get("exposure_us"), 0.0)) / 1_000_000.0
+    setup_s = _non_negative_timing_value(scan, "estimated_setup_s", DEFAULT_ESTIMATED_SETUP_S)
+    home_s = _non_negative_timing_value(scan, "estimated_home_s", DEFAULT_ESTIMATED_HOME_S)
+    default_move_velocity = max(
+        0.001,
+        _non_negative_timing_value(
+            scan,
+            "estimated_default_move_velocity_mm_s",
+            DEFAULT_ESTIMATED_DEFAULT_MOVE_VELOCITY_MM_S,
+        ),
+    )
+    move_overhead_s = _non_negative_timing_value(scan, "estimated_move_overhead_s", DEFAULT_ESTIMATED_MOVE_OVERHEAD_S)
+    position_overhead_s = _non_negative_timing_value(
+        scan,
+        "estimated_position_overhead_s",
+        DEFAULT_ESTIMATED_POSITION_OVERHEAD_S,
+    )
+    trigger_overhead_s = _non_negative_timing_value(
+        scan,
+        "estimated_capture_trigger_overhead_s",
+        DEFAULT_ESTIMATED_CAPTURE_TRIGGER_OVERHEAD_S,
+    )
+    capture_overhead_s = _non_negative_timing_value(
+        scan,
+        "estimated_capture_overhead_s",
+        DEFAULT_ESTIMATED_CAPTURE_OVERHEAD_S,
+    )
+    npy_overhead_s = (
+        _non_negative_timing_value(scan, "estimated_npy_save_overhead_s", DEFAULT_ESTIMATED_NPY_SAVE_OVERHEAD_S)
+        if bool(dataset.get("save_numpy", False))
+        else 0.0
+    )
+    ui_overhead_s = _non_negative_timing_value(
+        scan,
+        "estimated_ui_capture_overhead_s",
+        DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S,
+    )
+    export_s = _estimated_export_duration_s(scan, dataset, capture_total)
 
+    total_s = setup_s
+    setup_total_s = setup_s
+    home_total_s = home_s if stage_settings.home_on_start and not skip_home else 0.0
+    total_s += home_total_s
     move_total_s = 0.0
-    unknown_start_moves = 0
-    unknown_velocity_moves = 0
+    position_overhead_total_s = 0.0
+    settle_total_s = 0.0
+    exposure_total_s = 0.0
+    trigger_total_s = 0.0
+    save_total_s = 0.0
+    ui_total_s = 0.0
+    capture_cumulative: list[float] = []
+    fallback_velocity_moves = 0
+    worst_case_start_moves = 0
     previous_x: float | None
     previous_y: float | None
     previous_known: bool
@@ -212,33 +274,114 @@ def estimate_run_duration(
     for point in points:
         move_velocity = effective_move_velocity_mm_s(point, stage_settings.move_velocity_mm_s)
         if move_velocity is None:
-            unknown_velocity_moves += 1
-        elif previous_known and previous_x is not None and previous_y is not None:
+            move_velocity = default_move_velocity
+            fallback_velocity_moves += 1
+        if previous_known and previous_x is not None and previous_y is not None:
             dx = point.x_mm - previous_x if stage_settings.x.enabled else 0.0
             dy = point.y_mm - previous_y if stage_settings.y.enabled else 0.0
-            move_total_s += math.hypot(dx, dy) / move_velocity
+            move_distance_mm = math.hypot(dx, dy)
         else:
-            unknown_start_moves += 1
+            move_distance_mm = _unknown_start_distance_mm(point, stage_settings)
+            worst_case_start_moves += 1
+        move_s = move_distance_mm / max(0.001, move_velocity) + move_overhead_s
+        move_total_s += move_s
+        total_s += move_s
         previous_x = point.x_mm
         previous_y = point.y_mm
         previous_known = True
 
-    total_s = settle_total_s + exposure_total_s + move_total_s
+        position_overhead_total_s += position_overhead_s
+        total_s += position_overhead_s
+        settle_total_s += max(0.0, stage_settings.settle_s)
+        total_s += max(0.0, stage_settings.settle_s)
+
+        capture_count = effective_capture_count(point, default_capture_count)
+        for _capture_index in range(capture_count):
+            exposure_total_s += exposure_per_capture_s
+            trigger_total_s += trigger_overhead_s
+            save_total_s += capture_overhead_s + npy_overhead_s
+            ui_total_s += ui_overhead_s
+            total_s += exposure_per_capture_s + trigger_overhead_s + capture_overhead_s + npy_overhead_s + ui_overhead_s
+            capture_cumulative.append(total_s)
+
+    total_s += export_s
     notes: list[str] = []
-    if stage_settings.home_on_start and not skip_home:
-        notes.append("원점 복귀 시간 제외")
-    elif unknown_start_moves:
-        notes.append("현재 위치-첫 위치 이동 시간 제외")
-    if unknown_velocity_moves:
-        notes.append(f"속도 미지정 이동 {unknown_velocity_moves}개 제외")
+    if worst_case_start_moves:
+        notes.append("첫 이동은 가능한 현재 위치 최장거리 기준")
+    if fallback_velocity_moves:
+        notes.append(f"속도 미지정 이동 {fallback_velocity_moves}개는 {_number_text(default_move_velocity)} mm/s 추정")
 
     detail = (
-        f"예상 {_duration_text(total_s)} | 안정화 {_duration_text(settle_total_s)} + "
-        f"노출 {_duration_text(exposure_total_s)} + 계산 가능 이동 {_duration_text(move_total_s)}"
+        f"예상 {_duration_text(total_s)} | 준비 {_duration_text(setup_total_s)} + "
+        f"원점 {_duration_text(home_total_s)} + 이동 {_duration_text(move_total_s)} + "
+        f"위치 {_duration_text(position_overhead_total_s)} + 안정화 {_duration_text(settle_total_s)} + "
+        f"촬영 {_duration_text(exposure_total_s + trigger_total_s)} + 저장/UI {_duration_text(save_total_s + ui_total_s)} + "
+        f"종료 {_duration_text(export_s)}"
     )
     if notes:
         detail += f" | {', '.join(notes)}"
-    return RunDurationEstimate(total_s, detail)
+    return RunDurationEstimate(total_s, detail, tuple(capture_cumulative))
+
+
+def _non_negative_timing_value(scan: dict[str, Any], key: str, default: float) -> float:
+    return max(0.0, _float_config_value(scan.get(key), default))
+
+
+def _unknown_start_distance_mm(point: ScanPoint, stage_settings: Any) -> float:
+    x_distances = (0.0,)
+    y_distances = (0.0,)
+    if stage_settings.x.enabled:
+        x_distances = (
+            abs(point.x_mm - POSITION_MIN_MM),
+            abs(point.x_mm - POSITION_MAX_MM),
+        )
+    if stage_settings.y.enabled:
+        y_distances = (
+            abs(point.y_mm - POSITION_MIN_MM),
+            abs(point.y_mm - POSITION_MAX_MM),
+        )
+    return max(math.hypot(dx, dy) for dx in x_distances for dy in y_distances)
+
+
+def _estimated_export_duration_s(scan: dict[str, Any], dataset: dict[str, Any], capture_total: int) -> float:
+    metadata_formats = _normalised_format_set(
+        dataset.get("metadata_formats"),
+        DEFAULT_METADATA_FORMATS if bool(dataset.get("write_jsonl", True)) else ("csv",),
+    )
+    summary_formats = _normalised_format_set(dataset.get("summary_formats"), DEFAULT_SUMMARY_FORMATS)
+    streamed_metadata = {"csv", "jsonl"}
+    post_run_metadata = metadata_formats - streamed_metadata
+    has_post_run_work = bool(post_run_metadata or summary_formats)
+    if not has_post_run_work:
+        return 0.0
+    fixed_s = _non_negative_timing_value(scan, "estimated_export_overhead_s", DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S)
+    per_capture_s = _non_negative_timing_value(
+        scan,
+        "estimated_export_per_capture_s",
+        DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S,
+    )
+    format_multiplier = max(1, len(post_run_metadata))
+    return fixed_s + per_capture_s * capture_total * format_multiplier
+
+
+def _normalised_format_set(value: Any, default: tuple[str, ...]) -> set[str]:
+    if value is None:
+        items = default
+    elif isinstance(value, str):
+        items = tuple(item.strip() for item in value.split(","))
+    else:
+        try:
+            items = tuple(str(item).strip() for item in value)
+        except TypeError:
+            items = (str(value).strip(),)
+    result: set[str] = set()
+    for item in items:
+        normalised = item.lower().lstrip(".")
+        if normalised == "yml":
+            normalised = "yaml"
+        if normalised:
+            result.add(normalised)
+    return result
 
 
 def _duration_text(seconds: float) -> str:
@@ -316,6 +459,7 @@ class MainWindow(QMainWindow):
         self.run_completed_captures = 0
         self.run_total_captures = 0
         self.run_estimated_total_s = 0.0
+        self.run_capture_cumulative_estimates_s: tuple[float, ...] = ()
         self.preview_base_size = QSize(PREVIEW_DEFAULT_WIDTH, self._aspect_height(PREVIEW_DEFAULT_WIDTH))
         self.preview_base_min_height = self.preview_base_size.height()
         self.preview_user_size: QSize | None = None
@@ -530,6 +674,8 @@ class MainWindow(QMainWindow):
             self.refresh_button.setEnabled(not blocked and not camera_scanning and not diagnostics)
         if hasattr(self, "camera_scan_button"):
             self.camera_scan_button.setEnabled(not blocked and not camera_scanning and not diagnostics)
+        if hasattr(self, "live_capture_button"):
+            self.live_capture_button.setEnabled(not blocked)
         if hasattr(self, "update_button"):
             self.update_button.setEnabled(not blocked and not update_busy)
         if hasattr(self, "run_diagnostics_button"):
@@ -1035,6 +1181,8 @@ class MainWindow(QMainWindow):
         self.skip_home_check = QCheckBox("원점 복귀 생략")
         self.camera_rotate_180_check = QCheckBox("카메라 180도 반전")
         self.camera_rotate_180_check.setChecked(True)
+        self.camera_flip_horizontal_check = QCheckBox("좌우 반전")
+        self.camera_flip_vertical_check = QCheckBox("상하 반전")
         self.metadata_format_checks = self._format_checks(DEFAULT_METADATA_FORMATS)
         self.summary_format_checks = self._format_checks(DEFAULT_SUMMARY_FORMATS)
         self.exposure_row = ParameterAdjustRow(
@@ -1093,6 +1241,8 @@ class MainWindow(QMainWindow):
             lambda _text="": self.schedule_live_parameter_update(restart_required=True)
         )
         self.camera_rotate_180_check.toggled.connect(lambda _checked=False: self.schedule_live_parameter_update())
+        self.camera_flip_horizontal_check.toggled.connect(lambda _checked=False: self.schedule_live_parameter_update())
+        self.camera_flip_vertical_check.toggled.connect(lambda _checked=False: self.schedule_live_parameter_update())
         for key, edit in self.camera_parameter_edits.items():
             edit.editingFinished.connect(
                 lambda key=key: self.schedule_live_parameter_update(
@@ -1134,6 +1284,8 @@ class MainWindow(QMainWindow):
                 self.save_numpy_check,
                 self.skip_home_check,
                 self.camera_rotate_180_check,
+                self.camera_flip_horizontal_check,
+                self.camera_flip_vertical_check,
             )
         ):
             layout.addWidget(check, index // 2, index % 2)
@@ -1174,6 +1326,8 @@ class MainWindow(QMainWindow):
         self.save_numpy_check.setToolTip("원본 배열을 NPY로 추가 저장합니다. 기본값: 꺼짐")
         self.skip_home_check.setToolTip("run 시작 시 Zaber 원점 복귀를 생략합니다. 기본값: 꺼짐")
         self.camera_rotate_180_check.setToolTip("뒤집혀 장착된 Basler 카메라 화면과 저장 이미지를 180도 회전합니다.")
+        self.camera_flip_horizontal_check.setToolTip("Live 화면과 저장 이미지를 좌우로 반전합니다.")
+        self.camera_flip_vertical_check.setToolTip("Live 화면과 저장 이미지를 상하로 반전합니다.")
         for name, check in self.metadata_format_checks.items():
             check.setToolTip(f"run 종료 후 captures.{name} 메타데이터를 저장합니다.")
         for name, check in self.summary_format_checks.items():
@@ -1413,10 +1567,12 @@ class MainWindow(QMainWindow):
         self.fullscreen_button.setEnabled(False)
         self.fullscreen_button.clicked.connect(self.open_fullscreen_image)
         self.live_button = QPushButton("Live")
+        self.live_capture_button = QPushButton("Live 캡처")
         self.live_stop_button = QPushButton("정지")
         self.live_retry_button = QPushButton("재연결")
         self.live_scan_button = QPushButton("재검색")
         self.live_button.setProperty("variant", "primary")
+        self.live_capture_button.setProperty("variant", "quiet")
         self.live_stop_button.setProperty("variant", "danger")
         self.live_retry_button.setProperty("variant", "quiet")
         self.live_scan_button.setProperty("variant", "quiet")
@@ -1429,6 +1585,7 @@ class MainWindow(QMainWindow):
         self.live_size_reset_button.setMinimumWidth(64)
         self.live_size_reset_button.setToolTip("Live/이미지 미리보기 높이를 현재 레이아웃의 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
+        _apply_button_icon(self.live_capture_button, QStyle.SP_DialogSaveButton, "현재 Live 미리보기 화면을 PNG로 저장합니다.")
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
         _apply_button_icon(
             self.live_retry_button, QStyle.SP_BrowserReload, "현재 선택한 카메라로 Live preview를 다시 연결합니다."
@@ -1439,6 +1596,7 @@ class MainWindow(QMainWindow):
             "Basler 카메라를 재검색한 뒤 Live preview를 다시 시도합니다.",
         )
         self.live_button.clicked.connect(self.show_live_preview)
+        self.live_capture_button.clicked.connect(self.capture_live_preview)
         self.live_stop_button.clicked.connect(lambda: self.stop_live_preview(wait_ms=1500))
         self.live_retry_button.clicked.connect(self.restart_live_preview_from_button)
         self.live_scan_button.clicked.connect(lambda: self.start_camera_scan("live_recover"))
@@ -1457,10 +1615,11 @@ class MainWindow(QMainWindow):
         preview_info_grid.addWidget(self.preview_info_label, 0, 0, 1, 4)
         preview_info_grid.addWidget(self.live_status_label, 0, 4, 1, 2)
         preview_info_grid.addWidget(self.live_button, 1, 0)
-        preview_info_grid.addWidget(self.live_stop_button, 1, 1)
-        preview_info_grid.addWidget(self.live_retry_button, 1, 2)
-        preview_info_grid.addWidget(self.live_scan_button, 1, 3)
-        preview_info_grid.addWidget(self.fullscreen_button, 1, 4)
+        preview_info_grid.addWidget(self.live_capture_button, 1, 1)
+        preview_info_grid.addWidget(self.live_stop_button, 1, 2)
+        preview_info_grid.addWidget(self.live_retry_button, 1, 3)
+        preview_info_grid.addWidget(self.live_scan_button, 1, 4)
+        preview_info_grid.addWidget(self.fullscreen_button, 1, 5)
         preview_info_grid.setColumnMinimumWidth(5, 80)
         preview_info_grid.setColumnStretch(0, 1)
         preview_info_grid.setColumnStretch(1, 1)
@@ -1713,6 +1872,8 @@ class MainWindow(QMainWindow):
         self._apply_camera_parameter_values(camera)
         self.software_trigger_check.setChecked(_bool_config_value(camera.get("use_software_trigger", True), True))
         self.camera_rotate_180_check.setChecked(_bool_config_value(camera.get("rotate_180", True), True))
+        self.camera_flip_horizontal_check.setChecked(_bool_config_value(camera.get("flip_horizontal", False), False))
+        self.camera_flip_vertical_check.setChecked(_bool_config_value(camera.get("flip_vertical", False), False))
         self.save_numpy_check.setChecked(bool(dataset.get("save_numpy", False)))
         self.skip_home_check.setChecked(False)
         axes = stage.get("axes", {})
@@ -1901,6 +2062,9 @@ class MainWindow(QMainWindow):
         camera["pixel_format"] = self.pixel_format_combo.currentText()
         camera["exposure_us"] = self.exposure_spin.value()
         self._apply_camera_parameter_config(camera)
+        camera["rotate_180"] = self.camera_rotate_180_check.isChecked()
+        camera["flip_horizontal"] = self.camera_flip_horizontal_check.isChecked()
+        camera["flip_vertical"] = self.camera_flip_vertical_check.isChecked()
         camera["use_software_trigger"] = False
         camera["trigger_mode"] = "Off"
         camera["timeout_ms"] = max(1000, int(camera.get("timeout_ms", 5000) or 5000))
@@ -2048,6 +2212,64 @@ class MainWindow(QMainWindow):
         self.live_status_label.setText(f"Live {fps_text}")
         timestamp = metadata.get("completed_at") or metadata.get("captured_at") or ""
         self.preview_info_label.setText(f"Live preview 표시 중 {timestamp}".strip())
+
+    def capture_live_preview(self) -> None:
+        if self.preview_mode != "live":
+            QMessageBox.information(self, "Live 캡처", "Live 화면이 표시 중일 때 캡처할 수 있습니다.")
+            return
+        pixmap = self.preview_label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            QMessageBox.information(self, "Live 캡처", "저장할 Live 화면이 아직 없습니다.")
+            return
+        try:
+            output_root = self.output_root_edit.text() or "output/datasets"
+            live_dir = Path(os.path.expandvars(os.path.expanduser(output_root))) / "live_captures"
+            live_dir.mkdir(parents=True, exist_ok=True)
+            image_path = live_dir / f"live_{safe_timestamp()}.png"
+            if not pixmap.copy().save(str(image_path), "PNG"):
+                raise OSError(f"PNG 저장 실패: {image_path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Live 캡처 실패", str(exc))
+            return
+
+        self.add_live_capture_row(image_path)
+        self.preview_info_label.setText(f"Live 캡처 저장: {image_path.name}")
+        self.log(f"Live 캡처 저장: {image_path}")
+
+    def add_live_capture_row(self, image_path: Path) -> None:
+        row = self.captures_table.rowCount()
+        self.captures_table.insertRow(row)
+        record = {
+            "status": "live_capture",
+            "label": "Live 캡처",
+            "image_path": str(image_path),
+            "image_filename": image_path.name,
+            "absolute_image_path": str(image_path),
+        }
+        values = [
+            "Live",
+            "-",
+            "Live 캡처",
+            "저장",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            str(image_path),
+        ]
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            if column != 12:
+                item.setTextAlignment(Qt.AlignCenter)
+            item.setData(Qt.UserRole, str(image_path))
+            item.setData(Qt.UserRole + 1, record)
+            self.captures_table.setItem(row, column, item)
+        self.preview_tabs.setCurrentIndex(0)
 
     def on_live_failed(self, message: str) -> None:
         self.live_status_label.setText("Live 오류")
@@ -2679,6 +2901,8 @@ class MainWindow(QMainWindow):
         self._apply_camera_parameter_config(camera)
         camera["use_software_trigger"] = self.software_trigger_check.isChecked()
         camera["rotate_180"] = self.camera_rotate_180_check.isChecked()
+        camera["flip_horizontal"] = self.camera_flip_horizontal_check.isChecked()
+        camera["flip_vertical"] = self.camera_flip_vertical_check.isChecked()
         camera.setdefault("trigger_selector", "FrameStart")
         camera.setdefault("trigger_source", "Software")
         camera.setdefault("timeout_ms", 5000)
@@ -2716,6 +2940,17 @@ class MainWindow(QMainWindow):
 
         resolved_points = points if points is not None else self.read_positions()
         scan["default_capture_count"] = self.capture_count_spin.value()
+        scan.setdefault("estimated_setup_s", DEFAULT_ESTIMATED_SETUP_S)
+        scan.setdefault("estimated_home_s", DEFAULT_ESTIMATED_HOME_S)
+        scan.setdefault("estimated_default_move_velocity_mm_s", DEFAULT_ESTIMATED_DEFAULT_MOVE_VELOCITY_MM_S)
+        scan.setdefault("estimated_move_overhead_s", DEFAULT_ESTIMATED_MOVE_OVERHEAD_S)
+        scan.setdefault("estimated_position_overhead_s", DEFAULT_ESTIMATED_POSITION_OVERHEAD_S)
+        scan.setdefault("estimated_capture_trigger_overhead_s", DEFAULT_ESTIMATED_CAPTURE_TRIGGER_OVERHEAD_S)
+        scan.setdefault("estimated_capture_overhead_s", DEFAULT_ESTIMATED_CAPTURE_OVERHEAD_S)
+        scan.setdefault("estimated_npy_save_overhead_s", DEFAULT_ESTIMATED_NPY_SAVE_OVERHEAD_S)
+        scan.setdefault("estimated_ui_capture_overhead_s", DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S)
+        scan.setdefault("estimated_export_overhead_s", DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S)
+        scan.setdefault("estimated_export_per_capture_s", DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S)
         scan["positions"] = [_point_config_record(point) for point in resolved_points]
         scan["positions_file"] = None
         return config
@@ -3025,7 +3260,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, capture_total)
         self.progress_bar.setValue(0)
         self.set_run_status("촬영 준비 중")
-        self.start_run_timing(capture_total, duration_estimate.seconds)
+        self.start_run_timing(capture_total, duration_estimate.seconds, duration_estimate.capture_cumulative_s)
         self.apply_state(AppRunState.ACQUIRING)
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_status_label.setText("카메라 검색 종료 대기 중...")
@@ -3068,11 +3303,17 @@ class MainWindow(QMainWindow):
         self.run_total_captures = total
         self.update_run_timing_display()
 
-    def start_run_timing(self, total: int, estimated_total_s: float) -> None:
+    def start_run_timing(
+        self,
+        total: int,
+        estimated_total_s: float,
+        capture_cumulative_s: tuple[float, ...] = (),
+    ) -> None:
         self.run_started_monotonic = time.monotonic()
         self.run_completed_captures = 0
         self.run_total_captures = total
         self.run_estimated_total_s = max(0.0, estimated_total_s)
+        self.run_capture_cumulative_estimates_s = tuple(max(0.0, item) for item in capture_cumulative_s)
         self.run_timing_timer.start()
         self.update_run_timing_display()
 
@@ -3082,7 +3323,16 @@ class MainWindow(QMainWindow):
         elapsed_s = max(0.0, time.monotonic() - self.run_started_monotonic)
         completed = max(0, self.run_completed_captures)
         total = max(0, self.run_total_captures)
-        if total > 0 and completed > 0:
+        if total > 0 and completed > 0 and self.run_capture_cumulative_estimates_s:
+            index = min(completed, len(self.run_capture_cumulative_estimates_s)) - 1
+            planned_completed_s = max(0.0, self.run_capture_cumulative_estimates_s[index])
+            planned_remaining_s = max(0.0, self.run_estimated_total_s - planned_completed_s)
+            if planned_completed_s > 0:
+                pace = elapsed_s / planned_completed_s
+                estimated_total_s = max(elapsed_s, elapsed_s + planned_remaining_s * pace)
+            else:
+                estimated_total_s = max(elapsed_s, self.run_estimated_total_s)
+        elif total > 0 and completed > 0:
             estimated_total_s = max(elapsed_s, elapsed_s * total / completed)
         else:
             estimated_total_s = max(elapsed_s, self.run_estimated_total_s)
@@ -3102,6 +3352,7 @@ class MainWindow(QMainWindow):
         total = max(0, self.run_total_captures)
         self.progress_detail_label.setText(f"{completed}/{total} 완료 | 총 경과 {_duration_text(elapsed_s)}")
         self.run_started_monotonic = None
+        self.run_capture_cumulative_estimates_s = ()
 
     def on_capture_done(self, record: dict[str, Any]) -> None:
         row = self.captures_table.rowCount()
@@ -3241,6 +3492,24 @@ class MainWindow(QMainWindow):
         self.run_status_label.setText(message)
 
     def update_preview_info(self, record: dict[str, Any]) -> None:
+        if record.get("status") == "live_capture":
+            self.preview_info_label.setText(f"Live 캡처: {record.get('image_filename', '')}".strip())
+            self._set_preview_metric_values(
+                [
+                    "Live",
+                    "-",
+                    str(record.get("label", "Live 캡처")),
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "저장",
+                ]
+            )
+            return
         if record.get("status") != "ok":
             self.preview_info_label.setText(f"촬영 오류: {record.get('error_message', '')}")
             self._set_preview_metric_values(

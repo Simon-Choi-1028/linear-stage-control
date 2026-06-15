@@ -1,6 +1,8 @@
 param(
   [string]$Tag = "",
   [string]$Repo = "Simon-Choi-1028/linear-stage-control",
+  [switch]$PortableOnly,
+  [switch]$IncludePortable,
   [switch]$DryRun
 )
 
@@ -10,6 +12,8 @@ $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 $ManifestPath = Join-Path $Root "dist\update_manifest.json"
 $OnlineSetup = Join-Path $Root "dist\LinearStageControlSetup.exe"
 $OfflineSetup = Join-Path $Root "dist\LinearStageControlSetup-Offline.exe"
+$PortableZip = Join-Path $Root "dist\LinearStageControl-Portable.zip"
+$PortableManifest = Join-Path $Root "dist\portable_manifest.json"
 $ChangeLog = Join-Path $Root "CHANGELOG.md"
 
 function Get-ProjectVersion {
@@ -250,12 +254,27 @@ if (-not $Tag) {
   $Tag = "v$(Get-ProjectVersion)"
 }
 
-Assert-Asset $ManifestPath
-Assert-Asset $OnlineSetup
-if (Test-Path -LiteralPath $OfflineSetup) {
-  $Assets = @($OnlineSetup, $OfflineSetup, $ManifestPath)
+if ($PortableOnly) {
+  Assert-Asset $PortableZip
+  $Assets = @($PortableZip)
+  if (Test-Path -LiteralPath $PortableManifest) {
+    $Assets += $PortableManifest
+  }
 } else {
-  $Assets = @($OnlineSetup, $ManifestPath)
+  Assert-Asset $ManifestPath
+  Assert-Asset $OnlineSetup
+  if (Test-Path -LiteralPath $OfflineSetup) {
+    $Assets = @($OnlineSetup, $OfflineSetup, $ManifestPath)
+  } else {
+    $Assets = @($OnlineSetup, $ManifestPath)
+  }
+  if ($IncludePortable) {
+    Assert-Asset $PortableZip
+    $Assets += $PortableZip
+    if (Test-Path -LiteralPath $PortableManifest) {
+      $Assets += $PortableManifest
+    }
+  }
 }
 
 $Gh = Get-Command gh -ErrorAction SilentlyContinue

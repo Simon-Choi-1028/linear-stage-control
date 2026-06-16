@@ -36,8 +36,8 @@
 | Portable ZIP | [LinearStageControl-Portable.zip](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControl-Portable.zip) | 설치기 EXE 없이 압축 해제 후 실행 | 앱, Zaber Motion Library, Zaber Device Database |
 | Portable manifest | [portable_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/portable_manifest.json) | portable ZIP SHA256 검증 | ZIP 파일 hash, 크기, 진입점 |
 
-- Current public release: `v0.1.7`
-- Current local verification candidate: `v0.1.7`
+- Current public release: `v0.1.8`
+- Current local verification candidate: `v0.1.8`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -95,13 +95,13 @@ GUI 실행은 아래 명령을 사용합니다.
 python scripts\launch_gui.py
 ```
 
-GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접 입력, CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 위치 import, CSV export, 데이터셋 저장 위치 선택, 촬영 시작/중지, 촬영 이미지 미리보기, 캡처 목록 확인을 할 수 있습니다. 촬영 전 점검에는 준비, 원점 복귀, 이동, 위치 확인, 안정화, 촬영, 저장/UI, 종료 export를 포함한 예상 소요시간이 표시되고, 촬영 중에는 `진행` 영역에 연결, 원점 복귀, 위치 이동, 안정화 대기, 촬영, 저장 같은 현재 단계와 완료 개수, 경과 시간, 남은 시간, 예상 종료시각이 표시됩니다. 촬영된 이미지는 오른쪽 `촬영 목록`을 클릭하면 다시 볼 수 있고, 선택한 사진의 target/actual 위치와 um 단위 오차는 미리보기 아래의 표 칸에 나뉘어 표시됩니다.
+GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접 입력, CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 위치 import, CSV export, 데이터셋 저장 위치 선택, 촬영 시작/중지, 촬영 이미지 미리보기, 캡처 목록 확인을 할 수 있습니다. 촬영 전 점검에는 준비, 원점 복귀, 이동, 위치 확인, 안정화, 촬영, 저장/UI, 종료 export를 포함한 예상 소요시간이 표시되고, 촬영 중에는 `진행` 영역에 연결, 원점 복귀, 위치 이동, 안정화 대기, 촬영, 저장 같은 현재 단계와 완료 개수, 경과 시간, 남은 시간, 예상 종료시각이 표시됩니다. 오른쪽 `촬영 목록`은 장시간 run 중 메모리를 보호하기 위해 최근 1,000개만 표시하며, 전체 기록은 run 폴더의 `captures.csv`와 `captures.jsonl`에 저장됩니다. 촬영된 이미지는 `촬영 목록`을 클릭하면 다시 볼 수 있고, 선택한 사진의 target/actual 위치와 um 단위 오차는 미리보기 아래의 표 칸에 나뉘어 표시됩니다.
 
 위치 테이블은 Zaber 210 mm XY 스테이지 이동 범위 기준으로 `0-210 mm`를 즉시 검사합니다. 각 행에는 `X`, `Y`뿐 아니라 선택 입력인 `속도 mm/s`, `캡쳐 수`를 넣을 수 있습니다. 속도나 캡쳐 수를 비우면 촬영 설정의 이동속도와 기본 캡쳐 수를 사용합니다. 범위를 벗어난 X/Y 셀은 빨간색, 중복 좌표나 빈 라벨 같은 확인 항목은 노란색으로 표시되며, 테이블 아래 상태 줄에 오류/경고 요약이 표시됩니다.
 
 `시작`을 누르면 촬영 전 점검 창이 먼저 열립니다. 이 창은 위치 범위, Basler 카메라 감지 여부, Zaber COM 포트, X/Y 축 매핑 중복, 저장 폴더 생성 가능 여부, 이동 속도, 촬영 설정, 고정 오차 기준을 한 번에 확인합니다. 오류가 있으면 시작 버튼이 비활성화되고, 경고만 있을 때는 사용자가 내용을 확인한 뒤 계속 진행할 수 있습니다.
 
-촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`, `좌우 반전`, `상하 반전`이 들어갑니다. 기본 메타데이터 출력은 `captures.csv`, `captures.jsonl`, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`이고, 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
+촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`, `좌우 반전`, `상하 반전`이 들어갑니다. 기본 메타데이터 출력은 run 중 스트리밍 저장되는 `captures.csv`, `captures.jsonl`이고, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`는 필요할 때 체크해서 post-run export로 생성합니다. 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
 
 화면에 보이는 숫자는 불필요한 0을 줄여 표시합니다. mm 위치값은 최대 4자리, um 오차값은 최대 2자리까지만 보여주며, `captures.csv`와 `captures.jsonl`에는 계산 원본 값이 그대로 저장됩니다.
 
@@ -232,10 +232,10 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
   config.yaml
   captures.csv
   captures.jsonl
-  captures.json
-  captures.tsv
-  captures.yaml
-  captures.xlsx
+  captures.json        # optional
+  captures.tsv         # optional
+  captures.yaml        # optional
+  captures.xlsx        # optional
   summary.json
   summary.yaml
   summary.md

@@ -78,9 +78,12 @@ dataset:
   # Raw image output is kept lossless. Supported: tiff, png, bmp.
   image_format: png
   save_numpy: false
-  # Metadata formats are generated per run for analysis, archiving, and papers.
-  metadata_formats: [csv, jsonl, json, tsv, yaml, xlsx]
+  # CSV/JSONL are streamed during the run. Enable json/tsv/yaml/xlsx only when
+  # a post-run export is required for smaller runs.
+  metadata_formats: [csv, jsonl]
   summary_formats: [json, yaml, md]
+  # summary = lightweight manifest; full also hashes every output file.
+  manifest_detail: summary
   write_jsonl: true
 
 calibration:

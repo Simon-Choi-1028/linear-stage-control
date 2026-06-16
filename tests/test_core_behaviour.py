@@ -34,7 +34,12 @@ from linear_stage_control.dataset_exports import (
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
 from linear_stage_control.exceptions import StageConnectionError
 from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
-from linear_stage_control.scan import linear_path_points_by_spacing, points_from_config, points_from_records
+from linear_stage_control.scan import (
+    linear_path_points,
+    linear_path_points_by_spacing,
+    points_from_config,
+    points_from_records,
+)
 from linear_stage_control.stage import (
     AxisAddress,
     StageMoveCancelled,
@@ -141,6 +146,21 @@ class ScanInputTests(unittest.TestCase):
         self.assertEqual([point.x_mm for point in points], [0, 0.3, 0.6, 0.9, 1.0])
         self.assertTrue(all(point.move_velocity_mm_s == 25 for point in points))
         self.assertTrue(all(point.capture_count == 2 for point in points))
+
+    def test_linear_path_allows_two_hundred_thousand_points(self) -> None:
+        points = list(
+            linear_path_points(
+                x_start=0,
+                y_start=0,
+                x_stop=1,
+                y_stop=0,
+                count=200_000,
+            )
+        )
+
+        self.assertEqual(len(points), 200_000)
+        self.assertEqual(points[0].x_mm, 0)
+        self.assertEqual(points[-1].x_mm, 1)
 
     def test_linear_path_accepts_micrometre_spacing_config(self) -> None:
         points = points_from_config(
@@ -256,6 +276,15 @@ class CameraCompatibilityTests(unittest.TestCase):
         np.testing.assert_array_equal(rotated, array[::-1, ::-1])
         np.testing.assert_array_equal(unchanged, array)
         self.assertTrue(rotated.flags.c_contiguous)
+
+    def test_camera_orientation_detaches_arrays_without_transform(self) -> None:
+        array = np.arange(12, dtype=np.uint8).reshape(3, 4)
+
+        detached = apply_camera_orientation(array, rotate_180=False)
+
+        np.testing.assert_array_equal(detached, array)
+        self.assertTrue(detached.flags.c_contiguous)
+        self.assertFalse(np.shares_memory(detached, array))
 
     def test_camera_orientation_flips_arrays_after_rotation(self) -> None:
         array = np.arange(12, dtype=np.uint8).reshape(3, 4)
@@ -632,6 +661,57 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertFalse(loaded.isNull())
             self.assertEqual(loaded.size(), saved_size)
             window.close()
+
+    def test_capture_results_model_keeps_recent_rows_for_large_run(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        base_record = {
+            "status": "ok",
+            "capture_index": 1,
+            "capture_count": 1,
+            "target_x_mm": 1.0,
+            "target_y_mm": 2.0,
+            "actual_x_mm": 1.0,
+            "actual_y_mm": 2.0,
+            "measured_radial_error_um": 0.1,
+            "predicted_min_error_um": 0.0,
+            "predicted_max_error_um": 0.2,
+            "within_error_threshold": True,
+            "max_allowed_error_um": 10.0,
+            "configured_error_budget_um": 5.0,
+            "image_path": "",
+            "absolute_image_path": "",
+        }
+
+        for index in range(20_000):
+            record = dict(base_record)
+            record["index"] = index
+            record["label"] = f"point_{index:06d}"
+            window.on_capture_done(record)
+        window.flush_capture_ui_updates()
+        app.processEvents()
+
+        self.assertEqual(window.capture_results_model.total_seen, 20_000)
+        self.assertLessEqual(window.captures_table.rowCount(), 1000)
+        self.assertEqual(window.run_stats.record_count, 20_000)
+        window.close()
+
+    def test_rapid_preview_and_position_events_are_debounced(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        for index in range(200):
+            window.resize_preview_by_drag(index % 3 - 1, index % 5 - 2)
+            window.schedule_position_feedback()
+        QTest.qWait(320)
+        app.processEvents()
+
+        self.assertGreaterEqual(window.preview_label.width(), 240)
+        self.assertFalse(window.position_feedback_timer.isActive())
+        window.close()
 
     def test_live_first_frame_resets_to_full_frame_fit(self) -> None:
         from linear_stage_control.gui_app import MainWindow
@@ -1019,7 +1099,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         estimate = estimate_run_duration(points, config)
 
-        self.assertAlmostEqual(estimate.seconds, 13.34, places=6)
+        self.assertAlmostEqual(estimate.seconds, 13.22, places=6)
         self.assertEqual(len(estimate.capture_cumulative_s), 2)
         self.assertLess(estimate.capture_cumulative_s[-1], estimate.seconds)
         self.assertIn("준비 2초", estimate.detail)
@@ -1027,7 +1107,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("안정화 0.4초", estimate.detail)
         self.assertIn("위치 0.2초", estimate.detail)
         self.assertIn("저장/UI 0.76초", estimate.detail)
-        self.assertIn("종료 0.66초", estimate.detail)
+        self.assertIn("종료 0.54초", estimate.detail)
 
     def test_run_timing_display_scales_remaining_from_phase_plan(self) -> None:
         import time
@@ -1165,7 +1245,7 @@ class DatasetNamingTests(unittest.TestCase):
     def test_dataset_manifest_includes_version_record_count_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             point = points_from_records([{"label": "sample a", "x_mm": "0", "y_mm": "0"}])[0]
-            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"), manifest_detail="full")
 
             with DatasetRun(settings, {"dataset": {}}, [point], "config.yaml") as dataset:
                 image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
@@ -1195,6 +1275,50 @@ class DatasetNamingTests(unittest.TestCase):
             self.assertEqual(len(image_entries), 1)
             self.assertEqual(image_entries[0]["path"], f"images/{image_path.name}")
             self.assertEqual(image_entries[0]["sha256"], sha256_file(image_path))
+
+    def test_dataset_streams_records_without_accumulating_default_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            points = points_from_records(
+                [{"label": f"sample {index}", "x_mm": str(index / 1000), "y_mm": "0"} for index in range(50)]
+            )
+            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+
+            with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
+                for point in points:
+                    record = base_capture_record(dataset.run_id, point)
+                    record.update({"status": "ok", "capture_index": 1, "capture_count": 1})
+                    dataset.write_capture(record)
+                self.assertEqual(dataset.records, [])
+                self.assertEqual(dataset.stats.record_count, 50)
+                run_dir = dataset.run_dir
+
+            manifest = json.loads((run_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["record_count"], 50)
+            self.assertNotIn("files", manifest)
+            self.assertEqual(summary["record_count"], 50)
+
+    def test_heavy_metadata_exports_are_generated_from_jsonl_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            points = points_from_records(
+                [{"label": f"sample {index}", "x_mm": str(index / 1000), "y_mm": "0"} for index in range(3)]
+            )
+            settings = DatasetSettings(
+                output_root=Path(directory),
+                metadata_formats=("csv", "jsonl", "json", "tsv", "yaml", "xlsx"),
+            )
+
+            with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
+                for point in points:
+                    record = base_capture_record(dataset.run_id, point)
+                    record.update({"status": "ok", "capture_index": 1, "capture_count": 1})
+                    dataset.write_capture(record)
+                run_dir = dataset.run_dir
+
+            self.assertEqual(len(json.loads((run_dir / "captures.json").read_text(encoding="utf-8"))), 3)
+            self.assertTrue((run_dir / "captures.tsv").exists())
+            self.assertTrue((run_dir / "captures.yaml").exists())
+            self.assertTrue((run_dir / "captures.xlsx").exists())
 
 
 class DiagnosticsTests(unittest.TestCase):

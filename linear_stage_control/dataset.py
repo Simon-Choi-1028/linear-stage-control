@@ -17,15 +17,17 @@ from . import __version__
 from .dataset_exports import (
     DEFAULT_METADATA_FORMATS,
     DEFAULT_SUMMARY_FORMATS,
+    POST_RUN_METADATA_FORMATS,
     SUPPORTED_METADATA_FORMATS,
     SUPPORTED_SUMMARY_FORMATS,
-    build_run_summary,
+    RunStatsAccumulator,
+    iter_jsonl_records,
     json_ready,
     normalise_formats,
-    write_records_json,
-    write_records_tsv,
-    write_records_xlsx,
-    write_records_yaml,
+    write_records_json_stream,
+    write_records_tsv_stream,
+    write_records_xlsx_stream,
+    write_records_yaml_stream,
     write_summary_json,
     write_summary_markdown,
     write_summary_yaml,
@@ -42,6 +44,7 @@ class DatasetSettings:
     write_jsonl: bool = True
     metadata_formats: tuple[str, ...] = DEFAULT_METADATA_FORMATS
     summary_formats: tuple[str, ...] = DEFAULT_SUMMARY_FORMATS
+    manifest_detail: str = "summary"
 
 
 def dataset_settings_from_config(
@@ -74,6 +77,7 @@ def dataset_settings_from_config(
             DEFAULT_SUMMARY_FORMATS,
             SUPPORTED_SUMMARY_FORMATS,
         ),
+        manifest_detail=_normalise_manifest_detail(dataset.get("manifest_detail", "summary")),
     )
 
 
@@ -113,10 +117,13 @@ class DatasetRun:
         self.manifest_path = self.run_dir / "dataset_manifest.json"
         self.legacy_manifest_path = self.run_dir / "manifest.json"
         self.config_snapshot_path = self.run_dir / "config.yaml"
+        self.export_source_jsonl_path = self.run_dir / ".captures_export_source.jsonl"
         self.records: list[dict[str, Any]] = []
+        self.stats = RunStatsAccumulator()
         self._csv_file: Any = None
         self._csv_writer: csv.DictWriter | None = None
         self._jsonl_file: Any = None
+        self._jsonl_is_export_source = False
 
     def __enter__(self) -> DatasetRun:
         self.open()
@@ -149,8 +156,10 @@ class DatasetRun:
             self._csv_file = self.csv_path.open("w", newline="", encoding="utf-8")
             self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=CAPTURE_FIELDS)
             self._csv_writer.writeheader()
-            if self.settings.write_jsonl:
-                self._jsonl_file = self.jsonl_path.open("w", encoding="utf-8")
+            if self._needs_jsonl_stream():
+                self._jsonl_is_export_source = not self.settings.write_jsonl
+                jsonl_path = self.export_source_jsonl_path if self._jsonl_is_export_source else self.jsonl_path
+                self._jsonl_file = jsonl_path.open("w", encoding="utf-8")
         except DatasetWriteError:
             raise
         except Exception as exc:
@@ -167,6 +176,8 @@ class DatasetRun:
             if self.run_dir.exists():
                 self._write_post_run_exports(status=status)
                 self._write_manifest(status=status)
+                if self._jsonl_is_export_source and self.export_source_jsonl_path.exists():
+                    self.export_source_jsonl_path.unlink()
         except DatasetWriteError:
             raise
         except Exception as exc:
@@ -189,7 +200,7 @@ class DatasetRun:
     def write_capture(self, record: dict[str, Any]) -> None:
         try:
             clean_record = json_ready(record)
-            self.records.append(clean_record)
+            self.stats.add_record(clean_record)
             row = {field: _csv_value(record.get(field, "")) for field in CAPTURE_FIELDS}
             if self._csv_writer is None:
                 raise RuntimeError("Dataset CSV writer is not open.")
@@ -205,22 +216,21 @@ class DatasetRun:
 
     def _write_post_run_exports(self, status: str) -> None:
         formats = set(self.settings.metadata_formats)
-        records = list(self.records)
-        if "json" in formats:
-            write_records_json(self.metadata_paths["json"], records)
-        if "tsv" in formats:
-            write_records_tsv(self.metadata_paths["tsv"], CAPTURE_FIELDS, records)
-        if "yaml" in formats:
-            write_records_yaml(self.metadata_paths["yaml"], records)
-        if "xlsx" in formats:
-            write_records_xlsx(self.metadata_paths["xlsx"], CAPTURE_FIELDS, records)
+        post_run_formats = formats & POST_RUN_METADATA_FORMATS
+        if post_run_formats:
+            source_path = self._post_run_jsonl_source()
+            if source_path is None:
+                raise DatasetWriteError("Post-run metadata export requires a JSONL stream source.")
+            if "json" in post_run_formats:
+                write_records_json_stream(self.metadata_paths["json"], iter_jsonl_records(source_path))
+            if "tsv" in post_run_formats:
+                write_records_tsv_stream(self.metadata_paths["tsv"], CAPTURE_FIELDS, iter_jsonl_records(source_path))
+            if "yaml" in post_run_formats:
+                write_records_yaml_stream(self.metadata_paths["yaml"], iter_jsonl_records(source_path))
+            if "xlsx" in post_run_formats:
+                write_records_xlsx_stream(self.metadata_paths["xlsx"], CAPTURE_FIELDS, iter_jsonl_records(source_path))
 
-        summary = build_run_summary(
-            run_id=self.run_id,
-            status=status,
-            point_count=len(self.points),
-            records=records,
-        )
+        summary = self.stats.as_summary(run_id=self.run_id, status=status, point_count=len(self.points))
         summary_formats = set(self.settings.summary_formats)
         if "json" in summary_formats:
             write_summary_json(self.summary_paths["json"], summary)
@@ -239,7 +249,7 @@ class DatasetRun:
             "config_path": str(self.config_path),
             "dataset": asdict(self.settings) | {"output_root": str(self.settings.output_root)},
             "point_count": len(self.points),
-            "record_count": len(self.records),
+            "record_count": self.stats.record_count,
             "metadata_files": {
                 key: _relative_manifest_path(path, self.run_dir)
                 for key, path in self.metadata_paths.items()
@@ -252,11 +262,19 @@ class DatasetRun:
             },
             "config_snapshot": _relative_manifest_path(self.config_snapshot_path, self.run_dir),
         }
-        if status != "running":
+        if status != "running" and self.settings.manifest_detail == "full":
             manifest["files"] = self._file_manifest_entries()
         manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2)
         self.manifest_path.write_text(manifest_text, encoding="utf-8")
         self.legacy_manifest_path.write_text(manifest_text, encoding="utf-8")
+
+    def _needs_jsonl_stream(self) -> bool:
+        return self.settings.write_jsonl or bool(set(self.settings.metadata_formats) & POST_RUN_METADATA_FORMATS)
+
+    def _post_run_jsonl_source(self) -> Path | None:
+        if self._jsonl_is_export_source:
+            return self.export_source_jsonl_path if self.export_source_jsonl_path.exists() else None
+        return self.jsonl_path if self.jsonl_path.exists() else None
 
     def _file_manifest_entries(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -469,6 +487,13 @@ def _normalise_image_format(value: Any) -> str:
         allowed_text = ", ".join(sorted(allowed))
         raise ValueError(f"Unsupported image_format: {value}. Use a lossless format: {allowed_text}.")
     return image_format
+
+
+def _normalise_manifest_detail(value: Any) -> str:
+    detail = str(value or "summary").strip().lower()
+    if detail not in {"summary", "full"}:
+        raise ValueError(f"Unsupported manifest_detail: {value}. Use summary or full.")
+    return detail
 
 
 def _sha256_file(path: Path) -> str:

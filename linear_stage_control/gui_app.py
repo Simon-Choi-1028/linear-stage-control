@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 from PIL import Image
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QImage
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -56,13 +56,25 @@ from .app_state import AppRunState
 from .camera import iso_timestamp
 from .config import ConfigError, load_config
 from .dataset import safe_timestamp, validate_image_output_plan
-from .dataset_exports import DEFAULT_METADATA_FORMATS, DEFAULT_SUMMARY_FORMATS
+from .dataset_exports import (
+    DEFAULT_METADATA_FORMATS,
+    DEFAULT_SUMMARY_FORMATS,
+    SUPPORTED_METADATA_FORMATS,
+    RunStatsAccumulator,
+)
 from .error_model import (
     ZABER_LDM210_XY_SPECS,
     error_budget_from_config,
     fixed_calibration_record,
 )
 from .exceptions import StageConnectionError
+from .gui_models import (
+    CAPTURE_DISPLAY_LIMIT,
+    CaptureResultsModel,
+    CaptureResultsView,
+    PositionTableModel,
+    PositionTableView,
+)
 from .gui_style import APP_STYLESHEET
 from .gui_support import (
     app_base_dir,
@@ -94,7 +106,6 @@ from .logging_setup import configure_logging, get_logger
 from .position_validation import (
     POSITION_MAX_MM,
     POSITION_MIN_MM,
-    PositionInputRow,
     PositionValidationResult,
     disabled_axis_variation_errors,
     format_issue_list,
@@ -121,7 +132,6 @@ from .text_formatting import (
     optional_float_text as _optional_float_text,
     optional_int_text as _optional_int_text,
     point_config_record as _point_config_record,
-    position_cell_tooltip as _position_cell_tooltip,
     safe_float_text as _safe_float_text,
     settle_display_text as _settle_display_text,
     stage_settle_seconds_from_config as _stage_settle_seconds_from_config,
@@ -132,7 +142,6 @@ from .text_formatting import (
 from .updater import UpdateInfo, update_settings_from_config
 
 APP_TITLE = "XY 스테이지 캡처"
-POSITION_PLACEHOLDER_ROLE = Qt.UserRole + 50
 PREVIEW_ASPECT_WIDTH = 4
 PREVIEW_ASPECT_HEIGHT = 3
 PREVIEW_DEFAULT_WIDTH = 640
@@ -450,7 +459,12 @@ class MainWindow(QMainWindow):
         self.current_image_path: Path | None = None
         self.preview_mode = "capture"
         self.image_viewer: FullscreenImageWindow | None = None
-        self.error_records: list[dict[str, Any]] = []
+        self.run_stats = RunStatsAccumulator()
+        self.pending_capture_rows: list[tuple[list[str], str, dict[str, Any]]] = []
+        self.last_capture_record: dict[str, Any] | None = None
+        self.last_capture_image_path: str = ""
+        self.last_preview_update_monotonic = 0.0
+        self.pending_status_message = ""
         self._camera_signature: tuple[str, ...] = ()
         self._preferred_camera_serial = ""
         self._camera_user_touched = False
@@ -460,6 +474,7 @@ class MainWindow(QMainWindow):
         self.run_total_captures = 0
         self.run_estimated_total_s = 0.0
         self.run_capture_cumulative_estimates_s: tuple[float, ...] = ()
+        self.last_progress_ui_monotonic = 0.0
         self.preview_base_size = QSize(PREVIEW_DEFAULT_WIDTH, self._aspect_height(PREVIEW_DEFAULT_WIDTH))
         self.preview_base_min_height = self.preview_base_size.height()
         self.preview_user_size: QSize | None = None
@@ -474,6 +489,18 @@ class MainWindow(QMainWindow):
         self.live_settings_timer.setSingleShot(True)
         self.live_settings_timer.setInterval(250)
         self.live_settings_timer.timeout.connect(self.apply_live_parameter_update)
+        self.capture_ui_timer = QTimer(self)
+        self.capture_ui_timer.setSingleShot(True)
+        self.capture_ui_timer.setInterval(250)
+        self.capture_ui_timer.timeout.connect(self.flush_capture_ui_updates)
+        self.run_status_timer = QTimer(self)
+        self.run_status_timer.setSingleShot(True)
+        self.run_status_timer.setInterval(250)
+        self.run_status_timer.timeout.connect(self.flush_run_status)
+        self.position_feedback_timer = QTimer(self)
+        self.position_feedback_timer.setSingleShot(True)
+        self.position_feedback_timer.setInterval(250)
+        self.position_feedback_timer.timeout.connect(self.refresh_position_feedback)
         self.responsive_layout_timer = QTimer(self)
         self.responsive_layout_timer.setSingleShot(True)
         self.responsive_layout_timer.setInterval(80)
@@ -497,6 +524,17 @@ class MainWindow(QMainWindow):
             self._set_camera_scan_state("idle", "대기", "스모크 테스트 모드")
 
     def closeEvent(self, event: object) -> None:
+        for timer_name in (
+            "capture_ui_timer",
+            "run_status_timer",
+            "position_feedback_timer",
+            "responsive_layout_timer",
+            "run_timing_timer",
+            "live_settings_timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
         if self.worker is not None and self.worker.isRunning():
             self.logger.info("close requested during acquisition", extra={"event": "run_close_requested"})
             self.worker.request_stop()
@@ -523,6 +561,10 @@ class MainWindow(QMainWindow):
             self.image_viewer.close()
             self.image_viewer.deleteLater()
             self.image_viewer = None
+        if hasattr(self, "capture_results_model"):
+            self.capture_results_model.clear()
+        if hasattr(self, "positions_model"):
+            self.positions_model.clear()
         self.clear_preview_source()
         super().closeEvent(event)
 
@@ -1183,8 +1225,12 @@ class MainWindow(QMainWindow):
         self.camera_rotate_180_check.setChecked(True)
         self.camera_flip_horizontal_check = QCheckBox("좌우 반전")
         self.camera_flip_vertical_check = QCheckBox("상하 반전")
-        self.metadata_format_checks = self._format_checks(DEFAULT_METADATA_FORMATS)
-        self.summary_format_checks = self._format_checks(DEFAULT_SUMMARY_FORMATS)
+        metadata_format_order = ("csv", "jsonl", "json", "tsv", "yaml", "xlsx")
+        self.metadata_format_checks = self._format_checks(
+            tuple(item for item in metadata_format_order if item in SUPPORTED_METADATA_FORMATS),
+            checked=DEFAULT_METADATA_FORMATS,
+        )
+        self.summary_format_checks = self._format_checks(DEFAULT_SUMMARY_FORMATS, checked=DEFAULT_SUMMARY_FORMATS)
         self.exposure_row = ParameterAdjustRow(
             "노출",
             self.exposure_spin,
@@ -1235,8 +1281,8 @@ class MainWindow(QMainWindow):
         self.output_browse_button.clicked.connect(self.browse_output_root)
         self.exposure_spin.valueChanged.connect(lambda _value=0: self.schedule_live_parameter_update())
         self.settle_unit_combo.currentTextChanged.connect(self._on_settle_unit_changed)
-        self.velocity_edit.textChanged.connect(self.refresh_position_feedback)
-        self.capture_count_spin.valueChanged.connect(self.refresh_position_feedback)
+        self.velocity_edit.textChanged.connect(self.schedule_position_feedback)
+        self.capture_count_spin.valueChanged.connect(self.schedule_position_feedback)
         self.pixel_format_combo.currentTextChanged.connect(
             lambda _text="": self.schedule_live_parameter_update(restart_required=True)
         )
@@ -1251,12 +1297,13 @@ class MainWindow(QMainWindow):
             )
         return group
 
-    def _format_checks(self, formats: tuple[str, ...]) -> dict[str, QCheckBox]:
+    def _format_checks(self, formats: tuple[str, ...], *, checked: tuple[str, ...]) -> dict[str, QCheckBox]:
         checks: dict[str, QCheckBox] = {}
+        checked_set = set(checked)
         for item in formats:
             label = "Markdown" if item == "md" else item.upper()
             check = QCheckBox(label)
-            check.setChecked(True)
+            check.setChecked(item in checked_set)
             checks[item] = check
         return checks
 
@@ -1459,9 +1506,10 @@ class MainWindow(QMainWindow):
         button_grid.addWidget(self.export_csv_button, 1, 1)
         button_grid.addWidget(self.clear_rows_button, 1, 2)
 
-        self.positions_table = QTableWidget(0, 6)
+        self.positions_model = PositionTableModel()
+        self.positions_table = PositionTableView()
+        self.positions_table.setModel(self.positions_model)
         self.positions_table.setAlternatingRowColors(True)
-        self.positions_table.setHorizontalHeaderLabels(["#", "라벨", "X mm", "Y mm", "속도\nmm/s", "캡쳐 수"])
         self.positions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.positions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.positions_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -1470,10 +1518,10 @@ class MainWindow(QMainWindow):
         self.positions_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.positions_table.setToolTip("속도와 캡쳐 수는 비워 두면 촬영 설정의 이동속도/기본 캡쳐 수를 사용합니다.")
         self.positions_table.verticalHeader().setVisible(False)
-        self.positions_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.positions_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.positions_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.positions_table.setMinimumHeight(190)
-        self.positions_table.itemChanged.connect(self.on_position_item_changed)
+        self.positions_model.dataChanged.connect(self.on_position_model_data_changed)
         self.position_status_label = QLabel(f"위치 범위: {_mm_text(POSITION_MIN_MM)}-{_mm_text(POSITION_MAX_MM)} mm")
         self.position_status_label.setObjectName("positionStatus")
         self.position_status_label.setWordWrap(True)
@@ -1717,33 +1765,18 @@ class MainWindow(QMainWindow):
         tabs = self.preview_tabs
         captures_tab = QWidget()
         captures_layout = QVBoxLayout(captures_tab)
-        self.captures_table = QTableWidget(0, 13)
+        self.capture_results_model = CaptureResultsModel(max_rows=CAPTURE_DISPLAY_LIMIT)
+        self.captures_table = CaptureResultsView()
+        self.captures_table.setModel(self.capture_results_model)
         self.captures_table.setAlternatingRowColors(True)
-        self.captures_table.setHorizontalHeaderLabels(
-            [
-                "#",
-                "캡쳐",
-                "라벨",
-                "상태",
-                "목표 X\nmm",
-                "목표 Y\nmm",
-                "실제 X\nmm",
-                "실제 Y\nmm",
-                "반경\num",
-                "예측 하한\num",
-                "예측 상한\num",
-                "판정",
-                "이미지",
-            ]
-        )
-        for column in range(self.captures_table.columnCount()):
+        for column in range(self.capture_results_model.columnCount()):
             self.captures_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.captures_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.captures_table.horizontalHeader().setSectionResizeMode(12, QHeaderView.Stretch)
         self.captures_table.verticalHeader().setVisible(False)
         self.captures_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.captures_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.captures_table.cellClicked.connect(self.preview_capture_row)
+        self.captures_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.captures_table.clicked.connect(self.preview_capture_row)
         captures_layout.addWidget(self.captures_table)
 
         error_tab = QWidget()
@@ -1781,6 +1814,7 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_tab)
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
+        self.log_edit.setMaximumBlockCount(2000)
         log_layout.addWidget(self.log_edit)
 
         tabs.addTab(captures_tab, "촬영 목록")
@@ -2247,8 +2281,6 @@ class MainWindow(QMainWindow):
         self.log(f"Live 캡처 저장: {image_path}")
 
     def add_live_capture_row(self, image_path: Path) -> None:
-        row = self.captures_table.rowCount()
-        self.captures_table.insertRow(row)
         record = {
             "status": "live_capture",
             "label": "Live 캡처",
@@ -2271,14 +2303,7 @@ class MainWindow(QMainWindow):
             "-",
             str(image_path),
         ]
-        for column, value in enumerate(values):
-            item = QTableWidgetItem(value)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            if column != 12:
-                item.setTextAlignment(Qt.AlignCenter)
-            item.setData(Qt.UserRole, str(image_path))
-            item.setData(Qt.UserRole + 1, record)
-            self.captures_table.setItem(row, column, item)
+        self.capture_results_model.append_capture(values, str(image_path), record)
         self.preview_tabs.setCurrentIndex(0)
 
     def on_live_failed(self, message: str) -> None:
@@ -2489,44 +2514,12 @@ class MainWindow(QMainWindow):
         self.log(f"설정 저장됨: {path}")
 
     def add_position_row(self, point: ScanPoint | None = None, update_feedback: bool = True) -> None:
-        previous_block_state = self.positions_table.blockSignals(True)
-        row = self.positions_table.rowCount()
-        try:
-            self.positions_table.insertRow(row)
-            point = point or ScanPoint(row, 0.0, 0.0, "")
-            values = [
-                str(row),
-                point.label,
-                _mm_text(point.x_mm),
-                _mm_text(point.y_mm),
-                "" if point.move_velocity_mm_s is None else _number_text(point.move_velocity_mm_s),
-                "" if point.capture_count is None else str(point.capture_count),
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                if column in (0, 2, 3, 4, 5):
-                    item.setTextAlignment(Qt.AlignCenter)
-                if column == 4:
-                    item.setToolTip("비워 두면 촬영 설정의 이동속도를 사용합니다.")
-                if column == 5:
-                    item.setToolTip("비워 두면 촬영 설정의 기본 캡쳐 수를 사용합니다.")
-                self.positions_table.setItem(row, column, item)
-        finally:
-            self.positions_table.blockSignals(previous_block_state)
+        self.positions_model.add_point(point)
         if update_feedback:
             self.refresh_position_feedback()
 
     def set_positions(self, points: list[ScanPoint]) -> None:
-        previous_block_state = self.positions_table.blockSignals(True)
-        try:
-            self.positions_table.setRowCount(0)
-            for point in points:
-                self.add_position_row(point, update_feedback=False)
-            self.reindex_positions()
-        finally:
-            self.positions_table.blockSignals(previous_block_state)
+        self.positions_model.set_points(points)
         self.refresh_position_feedback()
 
     def read_positions(self) -> list[ScanPoint]:
@@ -2537,24 +2530,21 @@ class MainWindow(QMainWindow):
         return points
 
     def read_positions_with_validation(self) -> tuple[list[ScanPoint], PositionValidationResult]:
-        rows = [
-            PositionInputRow(
-                index=row,
-                label=self._table_text(self.positions_table, row, 1),
-                x_text=self._table_text(self.positions_table, row, 2),
-                y_text=self._table_text(self.positions_table, row, 3),
-                velocity_text=self._table_text(self.positions_table, row, 4),
-                capture_count_text=self._table_text(self.positions_table, row, 5),
-            )
-            for row in range(self.positions_table.rowCount())
-        ]
-        return parse_position_rows(rows)
+        return parse_position_rows(self.positions_model.input_rows())
 
-    def on_position_item_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() in (4, 5) and item.data(POSITION_PLACEHOLDER_ROLE):
-            item.setData(POSITION_PLACEHOLDER_ROLE, False)
-            item.setForeground(QBrush(QColor("#1e2329")))
-        self.refresh_position_feedback()
+    def on_position_model_data_changed(self, _top_left: object, _bottom_right: object, roles: object) -> None:
+        try:
+            role_values = set(int(role) for role in roles)
+        except TypeError:
+            role_values = set()
+        if not role_values or int(Qt.EditRole) in role_values:
+            self.schedule_position_feedback()
+
+    def schedule_position_feedback(self, *_: object) -> None:
+        if hasattr(self, "position_feedback_timer"):
+            self.position_feedback_timer.start()
+        else:
+            self.refresh_position_feedback()
 
     def refresh_position_feedback(self, *_: object) -> None:
         if not hasattr(self, "position_status_label"):
@@ -2572,32 +2562,8 @@ class MainWindow(QMainWindow):
         point_count: int | None = None,
         capture_total: int | None = None,
     ) -> None:
-        previous_block_state = self.positions_table.blockSignals(True)
-        try:
-            for row in range(self.positions_table.rowCount()):
-                for column in range(self.positions_table.columnCount()):
-                    item = self.positions_table.item(row, column)
-                    if item is None:
-                        continue
-                    item.setBackground(QColor("#ffffff"))
-                    item.setForeground(QBrush(QColor("#1e2329")))
-                    item.setToolTip(_position_cell_tooltip(column))
-                    if column in (4, 5):
-                        self._apply_position_placeholder(row, column)
-
-            for (row, column), detail in validation.cell_warnings.items():
-                item = self.positions_table.item(row, column)
-                if item is not None:
-                    item.setBackground(QColor("#fff4cc"))
-                    item.setToolTip(detail)
-
-            for (row, column), detail in validation.cell_errors.items():
-                item = self.positions_table.item(row, column)
-                if item is not None:
-                    item.setBackground(QColor("#ffe1df"))
-                    item.setToolTip(detail)
-        finally:
-            self.positions_table.blockSignals(previous_block_state)
+        self.positions_model.set_placeholders(self._position_placeholder_text(4), self._position_placeholder_text(5))
+        self.positions_model.set_validation(validation)
 
         if point_count is None:
             points = self.read_positions_with_validation()[0]
@@ -2623,26 +2589,6 @@ class MainWindow(QMainWindow):
         self.position_status_label.style().unpolish(self.position_status_label)
         self.position_status_label.style().polish(self.position_status_label)
 
-    def _apply_position_placeholder(self, row: int, column: int) -> None:
-        item = self.positions_table.item(row, column)
-        if item is None:
-            item = QTableWidgetItem()
-            item.setTextAlignment(Qt.AlignCenter)
-            self.positions_table.setItem(row, column, item)
-
-        text = item.text().strip()
-        is_placeholder = bool(item.data(POSITION_PLACEHOLDER_ROLE))
-        if text and not is_placeholder:
-            item.setData(POSITION_PLACEHOLDER_ROLE, False)
-            item.setForeground(QBrush(QColor("#1e2329")))
-            return
-
-        item.setData(POSITION_PLACEHOLDER_ROLE, True)
-        item.setText(self._position_placeholder_text(column))
-        item.setForeground(QBrush(QColor("#8c96a0")))
-        item.setTextAlignment(Qt.AlignCenter)
-        item.setToolTip(_position_cell_tooltip(column))
-
     def _position_placeholder_text(self, column: int) -> str:
         if column == 4:
             try:
@@ -2656,13 +2602,11 @@ class MainWindow(QMainWindow):
 
     def delete_selected_positions(self) -> None:
         rows = sorted({index.row() for index in self.positions_table.selectedIndexes()}, reverse=True)
-        for row in rows:
-            self.positions_table.removeRow(row)
-        self.reindex_positions()
+        self.positions_model.remove_rows(rows)
         self.refresh_position_feedback()
 
     def clear_positions(self) -> None:
-        self.positions_table.setRowCount(0)
+        self.positions_model.clear()
         self.refresh_position_feedback()
 
     def generate_linear_path_dialog(self) -> None:
@@ -2677,10 +2621,8 @@ class MainWindow(QMainWindow):
         if result.replace_existing:
             self.set_positions(result.points)
         else:
-            for point in result.points:
-                self.add_position_row(point, update_feedback=False)
-            self.reindex_positions()
-            self.refresh_position_feedback()
+            existing_points = self.read_positions_with_validation()[0]
+            self.set_positions(existing_points + result.points)
         self.log(f"선형 경로 생성: {len(result.points)}개 위치")
 
     def _linear_path_defaults(self) -> tuple[float, float, float, float]:
@@ -2688,24 +2630,17 @@ class MainWindow(QMainWindow):
         if len(selected_rows) >= 2:
             first, last = selected_rows[0], selected_rows[-1]
             return (
-                _safe_float_text(self._table_text(self.positions_table, first, 2), 0.0),
-                _safe_float_text(self._table_text(self.positions_table, first, 3), 0.0),
-                _safe_float_text(self._table_text(self.positions_table, last, 2), 10.0),
-                _safe_float_text(self._table_text(self.positions_table, last, 3), 0.0),
+                _safe_float_text(self.positions_model.text(first, 2), 0.0),
+                _safe_float_text(self.positions_model.text(first, 3), 0.0),
+                _safe_float_text(self.positions_model.text(last, 2), 10.0),
+                _safe_float_text(self.positions_model.text(last, 3), 0.0),
             )
         if self.positions_table.rowCount() > 0:
             row = self.positions_table.rowCount() - 1
-            start_x = _safe_float_text(self._table_text(self.positions_table, row, 2), 0.0)
-            start_y = _safe_float_text(self._table_text(self.positions_table, row, 3), 0.0)
+            start_x = _safe_float_text(self.positions_model.text(row, 2), 0.0)
+            start_y = _safe_float_text(self.positions_model.text(row, 3), 0.0)
             return (start_x, start_y, min(POSITION_MAX_MM, start_x + 10.0), start_y)
         return (0.0, 0.0, min(POSITION_MAX_MM, 10.0), 0.0)
-
-    def reindex_positions(self) -> None:
-        for row in range(self.positions_table.rowCount()):
-            item = self.positions_table.item(row, 0) or QTableWidgetItem()
-            item.setText(str(row))
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            self.positions_table.setItem(row, 0, item)
 
     def import_positions_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2897,7 +2832,7 @@ class MainWindow(QMainWindow):
             return velocity
         return _optional_float_text(self.velocity_edit.text()) or config.get("stage", {}).get("move_velocity_mm_s")
 
-    def build_config(self, points: list[ScanPoint] | None = None) -> dict[str, Any]:
+    def build_config(self, points: list[ScanPoint] | None = None, *, embed_positions: bool = True) -> dict[str, Any]:
         config = deepcopy(self.config)
         camera = config.setdefault("camera", {})
         stage = config.setdefault("stage", {})
@@ -2942,6 +2877,7 @@ class MainWindow(QMainWindow):
         dataset["metadata_formats"] = self._checked_formats(self.metadata_format_checks) or ["csv"]
         dataset["summary_formats"] = self._checked_formats(self.summary_format_checks)
         dataset["write_jsonl"] = "jsonl" in dataset["metadata_formats"]
+        dataset.setdefault("manifest_detail", "summary")
 
         updates = config.setdefault("updates", {})
         updates.setdefault("enabled", True)
@@ -2961,8 +2897,13 @@ class MainWindow(QMainWindow):
         scan.setdefault("estimated_ui_capture_overhead_s", DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S)
         scan.setdefault("estimated_export_overhead_s", DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S)
         scan.setdefault("estimated_export_per_capture_s", DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S)
-        scan["positions"] = [_point_config_record(point) for point in resolved_points]
-        scan["positions_file"] = None
+        if embed_positions:
+            scan["positions"] = [_point_config_record(point) for point in resolved_points]
+            scan["positions_file"] = None
+        else:
+            scan["positions"] = []
+            scan["positions_file"] = None
+            scan["position_count"] = len(resolved_points)
         return config
 
     def collect_preflight_issues(
@@ -3249,7 +3190,7 @@ class MainWindow(QMainWindow):
             )
             if validation.errors:
                 raise ValueError(format_issue_list("위치 입력을 확인하세요.", validation.errors))
-            config = self.build_config(points)
+            config = self.build_config(points, embed_positions=False)
         except Exception as exc:
             QMessageBox.warning(self, "입력 오류", str(exc))
             return
@@ -3258,8 +3199,12 @@ class MainWindow(QMainWindow):
             return
 
         self.stop_live_preview(wait_ms=2000, update_label=True)
-        self.captures_table.setRowCount(0)
-        self.error_records = []
+        self.capture_results_model.clear()
+        self.pending_capture_rows = []
+        self.run_stats = RunStatsAccumulator()
+        self.last_capture_record = None
+        self.last_capture_image_path = ""
+        self.last_preview_update_monotonic = 0.0
         self.update_error_summary()
         capture_total = total_capture_count(points, default_capture_count_from_config(config))
         duration_estimate = estimate_run_duration(
@@ -3291,7 +3236,7 @@ class MainWindow(QMainWindow):
             skip_home=self.skip_home_check.isChecked(),
         )
         self.worker.log_message.connect(self.log)
-        self.worker.status_changed.connect(self.set_run_status)
+        self.worker.status_changed.connect(self.queue_run_status)
         self.worker.capture_done.connect(self.on_capture_done)
         self.worker.progress_changed.connect(self.on_progress_changed)
         self.worker.run_failed.connect(self.on_run_failed)
@@ -3307,11 +3252,14 @@ class MainWindow(QMainWindow):
             self.log("중지 요청됨")
 
     def on_progress_changed(self, completed: int, total: int) -> None:
-        self.progress_bar.setRange(0, total)
-        self.progress_bar.setValue(completed)
         self.run_completed_captures = completed
         self.run_total_captures = total
-        self.update_run_timing_display()
+        now = time.monotonic()
+        if completed == total or now - self.last_progress_ui_monotonic >= 0.25:
+            self.progress_bar.setRange(0, total)
+            self.progress_bar.setValue(completed)
+            self.update_run_timing_display()
+            self.last_progress_ui_monotonic = now
 
     def start_run_timing(
         self,
@@ -3324,6 +3272,7 @@ class MainWindow(QMainWindow):
         self.run_total_captures = total
         self.run_estimated_total_s = max(0.0, estimated_total_s)
         self.run_capture_cumulative_estimates_s = tuple(max(0.0, item) for item in capture_cumulative_s)
+        self.last_progress_ui_monotonic = 0.0
         self.run_timing_timer.start()
         self.update_run_timing_display()
 
@@ -3365,8 +3314,6 @@ class MainWindow(QMainWindow):
         self.run_capture_cumulative_estimates_s = ()
 
     def on_capture_done(self, record: dict[str, Any]) -> None:
-        row = self.captures_table.rowCount()
-        self.captures_table.insertRow(row)
         values = [
             str(record.get("index", "")),
             _capture_sequence_text(record),
@@ -3382,24 +3329,46 @@ class MainWindow(QMainWindow):
             _threshold_text(record),
             str(record.get("image_path", "")),
         ]
-        image_path = record.get("absolute_image_path", "")
-        for column, value in enumerate(values):
-            item = QTableWidgetItem(value)
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            if column != 12:
-                item.setTextAlignment(Qt.AlignCenter)
-            if image_path:
-                item.setData(Qt.UserRole, image_path)
-            item.setData(Qt.UserRole + 1, record)
-            self.captures_table.setItem(row, column, item)
-        self.error_records.append(record)
-        self.update_error_summary()
+        compact_record = dict(record)
+        image_path = str(record.get("absolute_image_path", "") or "")
+        self.pending_capture_rows.append((values, image_path, compact_record))
+        self.run_stats.add_record(compact_record)
+        self.last_capture_record = compact_record
         if image_path:
-            self.show_image(Path(image_path))
-        self.update_preview_info(record)
-        self.set_run_status(
-            f"마지막 저장: #{record.get('index', '')} {_capture_sequence_text(record)} {record.get('label', '')}"
-        )
+            self.last_capture_image_path = image_path
+            now = time.monotonic()
+            if self.current_image_path is None or now - self.last_preview_update_monotonic >= 2.0:
+                self.show_image(Path(image_path))
+                self.last_preview_update_monotonic = now
+        self.capture_ui_timer.start()
+
+    def flush_capture_ui_updates(self) -> None:
+        if not self.pending_capture_rows and self.last_capture_record is None:
+            return
+        rows = self.pending_capture_rows
+        self.pending_capture_rows = []
+        self.capture_results_model.append_captures(rows)
+        self.update_error_summary()
+        if rows:
+            self.captures_table.scrollToBottom()
+        record = self.last_capture_record
+        if record is not None:
+            self.update_preview_info(record)
+            self.set_run_status(
+                f"마지막 저장: #{record.get('index', '')} {_capture_sequence_text(record)} {record.get('label', '')}"
+            )
+
+    def queue_run_status(self, message: str) -> None:
+        self.pending_status_message = message
+        if hasattr(self, "run_status_timer"):
+            self.run_status_timer.start()
+        else:
+            self.flush_run_status()
+
+    def flush_run_status(self) -> None:
+        if self.pending_status_message:
+            self.set_run_status(self.pending_status_message)
+            self.pending_status_message = ""
 
     def on_run_failed(self, message: str) -> None:
         self.pending_run_failed = True
@@ -3417,9 +3386,13 @@ class MainWindow(QMainWindow):
             "acquisition run_done received",
             extra={"event": "run_done_received", "run_dir": run_dir, "stopped": stopped},
         )
+        self.flush_capture_ui_updates()
+        self.flush_run_status()
         self.finish_run_timing()
         if run_dir:
             self.current_run_dir = Path(run_dir)
+        if self.last_capture_image_path:
+            self.show_image(Path(self.last_capture_image_path))
         if self.run_status_label.text() != "오류 발생":
             self.set_run_status("중지됨" if stopped else "완료")
         self.log("촬영 중지됨" if stopped else "촬영 완료")
@@ -3455,14 +3428,15 @@ class MainWindow(QMainWindow):
         if self.live_preview_enabled() and self.camera_combo.count() > 1:
             self.start_live_preview()
 
-    def preview_capture_row(self, row: int, column: int) -> None:
-        item = self.captures_table.item(row, column) or self.captures_table.item(row, 0)
-        if item is None:
+    def preview_capture_row(self, index: object) -> None:
+        row_getter = getattr(index, "row", None)
+        if not callable(row_getter):
             return
-        image_path = item.data(Qt.UserRole)
+        row = int(row_getter())
+        image_path = self.capture_results_model.image_path_at(row)
         if image_path:
             self.show_image(Path(image_path))
-        record = item.data(Qt.UserRole + 1)
+        record = self.capture_results_model.record_at(row)
         if record:
             self.update_preview_info(record)
 
@@ -3561,13 +3535,9 @@ class MainWindow(QMainWindow):
     def update_error_summary(self) -> None:
         if not hasattr(self, "error_summary_table"):
             return
-        self.error_chart.set_records(self.error_records)
-        values = [
-            float(record.get("predicted_max_error_um", 0.0))
-            for record in self.error_records
-            if record.get("status") == "ok" and record.get("predicted_max_error_um") != ""
-        ]
-        if not values:
+        self.error_chart.set_records(self.capture_results_model.records() if hasattr(self, "capture_results_model") else [])
+        stats = self.run_stats
+        if stats.predicted_max_error_um_count <= 0:
             fixed_budget = error_budget_from_config({})
             self._set_error_summary_values(
                 [
@@ -3580,18 +3550,18 @@ class MainWindow(QMainWindow):
                 ]
             )
             return
-        max_value = max(values)
-        mean_value = sum(values) / len(values)
-        limit = float(self.error_records[-1].get("max_allowed_error_um", error_budget_from_config({}).max_allowed_um))
-        failing = sum(1 for value in values if value > limit)
+        max_value = stats.predicted_max_error_um_max or 0.0
+        mean_value = stats.predicted_max_error_um_sum / max(1, stats.predicted_max_error_um_count)
+        last_record = self.last_capture_record or {}
+        limit = float(last_record.get("max_allowed_error_um", error_budget_from_config({}).max_allowed_um))
         self._set_error_summary_values(
             [
                 "측정 중",
-                _um_text(self.error_records[-1].get("configured_error_budget_um", "")),
+                _um_text(last_record.get("configured_error_budget_um", "")),
                 _um_text(limit),
                 _um_text(max_value),
                 _um_text(mean_value),
-                f"{failing}/{len(values)}",
+                f"{stats.threshold_failure_count}/{stats.predicted_max_error_um_count}",
             ]
         )
 
@@ -3616,13 +3586,6 @@ class MainWindow(QMainWindow):
             selected_set = set(checks.keys())
         for name, check in checks.items():
             check.setChecked(name in selected_set)
-
-    @staticmethod
-    def _table_text(table: QTableWidget, row: int, column: int) -> str:
-        item = table.item(row, column)
-        if item is not None and item.data(POSITION_PLACEHOLDER_ROLE):
-            return ""
-        return item.text().strip() if item else ""
 
     @staticmethod
     def _set_combo_text(combo: QComboBox, text: str) -> None:

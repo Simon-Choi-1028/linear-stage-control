@@ -25,7 +25,7 @@ class ScanPoint:
 
 
 DEFAULT_CAPTURE_COUNT = 1
-LINEAR_PATH_MAX_POINTS = 100_000
+LINEAR_PATH_MAX_POINTS = 250_000
 
 
 def points_from_config(

@@ -3,17 +3,20 @@ from __future__ import annotations
 import csv
 import json
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 from xml.sax.saxutils import escape
 
 import yaml
 
-DEFAULT_METADATA_FORMATS = ("csv", "jsonl", "json", "tsv", "yaml", "xlsx")
+DEFAULT_METADATA_FORMATS = ("csv", "jsonl")
 DEFAULT_SUMMARY_FORMATS = ("json", "yaml", "md")
 SUPPORTED_METADATA_FORMATS = {"csv", "jsonl", "json", "tsv", "yaml", "xlsx"}
 SUPPORTED_SUMMARY_FORMATS = {"json", "yaml", "md"}
+STREAMED_METADATA_FORMATS = {"csv", "jsonl"}
+POST_RUN_METADATA_FORMATS = SUPPORTED_METADATA_FORMATS - STREAMED_METADATA_FORMATS
 
 
 def normalise_formats(
@@ -57,18 +60,127 @@ def json_ready(value: Any) -> Any:
         return str(value)
 
 
-def write_records_json(path: Path, records: list[dict[str, Any]]) -> None:
-    path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+@dataclass
+class RunStatsAccumulator:
+    record_count: int = 0
+    capture_ok_count: int = 0
+    capture_error_count: int = 0
+    threshold_failure_count: int = 0
+    predicted_max_error_um_max: float | None = None
+    predicted_max_error_um_sum: float = 0.0
+    predicted_max_error_um_count: int = 0
+    measured_radial_error_um_max: float | None = None
+    measured_radial_error_um_sum: float = 0.0
+    measured_radial_error_um_count: int = 0
+    error_messages: list[dict[str, Any]] = field(default_factory=list)
+    max_error_messages: int = 1000
+    omitted_error_message_count: int = 0
+
+    def add_record(self, record: dict[str, Any]) -> None:
+        self.record_count += 1
+        status = record.get("status")
+        if status == "ok":
+            self.capture_ok_count += 1
+            self._add_predicted(record.get("predicted_max_error_um"))
+            self._add_measured(record.get("measured_radial_error_um"))
+            if record.get("within_error_threshold") is False:
+                self.threshold_failure_count += 1
+        elif status == "error":
+            self.capture_error_count += 1
+            if len(self.error_messages) < self.max_error_messages:
+                self.error_messages.append(
+                    {
+                        "index": record.get("index"),
+                        "label": record.get("label"),
+                        "message": record.get("error_message", ""),
+                    }
+                )
+            else:
+                self.omitted_error_message_count += 1
+
+    def as_summary(self, *, run_id: str, status: str, point_count: int) -> dict[str, Any]:
+        summary = {
+            "run_id": run_id,
+            "status": status,
+            "point_count": point_count,
+            "record_count": self.record_count,
+            "capture_ok_count": self.capture_ok_count,
+            "capture_error_count": self.capture_error_count,
+            "threshold_failure_count": self.threshold_failure_count,
+            "predicted_max_error_um_max": self.predicted_max_error_um_max,
+            "predicted_max_error_um_mean": _mean_from_sum(
+                self.predicted_max_error_um_sum,
+                self.predicted_max_error_um_count,
+            ),
+            "measured_radial_error_um_max": self.measured_radial_error_um_max,
+            "measured_radial_error_um_mean": _mean_from_sum(
+                self.measured_radial_error_um_sum,
+                self.measured_radial_error_um_count,
+            ),
+            "error_messages": list(self.error_messages),
+        }
+        if self.omitted_error_message_count:
+            summary["omitted_error_message_count"] = self.omitted_error_message_count
+        return summary
+
+    def _add_predicted(self, value: Any) -> None:
+        number = _optional_float(value)
+        if number is None:
+            return
+        self.predicted_max_error_um_sum += number
+        self.predicted_max_error_um_count += 1
+        self.predicted_max_error_um_max = (
+            number if self.predicted_max_error_um_max is None else max(self.predicted_max_error_um_max, number)
+        )
+
+    def _add_measured(self, value: Any) -> None:
+        number = _optional_float(value)
+        if number is None:
+            return
+        self.measured_radial_error_um_sum += number
+        self.measured_radial_error_um_count += 1
+        self.measured_radial_error_um_max = (
+            number if self.measured_radial_error_um_max is None else max(self.measured_radial_error_um_max, number)
+        )
 
 
-def write_records_yaml(path: Path, records: list[dict[str, Any]]) -> None:
-    path.write_text(yaml.safe_dump(records, sort_keys=False, allow_unicode=True), encoding="utf-8")
+def iter_jsonl_records(path: Path) -> Iterator[dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            record = json.loads(stripped)
+            if isinstance(record, dict):
+                yield record
 
 
-def write_records_tsv(
+def write_records_json_stream(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        file.write("[\n")
+        first = True
+        for record in records:
+            if not first:
+                file.write(",\n")
+            file.write(json.dumps(record, ensure_ascii=False, indent=2))
+            first = False
+        file.write("\n]\n")
+
+
+def write_records_yaml_stream(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        wrote_any = False
+        for record in records:
+            wrote_any = True
+            file.write(_yaml_sequence_item(record))
+        if not wrote_any:
+            file.write("[]\n")
+
+
+def write_records_tsv_stream(
     path: Path,
     fields: Sequence[str],
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
 ) -> None:
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=list(fields), delimiter="\t")
@@ -77,58 +189,18 @@ def write_records_tsv(
             writer.writerow({field: _text_value(record.get(field, "")) for field in fields})
 
 
-def write_records_xlsx(
+def write_records_xlsx_stream(
     path: Path,
     fields: Sequence[str],
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
     sheet_name: str = "captures",
 ) -> None:
-    rows = [list(fields)]
-    for record in records:
-        rows.append([record.get(field, "") for field in fields])
-    _write_xlsx(path, rows, sheet_name=sheet_name)
+    def rows() -> Iterator[list[Any]]:
+        yield list(fields)
+        for record in records:
+            yield [record.get(field, "") for field in fields]
 
-
-def build_run_summary(
-    run_id: str,
-    status: str,
-    point_count: int,
-    records: list[dict[str, Any]],
-) -> dict[str, Any]:
-    ok_records = [record for record in records if record.get("status") == "ok"]
-    error_records = [record for record in records if record.get("status") == "error"]
-    predicted_values = [
-        float(record["predicted_max_error_um"])
-        for record in ok_records
-        if record.get("predicted_max_error_um") not in ("", None)
-    ]
-    measured_values = [
-        float(record["measured_radial_error_um"])
-        for record in ok_records
-        if record.get("measured_radial_error_um") not in ("", None)
-    ]
-    threshold_failures = sum(1 for record in ok_records if record.get("within_error_threshold") is False)
-    return {
-        "run_id": run_id,
-        "status": status,
-        "point_count": point_count,
-        "record_count": len(records),
-        "capture_ok_count": len(ok_records),
-        "capture_error_count": len(error_records),
-        "threshold_failure_count": threshold_failures,
-        "predicted_max_error_um_max": max(predicted_values) if predicted_values else None,
-        "predicted_max_error_um_mean": _mean(predicted_values),
-        "measured_radial_error_um_max": max(measured_values) if measured_values else None,
-        "measured_radial_error_um_mean": _mean(measured_values),
-        "error_messages": [
-            {
-                "index": record.get("index"),
-                "label": record.get("label"),
-                "message": record.get("error_message", ""),
-            }
-            for record in error_records
-        ],
-    }
+    _write_xlsx(path, rows(), sheet_name=sheet_name)
 
 
 def write_summary_json(path: Path, summary: dict[str, Any]) -> None:
@@ -161,14 +233,15 @@ def write_summary_markdown(path: Path, summary: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_xlsx(path: Path, rows: list[list[Any]], sheet_name: str) -> None:
+def _write_xlsx(path: Path, rows: Iterable[list[Any]], sheet_name: str) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", _xlsx_content_types())
         archive.writestr("_rels/.rels", _xlsx_root_rels())
         archive.writestr("xl/workbook.xml", _xlsx_workbook(sheet_name))
         archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels())
         archive.writestr("xl/styles.xml", _xlsx_styles())
-        archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet(rows))
+        with archive.open("xl/worksheets/sheet1.xml", "w") as sheet:
+            _write_xlsx_sheet(sheet, rows)
 
 
 def _xlsx_content_types() -> str:
@@ -218,19 +291,21 @@ def _xlsx_styles() -> str:
 </styleSheet>"""
 
 
-def _xlsx_sheet(rows: list[list[Any]]) -> str:
-    row_xml: list[str] = []
+def _write_xlsx_sheet(file: Any, rows: Iterable[list[Any]]) -> None:
+    file.write(
+        (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<sheetData>"
+        ).encode("utf-8")
+    )
     for row_index, row in enumerate(rows, start=1):
         cells = []
         for column_index, value in enumerate(row, start=1):
             cell_ref = f"{_column_letters(column_index)}{row_index}"
             cells.append(_xlsx_cell(cell_ref, value))
-        row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
-    return (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        "<sheetData>" + "".join(row_xml) + "</sheetData></worksheet>"
-    )
+        file.write(f'<row r="{row_index}">{"".join(cells)}</row>'.encode("utf-8"))
+    file.write(b"</sheetData></worksheet>")
 
 
 def _xlsx_cell(cell_ref: str, value: Any) -> str:
@@ -258,8 +333,27 @@ def _text_value(value: Any) -> str:
     return str(value)
 
 
-def _mean(values: list[float]) -> float | None:
-    return sum(values) / len(values) if values else None
+def _mean_from_sum(total: float, count: int) -> float | None:
+    return total / count if count else None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _yaml_sequence_item(record: dict[str, Any]) -> str:
+    text = yaml.safe_dump(record, sort_keys=False, allow_unicode=True).rstrip()
+    if not text:
+        return "- {}\n"
+    lines = text.splitlines()
+    first = f"- {lines[0]}\n"
+    rest = "".join(f"  {line}\n" for line in lines[1:])
+    return first + rest
 
 
 def _summary_number(value: Any) -> str:

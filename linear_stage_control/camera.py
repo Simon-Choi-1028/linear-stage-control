@@ -193,10 +193,26 @@ class BaslerCamera:
         return self
 
     def close(self) -> None:
-        if self.camera is not None and self.camera.IsOpen():
-            self.camera.Close()
+        camera = self.camera
         self.camera = None
         self.converter = None
+        if camera is None:
+            return
+        try:
+            if camera.IsGrabbing():
+                camera.StopGrabbing()
+        except Exception:
+            pass
+        try:
+            if camera.IsOpen():
+                camera.Close()
+        finally:
+            destroy = getattr(camera, "DestroyDevice", None)
+            if callable(destroy):
+                try:
+                    destroy()
+                except Exception:
+                    pass
 
     def grab_array(self, timeout_ms: int | None = None) -> np.ndarray:
         if self.camera is None or self.converter is None:
@@ -212,14 +228,21 @@ class BaslerCamera:
                     f"Grab failed: {grab_result.ErrorCode} {grab_result.ErrorDescription}",
                 )
             image = self.converter.Convert(grab_result)
-            return apply_camera_orientation(
-                image.GetArray(),
-                rotate_180=self.settings.rotate_180,
-                flip_horizontal=self.settings.flip_horizontal,
-                flip_vertical=self.settings.flip_vertical,
-            )
+            try:
+                return apply_camera_orientation(
+                    image.GetArray(),
+                    rotate_180=self.settings.rotate_180,
+                    flip_horizontal=self.settings.flip_horizontal,
+                    flip_vertical=self.settings.flip_vertical,
+                )
+            finally:
+                release = getattr(image, "Release", None)
+                if callable(release):
+                    release()
         finally:
             grab_result.Release()
+            if self.camera is not None and self.camera.IsGrabbing():
+                self.camera.StopGrabbing()
 
     def capture_to(self, output_path: str | Path) -> Path:
         array = self.grab_array()
@@ -699,17 +722,18 @@ def apply_camera_orientation(
 ) -> np.ndarray:
     arr = np.asarray(array)
     if arr.ndim < 2:
-        return np.ascontiguousarray(arr)
+        return np.array(arr, copy=True, order="C")
     if rotate_180:
         arr = np.flip(arr, axis=(0, 1))
     if flip_vertical:
         arr = np.flip(arr, axis=0)
     if flip_horizontal:
         arr = np.flip(arr, axis=1)
-    return np.ascontiguousarray(arr)
+    return np.array(arr, copy=True, order="C")
 
 
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
+    image: Image.Image | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         output_format = _normalise_pixel_format_name(pixel_format)
@@ -726,9 +750,13 @@ def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
         raise
     except Exception as exc:
         raise DatasetWriteError("이미지 파일 저장에 실패했습니다.", str(exc)) from exc
+    finally:
+        if image is not None:
+            image.close()
 
 
 def save_original_array(path: Path, array: np.ndarray) -> None:
+    image: Image.Image | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if array.ndim == 2:
@@ -742,6 +770,9 @@ def save_original_array(path: Path, array: np.ndarray) -> None:
         raise
     except Exception as exc:
         raise DatasetWriteError("원본 이미지 파일 저장에 실패했습니다.", str(exc)) from exc
+    finally:
+        if image is not None:
+            image.close()
 
 
 def iso_timestamp() -> str:

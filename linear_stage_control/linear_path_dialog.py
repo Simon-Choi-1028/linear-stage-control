@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from .gui_support import set_placeholder_color
 from .gui_widgets import LinearPathPreviewWidget
-from .scan import ScanPoint, linear_path_points, linear_path_points_by_spacing
+from .scan import LINEAR_PATH_MAX_POINTS, ScanPoint, linear_path_points, linear_path_points_by_spacing
 from .text_formatting import (
     linear_distance,
     mm_text,
@@ -70,7 +70,7 @@ def show_linear_path_dialog(
     spacing_layout.addWidget(spacing_edit, 1)
     spacing_layout.addWidget(spacing_unit_combo)
     count_spin = QSpinBox()
-    count_spin.setRange(2, 100_000)
+    count_spin.setRange(2, LINEAR_PATH_MAX_POINTS)
     count_spin.setValue(11)
     count_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
     label_prefix_edit = QLineEdit("line")

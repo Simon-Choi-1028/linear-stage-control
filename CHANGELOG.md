@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.1.8 - 2026-06-16
+
+- Replaced large capture and position `QTableWidget` surfaces with bounded Qt table models so long GUI runs keep only recent visible rows in memory.
+- Added throttled capture/status/position UI updates, capped GUI logs, and reduced automatic preview loading during acquisition.
+- Changed default capture metadata output to streaming `csv/jsonl`, with heavy `json/tsv/yaml/xlsx` exports regenerated from JSONL when selected.
+- Added streaming run statistics and summary manifests so `DatasetRun` no longer accumulates full capture records in memory by default.
+- Raised linear path generation limits to support 200,000+ point runs and added regression coverage for large GUI/model/dataset workflows.
+- Hardened Basler capture cleanup by detaching NumPy arrays from SDK buffers and closing camera/image resources more explicitly.
+- Removed obsolete in-memory metadata export helpers and model-migration leftovers before packaging the release.
+
 ## v0.1.7 - 2026-06-15
 
 - Added independent horizontal and vertical Basler image flip controls that apply consistently to live preview, saved PNG images, and saved NPY arrays alongside the existing 180-degree rotation.

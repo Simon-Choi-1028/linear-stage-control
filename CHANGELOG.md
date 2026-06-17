@@ -8,6 +8,7 @@
 - Added throttled capture/status/position UI updates, capped GUI logs, and reduced automatic preview loading during acquisition.
 - Changed default capture metadata output to streaming `csv/jsonl`, with heavy `json/tsv/yaml/xlsx` exports regenerated from JSONL when selected.
 - Added streaming run statistics and summary manifests so `DatasetRun` no longer accumulates full capture records in memory by default.
+- Hotfix: moved PNG/NPY image writes onto a bounded background disk queue and batched CSV/JSONL flushes to prevent per-capture disk I/O from slowing long runs.
 - Raised linear path generation limits to support 200,000+ point runs and added regression coverage for large GUI/model/dataset workflows.
 - Hardened Basler capture cleanup by detaching NumPy arrays from SDK buffers and closing camera/image resources more explicitly.
 - Removed obsolete in-memory metadata export helpers and model-migration leftovers before packaging the release.

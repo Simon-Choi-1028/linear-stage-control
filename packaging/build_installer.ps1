@@ -14,6 +14,33 @@ function Get-ProjectVersion {
   return "0.0.0"
 }
 
+function Invoke-FallbackInstallerBuild {
+  $SetupPath = Join-Path $Root "dist\LinearStageControlSetup.exe"
+  Remove-Item -LiteralPath $SetupPath -Force -ErrorAction SilentlyContinue
+
+  $DistPath = Join-Path $Root "dist"
+  $PayloadPath = Join-Path $Root "dist\LinearStageControl"
+  $InstallerScript = Join-Path $Root "packaging\fallback_installer.py"
+  $InstallerWorkPath = Join-Path $Root ".pyinstaller_build\installer"
+  $InstallerSpecPath = Join-Path $Root ".pyinstaller_build\installer_spec"
+  $AddData = "$PayloadPath;LinearStageControl"
+  & (Join-Path $Root ".venv\Scripts\pyinstaller.exe") `
+    "--noconfirm" `
+    "--clean" `
+    "--onefile" `
+    "--windowed" `
+    "--name" "LinearStageControlSetup" `
+    "--distpath" $DistPath `
+    "--workpath" $InstallerWorkPath `
+    "--specpath" $InstallerSpecPath `
+    "--add-data" $AddData `
+    $InstallerScript
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "Fallback installer build failed with exit code $LASTEXITCODE"
+  }
+}
+
 $Version = Get-ProjectVersion
 $InnoCandidates = @(
   "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
@@ -37,7 +64,7 @@ if (-not $Iscc) {
 }
 
 if (-not $Iscc) {
-  Write-Error "Inno Setup 6 was not found. Install it with: winget install --id JRSoftware.InnoSetup --source winget"
+  Write-Warning "Inno Setup 6 was not found. Building fallback installer."
 }
 
 $AppExe = Join-Path $Root "dist\LinearStageControl\LinearStageControl.exe"
@@ -58,14 +85,26 @@ if ((Test-Path -LiteralPath $PylonRuntime) -and -not $IncludePylonRuntime) {
   )
 }
 
-& $Iscc "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "LinearStageControl.iss")
-if ($LASTEXITCODE -ne 0) {
-  throw "Inno Setup failed with exit code $LASTEXITCODE"
+if ($Iscc) {
+  Push-Location $PSScriptRoot
+  try {
+    & $Iscc "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "LinearStageControl.iss")
+    if ($LASTEXITCODE -ne 0) {
+      throw "Inno Setup failed with exit code $LASTEXITCODE"
+    }
+  } catch {
+    Write-Warning "$($_.Exception.Message) Building fallback installer."
+    Invoke-FallbackInstallerBuild
+  } finally {
+    Pop-Location
+  }
+} else {
+  Invoke-FallbackInstallerBuild
 }
 
 $SetupPath = Join-Path $Root "dist\LinearStageControlSetup.exe"
 if (-not (Test-Path -LiteralPath $SetupPath)) {
-  throw "Inno Setup did not produce expected installer: $SetupPath"
+  throw "Installer build did not produce expected installer: $SetupPath"
 }
 if (Test-Path -LiteralPath $SetupPath) {
   $Hash = (Get-FileHash -Path $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()

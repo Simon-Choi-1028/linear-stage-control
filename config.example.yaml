@@ -85,6 +85,13 @@ dataset:
   # summary = lightweight manifest; full also hashes every output file.
   manifest_detail: summary
   write_jsonl: true
+  # Save captured image arrays on a small background disk queue so stage motion can
+  # overlap PNG/NPY writes without allowing unbounded RAM growth.
+  async_image_writes: true
+  image_write_queue_size: 2
+  # Flush streamed CSV/JSONL metadata in batches. Close always performs a final flush.
+  metadata_flush_records: 100
+  metadata_flush_interval_s: 1.0
 
 calibration:
   # Informational snapshot only. The app uses these fixed Zaber manufacturer specs

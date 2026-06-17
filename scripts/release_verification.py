@@ -139,26 +139,39 @@ class FakeAcquisitionCamera:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         return
 
+    def grab_original_array(self) -> tuple[np.ndarray, dict[str, Any]]:
+        array = np.arange(48 * 64, dtype=np.uint16).reshape(48, 64)
+        timestamp = iso_timestamp()
+        metadata = {
+            "captured_at": timestamp,
+            "completed_at": timestamp,
+            "pixel_type": "Mono16",
+            "width": array.shape[1],
+            "height": array.shape[0],
+            "camera_timestamp_ns": None,
+            "block_id": None,
+        }
+        return array, metadata
+
     def capture_original_to(self, image_path: Path, npy_path: Path | None = None) -> CaptureResult:
         image_path.parent.mkdir(parents=True, exist_ok=True)
-        array = np.arange(48 * 64, dtype=np.uint16).reshape(48, 64)
+        array, metadata = self.grab_original_array()
         Image.fromarray((array / 16).astype(np.uint8), mode="L").save(image_path)
         if npy_path is not None:
             npy_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(npy_path, array)
-        timestamp = iso_timestamp()
         return CaptureResult(
             image_path=image_path,
             npy_path=npy_path,
-            captured_at=timestamp,
-            completed_at=timestamp,
+            captured_at=str(metadata["captured_at"]),
+            completed_at=str(metadata["completed_at"]),
             dtype=str(array.dtype),
             shape=tuple(array.shape),
-            pixel_type="Mono16",
-            width=array.shape[1],
-            height=array.shape[0],
-            camera_timestamp_ns=None,
-            block_id=None,
+            pixel_type=metadata["pixel_type"],
+            width=metadata["width"],
+            height=metadata["height"],
+            camera_timestamp_ns=metadata["camera_timestamp_ns"],
+            block_id=metadata["block_id"],
         )
 
 

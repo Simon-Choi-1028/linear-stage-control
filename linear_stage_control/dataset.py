@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import yaml
@@ -45,6 +46,8 @@ class DatasetSettings:
     metadata_formats: tuple[str, ...] = DEFAULT_METADATA_FORMATS
     summary_formats: tuple[str, ...] = DEFAULT_SUMMARY_FORMATS
     manifest_detail: str = "summary"
+    metadata_flush_records: int = 100
+    metadata_flush_interval_s: float = 1.0
 
 
 def dataset_settings_from_config(
@@ -78,6 +81,11 @@ def dataset_settings_from_config(
             SUPPORTED_SUMMARY_FORMATS,
         ),
         manifest_detail=_normalise_manifest_detail(dataset.get("manifest_detail", "summary")),
+        metadata_flush_records=_positive_int(dataset.get("metadata_flush_records", 100), "metadata_flush_records"),
+        metadata_flush_interval_s=_non_negative_float(
+            dataset.get("metadata_flush_interval_s", 1.0),
+            "metadata_flush_interval_s",
+        ),
     )
 
 
@@ -124,6 +132,8 @@ class DatasetRun:
         self._csv_writer: csv.DictWriter | None = None
         self._jsonl_file: Any = None
         self._jsonl_is_export_source = False
+        self._metadata_dirty_records = 0
+        self._last_metadata_flush_monotonic = monotonic()
 
     def __enter__(self) -> DatasetRun:
         self.open()
@@ -156,10 +166,13 @@ class DatasetRun:
             self._csv_file = self.csv_path.open("w", newline="", encoding="utf-8")
             self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=CAPTURE_FIELDS)
             self._csv_writer.writeheader()
+            self._metadata_dirty_records = 1
+            self._last_metadata_flush_monotonic = monotonic()
             if self._needs_jsonl_stream():
                 self._jsonl_is_export_source = not self.settings.write_jsonl
                 jsonl_path = self.export_source_jsonl_path if self._jsonl_is_export_source else self.jsonl_path
                 self._jsonl_file = jsonl_path.open("w", encoding="utf-8")
+            self.flush_metadata(force=True)
         except DatasetWriteError:
             raise
         except Exception as exc:
@@ -167,6 +180,7 @@ class DatasetRun:
 
     def close(self, status: str = "complete") -> None:
         try:
+            self.flush_metadata(force=True)
             if self._jsonl_file is not None:
                 self._jsonl_file.close()
                 self._jsonl_file = None
@@ -205,14 +219,31 @@ class DatasetRun:
             if self._csv_writer is None:
                 raise RuntimeError("Dataset CSV writer is not open.")
             self._csv_writer.writerow(row)
-            self._csv_file.flush()
             if self._jsonl_file is not None:
                 self._jsonl_file.write(json.dumps(clean_record, ensure_ascii=False) + "\n")
-                self._jsonl_file.flush()
+            self._metadata_dirty_records += 1
+            self.flush_metadata()
         except DatasetWriteError:
             raise
         except Exception as exc:
             raise DatasetWriteError("캡처 metadata 저장에 실패했습니다.", str(exc)) from exc
+
+    def flush_metadata(self, *, force: bool = False) -> None:
+        if self._metadata_dirty_records <= 0:
+            return
+        elapsed_s = monotonic() - self._last_metadata_flush_monotonic
+        if (
+            not force
+            and self._metadata_dirty_records < self.settings.metadata_flush_records
+            and elapsed_s < self.settings.metadata_flush_interval_s
+        ):
+            return
+        if self._csv_file is not None:
+            self._csv_file.flush()
+        if self._jsonl_file is not None:
+            self._jsonl_file.flush()
+        self._metadata_dirty_records = 0
+        self._last_metadata_flush_monotonic = monotonic()
 
     def _write_post_run_exports(self, status: str) -> None:
         formats = set(self.settings.metadata_formats)
@@ -494,6 +525,26 @@ def _normalise_manifest_detail(value: Any) -> str:
     if detail not in {"summary", "full"}:
         raise ValueError(f"Unsupported manifest_detail: {value}. Use summary or full.")
     return detail
+
+
+def _positive_int(value: Any, field_name: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"dataset.{field_name} must be a positive integer.") from exc
+    if number <= 0:
+        raise ValueError(f"dataset.{field_name} must be a positive integer.")
+    return number
+
+
+def _non_negative_float(value: Any, field_name: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"dataset.{field_name} must be zero or greater.") from exc
+    if number < 0:
+        raise ValueError(f"dataset.{field_name} must be zero or greater.")
+    return number
 
 
 def _sha256_file(path: Path) -> str:

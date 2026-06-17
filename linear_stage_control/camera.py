@@ -258,27 +258,11 @@ class BaslerCamera:
     ) -> CaptureResult:
         """Capture one frame and save the unconverted camera array losslessly."""
         array, metadata = self.grab_original_array(timeout_ms=timeout_ms)
-        image_path = Path(output_path)
-        save_original_array(image_path, array)
-
-        saved_npy_path: Path | None = None
-        if npy_path is not None:
-            saved_npy_path = Path(npy_path)
-            saved_npy_path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(saved_npy_path, array)
-
-        return CaptureResult(
-            image_path=image_path,
-            npy_path=saved_npy_path,
-            captured_at=metadata["captured_at"],
-            completed_at=metadata["completed_at"],
-            dtype=str(array.dtype),
-            shape=tuple(int(item) for item in array.shape),
-            pixel_type=metadata.get("pixel_type"),
-            width=metadata.get("width"),
-            height=metadata.get("height"),
-            camera_timestamp_ns=metadata.get("camera_timestamp_ns"),
-            block_id=metadata.get("block_id"),
+        return save_original_capture(
+            output_path,
+            array,
+            metadata,
+            npy_path=npy_path,
         )
 
     def grab_original_array(
@@ -745,7 +729,7 @@ def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
             image = Image.fromarray(np.ascontiguousarray(array), "RGB")
         else:
             raise ValueError(f"Unsupported image array shape: {array.shape}")
-        image.save(path)
+        _save_image(image, path)
     except DatasetWriteError:
         raise
     except Exception as exc:
@@ -765,7 +749,7 @@ def save_original_array(path: Path, array: np.ndarray) -> None:
             image = Image.fromarray(np.ascontiguousarray(array))
         else:
             raise ValueError(f"Unsupported original image array shape: {array.shape}")
-        image.save(path)
+        _save_image(image, path)
     except DatasetWriteError:
         raise
     except Exception as exc:
@@ -773,6 +757,44 @@ def save_original_array(path: Path, array: np.ndarray) -> None:
     finally:
         if image is not None:
             image.close()
+
+
+def save_original_capture(
+    output_path: str | Path,
+    array: np.ndarray,
+    metadata: dict[str, Any],
+    *,
+    npy_path: str | Path | None = None,
+) -> CaptureResult:
+    image_path = Path(output_path)
+    save_original_array(image_path, array)
+
+    saved_npy_path: Path | None = None
+    if npy_path is not None:
+        saved_npy_path = Path(npy_path)
+        saved_npy_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(saved_npy_path, array)
+
+    return CaptureResult(
+        image_path=image_path,
+        npy_path=saved_npy_path,
+        captured_at=str(metadata["captured_at"]),
+        completed_at=str(metadata["completed_at"]),
+        dtype=str(array.dtype),
+        shape=tuple(int(item) for item in array.shape),
+        pixel_type=metadata.get("pixel_type"),
+        width=metadata.get("width"),
+        height=metadata.get("height"),
+        camera_timestamp_ns=metadata.get("camera_timestamp_ns"),
+        block_id=metadata.get("block_id"),
+    )
+
+
+def _save_image(image: Image.Image, path: Path) -> None:
+    if path.suffix.lower() == ".png":
+        image.save(path, compress_level=1, optimize=False)
+        return
+    image.save(path)
 
 
 def iso_timestamp() -> str:

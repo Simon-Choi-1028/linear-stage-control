@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import Future
 from copy import deepcopy
 from pathlib import Path
 from threading import Lock
@@ -9,9 +10,10 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
-from .camera import BaslerCamera, camera_settings_from_config, enumerate_cameras, iso_timestamp
+from .camera import BaslerCamera, CaptureResult, camera_settings_from_config, enumerate_cameras, iso_timestamp
 from .dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
 from .diagnostics import collect_diagnostics
+from .disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from .error_model import error_budget_from_config, estimate_position_error_um
 from .exceptions import UpdateVerificationError, user_error_message
 from .logging_setup import add_run_file_handler, get_logger, remove_log_handler
@@ -77,6 +79,7 @@ class AcquisitionWorker(QThread):
                 DatasetRun(dataset_settings, self.config, self.points, self.config_path) as dataset,
                 ZaberXYStage(stage_settings) as stage,
                 BaslerCamera(camera_settings) as camera,
+                AsyncCaptureDiskWriter() as disk_writer,
             ):
                 run_dir = str(dataset.run_dir)
                 run_log_handler = add_run_file_handler(dataset.run_id)
@@ -97,6 +100,78 @@ class AcquisitionWorker(QThread):
                 default_capture_count = default_capture_count_from_config(self.config)
                 total = total_capture_count(self.points, default_capture_count)
                 completed = 0
+                disk_queue_size = _image_write_queue_size_from_config(self.config)
+                pending_disk_writes: deque[tuple[Future[CaptureResult], dict[str, Any]]] = deque()
+
+                def finish_disk_write(future: Future[CaptureResult], capture_record: dict[str, Any]) -> None:
+                    nonlocal completed
+                    try:
+                        capture = future.result()
+                    except Exception as exc:
+                        capture_record["status"] = "error"
+                        capture_record["error_message"] = str(exc)
+                        dataset.write_capture(capture_record)
+                        self.capture_done.emit(capture_record)
+                        raise
+
+                    capture_record.update(
+                        {
+                            "status": "ok",
+                            "capture_commanded_at": capture.captured_at,
+                            "capture_completed_at": capture.completed_at,
+                            "camera_timestamp_ns": capture.camera_timestamp_ns,
+                            "block_id": capture.block_id,
+                            "image_path": str(capture.image_path.relative_to(dataset.run_dir)),
+                            "image_filename": capture.image_path.name,
+                            "absolute_image_path": str(capture.image_path),
+                            "npy_path": str(capture.npy_path.relative_to(dataset.run_dir)) if capture.npy_path else "",
+                            "image_dtype": capture.dtype,
+                            "image_shape": list(capture.shape),
+                            "pixel_type": capture.pixel_type,
+                        }
+                    )
+                    dataset.write_capture(capture_record)
+                    self.capture_done.emit(capture_record)
+                    logger.info(
+                        "capture saved",
+                        extra={
+                            "event": "capture_saved",
+                            "point_index": capture_record.get("index"),
+                            "capture_index": capture_record.get("capture_index"),
+                            "image_path": str(capture.image_path),
+                        },
+                    )
+                    completed += 1
+                    self.progress_changed.emit(completed, total)
+                    self.status_changed.emit(f"{completed}/{total} 저장 완료")
+
+                def finish_oldest_disk_write() -> None:
+                    future, capture_record = pending_disk_writes.popleft()
+                    finish_disk_write(future, capture_record)
+
+                def drain_completed_disk_writes() -> None:
+                    while pending_disk_writes and pending_disk_writes[0][0].done():
+                        finish_oldest_disk_write()
+
+                def wait_for_all_disk_writes() -> None:
+                    while pending_disk_writes:
+                        finish_oldest_disk_write()
+
+                def submit_disk_write(
+                    image_path: Path,
+                    npy_path: Path | None,
+                    array: Any,
+                    metadata: dict[str, Any],
+                ) -> Future[CaptureResult]:
+                    return disk_writer.submit(
+                        CaptureDiskWriteJob(
+                            image_path=image_path,
+                            npy_path=npy_path,
+                            array=array,
+                            metadata=metadata,
+                        )
+                    )
+
                 for point in self.points:
                     if self._stop_requested:
                         stopped = True
@@ -180,42 +255,26 @@ class AcquisitionWorker(QThread):
                             image_timestamp = safe_timestamp()
                             image_path = dataset.image_path(point, image_timestamp, capture_index)
                             npy_path = dataset.npy_path(point, image_timestamp, capture_index)
-                            capture = camera.capture_original_to(image_path, npy_path=npy_path)
+                            if disk_queue_size > 0 and len(pending_disk_writes) >= disk_queue_size:
+                                self.status_changed.emit(f"{completed + 1}/{total} 이미지 저장 대기 중")
+                                finish_oldest_disk_write()
 
-                            self.status_changed.emit(f"{completed + 1}/{total} 이미지와 메타데이터 저장 중")
-                            capture_record.update(
-                                {
-                                    "status": "ok",
-                                    "capture_commanded_at": capture.captured_at,
-                                    "capture_completed_at": capture.completed_at,
-                                    "camera_timestamp_ns": capture.camera_timestamp_ns,
-                                    "block_id": capture.block_id,
-                                    "image_path": str(capture.image_path.relative_to(dataset.run_dir)),
-                                    "image_filename": capture.image_path.name,
-                                    "absolute_image_path": str(capture.image_path),
-                                    "npy_path": str(capture.npy_path.relative_to(dataset.run_dir))
-                                    if capture.npy_path
-                                    else "",
-                                    "image_dtype": capture.dtype,
-                                    "image_shape": list(capture.shape),
-                                    "pixel_type": capture.pixel_type,
-                                }
+                            array, metadata = camera.grab_original_array()
+                            if disk_queue_size <= 0:
+                                finish_disk_write(
+                                    submit_disk_write(image_path, npy_path, array, metadata),
+                                    capture_record,
+                                )
+                                continue
+                            pending_disk_writes.append(
+                                (
+                                    submit_disk_write(image_path, npy_path, array, metadata),
+                                    capture_record,
+                                )
                             )
-                            dataset.write_capture(capture_record)
-                            self.capture_done.emit(capture_record)
-                            logger.info(
-                                "capture saved",
-                                extra={
-                                    "event": "capture_saved",
-                                    "point_index": point.index,
-                                    "capture_index": capture_index,
-                                    "image_path": str(capture.image_path),
-                                },
-                            )
-                            completed += 1
-                            self.progress_changed.emit(completed, total)
-                            self.status_changed.emit(f"{completed}/{total} 저장 완료")
+                            drain_completed_disk_writes()
                     except StageMoveCancelled:
+                        wait_for_all_disk_writes()
                         stopped = True
                         record["status"] = "stopped"
                         record["error_message"] = "사용자 중지 요청으로 이동을 취소했습니다."
@@ -223,11 +282,14 @@ class AcquisitionWorker(QThread):
                         self.capture_done.emit(record)
                         break
                     except Exception as exc:
+                        wait_for_all_disk_writes()
                         record["status"] = "error"
                         record["error_message"] = str(exc)
                         dataset.write_capture(record)
                         self.capture_done.emit(record)
                         raise
+
+                wait_for_all_disk_writes()
 
                 for warning in camera.warnings:
                     self.log_message.emit(f"카메라 경고: {warning}")
@@ -357,6 +419,32 @@ def _rolling_fps(frame_times: deque[float]) -> float:
     if elapsed <= 0:
         return 0.0
     return (len(frame_times) - 1) / elapsed
+
+
+def _image_write_queue_size_from_config(config: dict[str, Any]) -> int:
+    dataset = config.get("dataset", {})
+    if not isinstance(dataset, dict):
+        return 2
+    if not _bool_config(dataset.get("async_image_writes", True), default=True):
+        return 0
+    try:
+        value = int(dataset.get("image_write_queue_size", 2))
+    except (TypeError, ValueError):
+        return 2
+    return max(1, min(8, value))
+
+
+def _bool_config(value: Any, *, default: bool) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 class CameraDiscoveryWorker(QThread):

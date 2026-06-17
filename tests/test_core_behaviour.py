@@ -23,6 +23,7 @@ from linear_stage_control.dataset import (
     DatasetRun,
     DatasetSettings,
     base_capture_record,
+    dataset_settings_from_config,
     point_name,
     validate_image_output_plan,
 )
@@ -31,6 +32,7 @@ from linear_stage_control.dataset_exports import (
     SUPPORTED_METADATA_FORMATS,
     normalise_formats,
 )
+from linear_stage_control.disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
 from linear_stage_control.exceptions import StageConnectionError
 from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
@@ -285,6 +287,39 @@ class CameraCompatibilityTests(unittest.TestCase):
         np.testing.assert_array_equal(detached, array)
         self.assertTrue(detached.flags.c_contiguous)
         self.assertFalse(np.shares_memory(detached, array))
+
+    def test_async_capture_disk_writer_saves_image_and_npy(self) -> None:
+        array = np.arange(16, dtype=np.uint8).reshape(4, 4)
+        metadata = {
+            "captured_at": "2026-06-17T10:00:00.000+09:00",
+            "completed_at": "2026-06-17T10:00:00.010+09:00",
+            "pixel_type": "Mono8",
+            "width": 4,
+            "height": 4,
+            "camera_timestamp_ns": 123,
+            "block_id": 456,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "capture.png"
+            npy_path = Path(directory) / "capture.npy"
+            with AsyncCaptureDiskWriter() as writer:
+                future = writer.submit(
+                    CaptureDiskWriteJob(
+                        image_path=image_path,
+                        npy_path=npy_path,
+                        array=array,
+                        metadata=metadata,
+                    )
+                )
+                result = future.result(timeout=10)
+
+            self.assertTrue(image_path.exists())
+            self.assertTrue(npy_path.exists())
+            self.assertEqual(result.image_path, image_path)
+            self.assertEqual(result.npy_path, npy_path)
+            self.assertEqual(result.dtype, "uint8")
+            self.assertEqual(result.shape, (4, 4))
+            np.testing.assert_array_equal(np.load(npy_path), array)
 
     def test_camera_orientation_flips_arrays_after_rotation(self) -> None:
         array = np.arange(12, dtype=np.uint8).reshape(3, 4)
@@ -863,6 +898,20 @@ class GuiSmokeTests(unittest.TestCase):
         np.testing.assert_array_equal(array, third)
         self.assertEqual(metadata["frame"], 3)
 
+    def test_image_write_queue_size_can_disable_async_writes(self) -> None:
+        from linear_stage_control.gui_workers import _image_write_queue_size_from_config
+
+        self.assertEqual(
+            _image_write_queue_size_from_config({"dataset": {"async_image_writes": False}}),
+            0,
+        )
+        self.assertEqual(
+            _image_write_queue_size_from_config(
+                {"dataset": {"async_image_writes": True, "image_write_queue_size": 99}}
+            ),
+            8,
+        )
+
     def test_responsive_layout_allows_narrow_and_short_windows(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
@@ -1196,6 +1245,21 @@ class GuiSmokeTests(unittest.TestCase):
 
 
 class DatasetNamingTests(unittest.TestCase):
+    def test_dataset_settings_parse_disk_flush_options(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = dataset_settings_from_config(
+                {
+                    "dataset": {
+                        "output_root": directory,
+                        "metadata_flush_records": "25",
+                        "metadata_flush_interval_s": "0.5",
+                    }
+                }
+            )
+
+        self.assertEqual(settings.metadata_flush_records, 25)
+        self.assertEqual(settings.metadata_flush_interval_s, 0.5)
+
     def test_point_name_uses_truncated_decimal_xy(self) -> None:
         first = points_from_records([{"label": "sample a", "x_mm": "33.3339", "y_mm": "0.0009"}])[0]
         second = points_from_records([{"label": "sample b", "x_mm": "0.5", "y_mm": "210"}])[0]

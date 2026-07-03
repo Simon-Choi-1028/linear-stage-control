@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.1.9 - 2026-07-03
+
+- Added a dedicated offline installer build that emits the setup EXE, SHA256 file, and manifest into the Windows Downloads folder.
+- Bundled the verified pylon Runtime 26.04.1 payload and Zaber Device Database for clean offline PC setup.
+- Added pylon Viewer detection so Live preview and acquisition preflight block cleanly when the external viewer is already using the camera.
+- Added acquisition timing fields for move, settle, camera capture, and disk write durations to make run bottlenecks visible in metadata and summaries.
+- Hardened packaged smoke testing by passing smoke environment variables directly through `ProcessStartInfo`.
+
 ## v0.1.8 - 2026-06-16
 
 - Replaced large capture and position `QTableWidget` surfaces with bounded Qt table models so long GUI runs keep only recent visible rows in memory.

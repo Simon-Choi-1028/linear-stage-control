@@ -72,6 +72,10 @@ class RunStatsAccumulator:
     measured_radial_error_um_max: float | None = None
     measured_radial_error_um_sum: float = 0.0
     measured_radial_error_um_count: int = 0
+    capture_duration_ms_sum: float = 0.0
+    capture_duration_ms_count: int = 0
+    disk_write_duration_ms_sum: float = 0.0
+    disk_write_duration_ms_count: int = 0
     error_messages: list[dict[str, Any]] = field(default_factory=list)
     max_error_messages: int = 1000
     omitted_error_message_count: int = 0
@@ -83,6 +87,8 @@ class RunStatsAccumulator:
             self.capture_ok_count += 1
             self._add_predicted(record.get("predicted_max_error_um"))
             self._add_measured(record.get("measured_radial_error_um"))
+            self._add_capture_duration(record.get("capture_duration_ms"))
+            self._add_disk_write_duration(record.get("disk_write_duration_ms"))
             if record.get("within_error_threshold") is False:
                 self.threshold_failure_count += 1
         elif status == "error":
@@ -117,6 +123,14 @@ class RunStatsAccumulator:
                 self.measured_radial_error_um_sum,
                 self.measured_radial_error_um_count,
             ),
+            "capture_duration_ms_mean": _mean_from_sum(
+                self.capture_duration_ms_sum,
+                self.capture_duration_ms_count,
+            ),
+            "disk_write_duration_ms_mean": _mean_from_sum(
+                self.disk_write_duration_ms_sum,
+                self.disk_write_duration_ms_count,
+            ),
             "error_messages": list(self.error_messages),
         }
         if self.omitted_error_message_count:
@@ -142,6 +156,20 @@ class RunStatsAccumulator:
         self.measured_radial_error_um_max = (
             number if self.measured_radial_error_um_max is None else max(self.measured_radial_error_um_max, number)
         )
+
+    def _add_capture_duration(self, value: Any) -> None:
+        number = _optional_float(value)
+        if number is None:
+            return
+        self.capture_duration_ms_sum += number
+        self.capture_duration_ms_count += 1
+
+    def _add_disk_write_duration(self, value: Any) -> None:
+        number = _optional_float(value)
+        if number is None:
+            return
+        self.disk_write_duration_ms_sum += number
+        self.disk_write_duration_ms_count += 1
 
 
 def iter_jsonl_records(path: Path) -> Iterator[dict[str, Any]]:
@@ -225,6 +253,8 @@ def write_summary_markdown(path: Path, summary: dict[str, Any]) -> None:
         f"- Mean predicted error (um): {_summary_number(summary['predicted_max_error_um_mean'])}",
         f"- Max measured radial error (um): {_summary_number(summary['measured_radial_error_um_max'])}",
         f"- Mean measured radial error (um): {_summary_number(summary['measured_radial_error_um_mean'])}",
+        f"- Mean capture duration (ms): {_summary_number(summary['capture_duration_ms_mean'])}",
+        f"- Mean disk write duration (ms): {_summary_number(summary['disk_write_duration_ms_mean'])}",
     ]
     if summary["error_messages"]:
         lines.extend(["", "## Capture Errors", ""])

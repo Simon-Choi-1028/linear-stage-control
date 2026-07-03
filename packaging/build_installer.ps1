@@ -24,7 +24,7 @@ function Invoke-FallbackInstallerBuild {
   $InstallerWorkPath = Join-Path $Root ".pyinstaller_build\installer"
   $InstallerSpecPath = Join-Path $Root ".pyinstaller_build\installer_spec"
   $AddData = "$PayloadPath;LinearStageControl"
-  & (Join-Path $Root ".venv\Scripts\pyinstaller.exe") `
+  & (Join-Path $Root "build\.venv\Scripts\pyinstaller.exe") `
     "--noconfirm" `
     "--clean" `
     "--onefile" `

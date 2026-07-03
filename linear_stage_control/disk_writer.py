@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import numpy as np
@@ -36,9 +37,11 @@ class AsyncCaptureDiskWriter:
 
 
 def _write_capture(job: CaptureDiskWriteJob) -> CaptureResult:
-    return save_original_capture(
+    started = monotonic()
+    result = save_original_capture(
         job.image_path,
         job.array,
         job.metadata,
         npy_path=job.npy_path,
     )
+    return replace(result, disk_write_duration_ms=(monotonic() - started) * 1000.0)

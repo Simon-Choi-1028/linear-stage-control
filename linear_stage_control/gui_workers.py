@@ -128,6 +128,7 @@ class AcquisitionWorker(QThread):
                             "image_dtype": capture.dtype,
                             "image_shape": list(capture.shape),
                             "pixel_type": capture.pixel_type,
+                            "disk_write_duration_ms": round(capture.disk_write_duration_ms, 3),
                         }
                     )
                     dataset.write_capture(capture_record)
@@ -209,6 +210,7 @@ class AcquisitionWorker(QThread):
                             },
                         )
                         record["move_started_at"] = iso_timestamp()
+                        move_started_monotonic = monotonic()
                         stage.move_absolute_mm(
                             point.x_mm,
                             point.y_mm,
@@ -216,6 +218,7 @@ class AcquisitionWorker(QThread):
                             cancel_requested=lambda: self._stop_requested,
                         )
                         record["move_completed_at"] = iso_timestamp()
+                        record["move_duration_ms"] = _elapsed_ms(move_started_monotonic)
 
                         self.status_changed.emit(f"{completed}/{total} 위치 확인 및 오차 계산 중")
                         actual_x_mm, actual_y_mm = stage.position_mm()
@@ -236,11 +239,13 @@ class AcquisitionWorker(QThread):
                         )
 
                         self.status_changed.emit(f"{completed}/{total} 안정화 대기 중")
+                        settle_started_monotonic = monotonic()
                         self._sleep_interruptible(max(0, int(stage_settings.settle_s * 1000)))
                         if self._stop_requested:
                             stopped = True
                             break
                         record["settle_completed_at"] = iso_timestamp()
+                        record["settle_duration_ms"] = _elapsed_ms(settle_started_monotonic)
 
                         for capture_index in range(1, capture_count + 1):
                             if self._stop_requested:
@@ -259,7 +264,9 @@ class AcquisitionWorker(QThread):
                                 self.status_changed.emit(f"{completed + 1}/{total} 이미지 저장 대기 중")
                                 finish_oldest_disk_write()
 
+                            capture_started_monotonic = monotonic()
                             array, metadata = camera.grab_original_array()
+                            capture_record["capture_duration_ms"] = _elapsed_ms(capture_started_monotonic)
                             if disk_queue_size <= 0:
                                 finish_disk_write(
                                     submit_disk_write(image_path, npy_path, array, metadata),
@@ -419,6 +426,10 @@ def _rolling_fps(frame_times: deque[float]) -> float:
     if elapsed <= 0:
         return 0.0
     return (len(frame_times) - 1) / elapsed
+
+
+def _elapsed_ms(started_monotonic: float) -> float:
+    return round((monotonic() - started_monotonic) * 1000.0, 3)
 
 
 def _image_write_queue_size_from_config(config: dict[str, Any]) -> int:

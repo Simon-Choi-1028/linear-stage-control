@@ -37,7 +37,7 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 #if FileExists(PylonRuntimeFile)
-Filename: "{app}\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"; Description: "Run Basler pylon Runtime installer"; Flags: postinstall skipifsilent unchecked shellexec
+Filename: "{app}\_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"; Description: "Install Basler pylon Runtime (required on clean PCs)"; Flags: postinstall skipifsilent shellexec
 #endif
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent

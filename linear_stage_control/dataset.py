@@ -376,6 +376,10 @@ CAPTURE_FIELDS = [
     "image_shape",
     "pixel_type",
     "error_message",
+    "move_duration_ms",
+    "settle_duration_ms",
+    "capture_duration_ms",
+    "disk_write_duration_ms",
 ]
 
 
@@ -423,6 +427,10 @@ def base_capture_record(run_id: str, point: ScanPoint) -> dict[str, Any]:
         "image_shape": "",
         "pixel_type": "",
         "error_message": "",
+        "move_duration_ms": "",
+        "settle_duration_ms": "",
+        "capture_duration_ms": "",
+        "disk_write_duration_ms": "",
     }
 
 

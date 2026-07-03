@@ -14,13 +14,21 @@ $DeviceDbSqlitePath = Join-Path $ZaberDir "devices-public-v2.sqlite"
 
 New-Item -ItemType Directory -Force -Path $WheelDir, $ZaberDir | Out-Null
 
-$PythonExe = Join-Path $Root ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $PythonExe)) {
+$PythonExe = Join-Path $Root "build\.venv\Scripts\python.exe"
+$PythonPrefixArgs = @()
+if (Test-Path -LiteralPath $PythonExe) {
+  $VenvVersion = & $PythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+  if ($VenvVersion -ne "3.13") {
+    $PythonExe = "py"
+    $PythonPrefixArgs = @("-3.13")
+  }
+} else {
   $PythonExe = "py"
+  $PythonPrefixArgs = @("-3.13")
 }
 
 if (-not $SkipWheel) {
-  & $PythonExe -m pip download `
+  & $PythonExe @PythonPrefixArgs -m pip download `
     --only-binary=:all: `
     --no-deps `
     --platform win_amd64 `
@@ -48,7 +56,7 @@ if not data.startswith(b"SQLite format 3\x00"):
     raise SystemExit(f"Downloaded Zaber Device DB does not decompress to SQLite: {src}")
 dst.write_bytes(data)
 '@
-$DecompressScript | & $PythonExe - $DeviceDbLzmaPath $DeviceDbSqlitePath
+$DecompressScript | & $PythonExe @PythonPrefixArgs - $DeviceDbLzmaPath $DeviceDbSqlitePath
 if ($LASTEXITCODE -ne 0) {
   throw "Failed to decompress and verify the official Zaber Device Database."
 }

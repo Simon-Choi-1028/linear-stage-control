@@ -319,6 +319,7 @@ class CameraCompatibilityTests(unittest.TestCase):
             self.assertEqual(result.npy_path, npy_path)
             self.assertEqual(result.dtype, "uint8")
             self.assertEqual(result.shape, (4, 4))
+            self.assertGreaterEqual(result.disk_write_duration_ms, 0.0)
             np.testing.assert_array_equal(np.load(npy_path), array)
 
     def test_camera_orientation_flips_arrays_after_rotation(self) -> None:
@@ -350,6 +351,24 @@ class ExportFormatTests(unittest.TestCase):
         )
 
         self.assertEqual(formats, ("csv", "jsonl", "yaml"))
+
+
+class ProcessGuardTests(unittest.TestCase):
+    def test_pylon_viewer_tasklist_csv_detection(self) -> None:
+        from linear_stage_control.process_guard import running_pylon_viewer_processes
+
+        sample = "\n".join(
+            [
+                '"notepad.exe","100","Console","1","1,000 K"',
+                '"pylonviewer.exe","200","Console","1","2,000 K"',
+                '"BaslerPylonViewerApp.exe","300","Console","1","3,000 K"',
+            ]
+        )
+
+        viewers = running_pylon_viewer_processes(sample)
+
+        self.assertEqual([viewer.name for viewer in viewers], ["pylonviewer.exe", "BaslerPylonViewerApp.exe"])
+        self.assertEqual([viewer.pid for viewer in viewers], [200, 300])
 
 
 class StageAxisSettingsTests(unittest.TestCase):
@@ -765,6 +784,31 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(window.preview_crop_rect, (0, 0, 64, 48))
         window.close()
 
+    def test_live_preview_blocks_when_pylon_viewer_is_running(self) -> None:
+        from linear_stage_control import gui_app
+        from linear_stage_control.gui_app import MainWindow
+        from linear_stage_control.process_guard import RunningProcess
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.camera_combo.addItem("자동 선택", "")
+        window.camera_combo.addItem("Basler test", "123")
+        original_warning = gui_app.QMessageBox.warning
+        original_processes = gui_app.running_pylon_viewer_processes
+        gui_app.QMessageBox.warning = lambda *args, **kwargs: None  # type: ignore[assignment]
+        gui_app.running_pylon_viewer_processes = lambda: [RunningProcess("pylonviewer.exe", 200)]  # type: ignore[assignment]
+        try:
+            window.start_live_preview()
+            app.processEvents()
+
+            self.assertIsNone(window.live_worker)
+            self.assertEqual(window.live_status_label.text(), "pylon Viewer 실행 중")
+            self.assertIn("Viewer를 닫은 뒤", window.preview_label.text())
+        finally:
+            gui_app.QMessageBox.warning = original_warning
+            gui_app.running_pylon_viewer_processes = original_processes
+            window.close()
+
     def test_live_parameter_update_sends_current_exposure_to_worker(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
@@ -1127,6 +1171,48 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(any("안정화" in detail for detail in duration_details))
         window.close()
 
+    def test_preflight_blocks_start_when_pylon_viewer_is_running(self) -> None:
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        from linear_stage_control import gui_app
+        from linear_stage_control.gui_app import MainWindow
+        from linear_stage_control.process_guard import RunningProcess
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.camera_combo.addItem("자동 선택", "")
+        window.camera_combo.addItem("Basler test", "123")
+        points = points_from_records([{"x_mm": 0, "y_mm": 0}])
+        config = {
+            "camera": {"pixel_format": "Mono8", "exposure_us": 5000},
+            "dataset": {"output_root": str(Path(tempfile.gettempdir()) / "LinearStageControl-QC")},
+            "scan": {"default_capture_count": 1},
+            "stage": {
+                "serial_port": "COM_TEST",
+                "settle_s": 0.2,
+                "axes": {
+                    "x": {"enabled": True, "device_index": 0, "axis_number": 1},
+                    "y": {"enabled": True, "device_index": 0, "axis_number": 2},
+                },
+            },
+            "updates": {"enabled": False},
+        }
+        original_processes = gui_app.running_pylon_viewer_processes
+        gui_app.running_pylon_viewer_processes = lambda: [RunningProcess("pylonviewer.exe", 200)]  # type: ignore[assignment]
+        try:
+            issues = window.collect_preflight_issues(points, config, validate_scan_points(points))
+            viewer_errors = [issue for issue in issues if issue.item == "pylon Viewer" and issue.status == "오류"]
+            self.assertTrue(viewer_errors)
+
+            dialog = window.build_preflight_dialog(points, config, validate_scan_points(points))
+            buttons = dialog.findChild(QDialogButtonBox)
+            self.assertIsNotNone(buttons)
+            self.assertFalse(buttons.button(QDialogButtonBox.Ok).isEnabled())
+            dialog.close()
+        finally:
+            gui_app.running_pylon_viewer_processes = original_processes
+            window.close()
+
     def test_run_duration_estimate_includes_all_planned_phases(self) -> None:
         from linear_stage_control.gui_app import estimate_run_duration
 
@@ -1362,6 +1448,36 @@ class DatasetNamingTests(unittest.TestCase):
             self.assertNotIn("files", manifest)
             self.assertEqual(summary["record_count"], 50)
 
+    def test_timing_fields_are_exported_and_summarized(self) -> None:
+        from linear_stage_control.dataset import CAPTURE_FIELDS
+        from linear_stage_control.dataset_exports import RunStatsAccumulator
+
+        point = points_from_records([{"x_mm": 0, "y_mm": 0}])[0]
+        record = base_capture_record("run", point)
+        timing_fields = [
+            "move_duration_ms",
+            "settle_duration_ms",
+            "capture_duration_ms",
+            "disk_write_duration_ms",
+        ]
+
+        for field in timing_fields:
+            self.assertIn(field, CAPTURE_FIELDS)
+            self.assertIn(field, record)
+
+        stats = RunStatsAccumulator()
+        stats.add_record(
+            {
+                "status": "ok",
+                "capture_duration_ms": 12.5,
+                "disk_write_duration_ms": 4.5,
+            }
+        )
+        summary = stats.as_summary(run_id="run", status="complete", point_count=1)
+
+        self.assertEqual(summary["capture_duration_ms_mean"], 12.5)
+        self.assertEqual(summary["disk_write_duration_ms_mean"], 4.5)
+
     def test_heavy_metadata_exports_are_generated_from_jsonl_stream(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             points = points_from_records(
@@ -1399,6 +1515,7 @@ class DiagnosticsTests(unittest.TestCase):
 
         items = {result.item for result in results}
         self.assertIn("Basler pylon/Python", items)
+        self.assertIn("pylon Viewer", items)
         self.assertIn("Zaber COM 포트", items)
         self.assertIn("저장 폴더 권한", items)
 

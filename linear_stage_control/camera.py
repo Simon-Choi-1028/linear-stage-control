@@ -126,6 +126,7 @@ class CaptureResult:
     height: int | None
     camera_timestamp_ns: int | None
     block_id: int | None
+    disk_write_duration_ms: float = 0.0
 
 
 def enumerate_cameras() -> list[dict[str, str]]:

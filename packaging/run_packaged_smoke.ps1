@@ -18,14 +18,17 @@ if (-not (Test-Path -LiteralPath $TraceDir)) {
 }
 
 Remove-Item -LiteralPath $ResolvedTracePath -ErrorAction SilentlyContinue
-$env:QT_QPA_PLATFORM = "offscreen"
-$env:LINEAR_STAGE_SMOKE_TRACE = $ResolvedTracePath
 
-$smoke = Start-Process `
-  -FilePath $ResolvedAppExe `
-  -ArgumentList "--smoke-test" `
-  -PassThru `
-  -WorkingDirectory (Split-Path -Parent $ResolvedAppExe)
+$processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$processInfo.FileName = $ResolvedAppExe
+$processInfo.Arguments = "--smoke-test"
+$processInfo.WorkingDirectory = Split-Path -Parent $ResolvedAppExe
+$processInfo.UseShellExecute = $false
+$processInfo.CreateNoWindow = $true
+$processInfo.Environment["QT_QPA_PLATFORM"] = "offscreen"
+$processInfo.Environment["LINEAR_STAGE_SMOKE_TRACE"] = $ResolvedTracePath
+
+$smoke = [System.Diagnostics.Process]::Start($processInfo)
 if (-not $smoke.WaitForExit($TimeoutMs)) {
   Stop-Process -Id $smoke.Id -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 5

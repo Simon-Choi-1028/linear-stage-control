@@ -9,13 +9,22 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
-if (-not (Test-Path -LiteralPath ".venv")) {
-  py -3.13 -m venv .venv
+$VenvDir = Join-Path $Root "build\.venv"
+$venvPython = Join-Path $VenvDir "Scripts\python.exe"
+if (Test-Path -LiteralPath $venvPython) {
+  $venvVersion = & $venvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+  if ($venvVersion -ne "3.13") {
+    Remove-Item -LiteralPath $VenvDir -Recurse -Force
+  }
 }
 
-& .\.venv\Scripts\python.exe -m pip install --upgrade pip
-& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-& .\.venv\Scripts\python.exe -m pip install --no-build-isolation -e .
+if (-not (Test-Path -LiteralPath $VenvDir)) {
+  py -3.13 -m venv $VenvDir
+}
+
+& $venvPython -m pip install --upgrade pip
+& $venvPython -m pip install -r requirements.txt
+& $venvPython -m pip install --no-build-isolation -e .
 
 $distTarget = Join-Path $Root "dist\LinearStageControl"
 $runningApps = Get-Process -Name "LinearStageControl" -ErrorAction SilentlyContinue
@@ -134,7 +143,7 @@ foreach ($item in $dataFiles) {
 }
 
 $pyinstallerArgs += "scripts\launch_gui.py"
-& .\.venv\Scripts\pyinstaller.exe @pyinstallerArgs
+& (Join-Path $VenvDir "Scripts\pyinstaller.exe") @pyinstallerArgs
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller failed with exit code $LASTEXITCODE"
 }

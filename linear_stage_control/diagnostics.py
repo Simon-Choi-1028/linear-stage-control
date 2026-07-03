@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .camera import PYLON_IMPORT_ERROR, enumerate_cameras
+from .process_guard import describe_processes, running_pylon_viewer_processes
 from .stage import configure_zaber_device_database, list_serial_ports, stage_settings_from_config
 from .updater import fetch_latest_update, update_settings_from_config
 
@@ -28,6 +29,7 @@ def collect_diagnostics(
 ) -> list[DiagnosticResult]:
     results = [
         _pylon_result(),
+        _pylon_viewer_result(),
         _serial_port_result(config),
         _zaber_database_result(config),
         _output_root_result(output_root or config.get("dataset", {}).get("output_root")),
@@ -43,6 +45,13 @@ def _pylon_result() -> DiagnosticResult:
     if PYLON_IMPORT_ERROR is None:
         return DiagnosticResult("Basler pylon/Python", "통과", "pypylon import 성공")
     return DiagnosticResult("Basler pylon/Python", "오류", f"pypylon import 실패: {PYLON_IMPORT_ERROR}")
+
+
+def _pylon_viewer_result() -> DiagnosticResult:
+    viewers = running_pylon_viewer_processes()
+    if viewers:
+        return DiagnosticResult("pylon Viewer", "경고", f"실행 중: {describe_processes(viewers)}")
+    return DiagnosticResult("pylon Viewer", "통과", "실행 중인 pylon Viewer 없음")
 
 
 def _camera_detection_result() -> DiagnosticResult:

@@ -113,6 +113,7 @@ from .position_validation import (
     short_issue_text,
 )
 from .preview_rendering import qimage_from_array, render_preview_qimage
+from .process_guard import pylon_viewer_block_message, running_pylon_viewer_processes
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
@@ -2164,6 +2165,8 @@ class MainWindow(QMainWindow):
         if self.camera_combo.count() <= 1:
             self.live_status_label.setText("Live 대기")
             return
+        if self._block_if_pylon_viewer_running("Live preview"):
+            return
         self.stop_live_preview(wait_ms=800, update_label=False)
         self.preview_mode = "live"
         self.current_image_path = None
@@ -2213,6 +2216,20 @@ class MainWindow(QMainWindow):
             self.live_status_label.setText("Live 정지")
         if self.app_state == AppRunState.LIVE_PREVIEW:
             self.apply_ambient_state()
+
+    def _block_if_pylon_viewer_running(self, action: str) -> bool:
+        viewers = running_pylon_viewer_processes()
+        if not viewers:
+            return False
+        message = pylon_viewer_block_message(viewers)
+        if hasattr(self, "live_status_label"):
+            self.live_status_label.setText("pylon Viewer 실행 중")
+        if hasattr(self, "preview_label"):
+            self.preview_label.setText(f"{action} 시작 불가\n{message}")
+        self.log(message)
+        QMessageBox.warning(self, "pylon Viewer 실행 중", message)
+        self.apply_state(AppRunState.ERROR)
+        return True
 
     def on_live_frame_available(self) -> None:
         worker = self.live_worker
@@ -2962,6 +2979,12 @@ class MainWindow(QMainWindow):
                     f"{detected_cameras}대 감지 | 선택: {selected_camera}",
                 )
             )
+
+        pylon_viewers = running_pylon_viewer_processes()
+        if pylon_viewers:
+            issues.append(PreflightIssue("pylon Viewer", "오류", pylon_viewer_block_message(pylon_viewers)))
+        else:
+            issues.append(PreflightIssue("pylon Viewer", "통과", "실행 중인 pylon Viewer 없음"))
 
         stage = config.get("stage", {})
         selected_port = str(stage.get("serial_port") or "").strip()

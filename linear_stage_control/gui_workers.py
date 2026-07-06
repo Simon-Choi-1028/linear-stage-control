@@ -33,6 +33,10 @@ MANUAL_HOME_CENTER_Y_MM = 105.0
 MANUAL_HOME_CENTER_VELOCITY_MM_S = 50.0
 
 
+class _CaptureRecordAlreadyWritten(RuntimeError):
+    """Raised after a failed capture has already been recorded in metadata."""
+
+
 class AcquisitionWorker(QThread):
     log_message = Signal(str)
     status_changed = Signal(str)
@@ -112,8 +116,9 @@ class AcquisitionWorker(QThread):
                         capture_record["error_message"] = str(exc)
                         dataset.write_capture(capture_record)
                         self.capture_done.emit(capture_record)
-                        raise
+                        raise _CaptureRecordAlreadyWritten(str(exc)) from exc
 
+                    _validate_saved_capture(capture)
                     capture_record.update(
                         {
                             "status": "ok",
@@ -288,6 +293,9 @@ class AcquisitionWorker(QThread):
                         dataset.write_capture(record)
                         self.capture_done.emit(record)
                         break
+                    except _CaptureRecordAlreadyWritten:
+                        wait_for_all_disk_writes()
+                        raise
                     except Exception as exc:
                         wait_for_all_disk_writes()
                         record["status"] = "error"
@@ -430,6 +438,15 @@ def _rolling_fps(frame_times: deque[float]) -> float:
 
 def _elapsed_ms(started_monotonic: float) -> float:
     return round((monotonic() - started_monotonic) * 1000.0, 3)
+
+
+def _validate_saved_capture(capture: CaptureResult) -> None:
+    if not capture.image_path.exists() or capture.image_path.stat().st_size <= 0:
+        raise RuntimeError(f"Saved image is missing or empty: {capture.image_path}")
+    if capture.npy_path is not None and (not capture.npy_path.exists() or capture.npy_path.stat().st_size <= 0):
+        raise RuntimeError(f"Saved NumPy array is missing or empty: {capture.npy_path}")
+    if not capture.shape or any(int(item) <= 0 for item in capture.shape):
+        raise RuntimeError(f"Capture shape is invalid: {capture.shape}")
 
 
 def _image_write_queue_size_from_config(config: dict[str, Any]) -> int:

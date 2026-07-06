@@ -23,10 +23,12 @@ if not getattr(sys, "frozen", False):
 
 
 _trace("launcher_start")
-from linear_stage_control.gui_app import main
+from linear_stage_control.experiments.launcher import main
 
-_trace("gui_app_imported")
+_trace("experiment_launcher_imported")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    _trace(f"launcher_exit:{exit_code}")
+    raise SystemExit(exit_code)

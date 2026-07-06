@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import lzma
+import math
 import os
 import sys
 import time
@@ -20,6 +21,7 @@ from zaber_motion.exceptions import (
 )
 
 from .exceptions import LinearStageControlError, StageConnectionError
+from .position_validation import POSITION_MAX_MM, POSITION_MIN_MM
 
 DEVICE_DB_SQLITE_NAME = "devices-public-v2.sqlite"
 DEVICE_DB_LZMA_NAME = "devices-public-v2.sqlite.lzma"
@@ -96,15 +98,22 @@ def stage_settings_from_config(config: dict[str, Any]) -> StageSettings:
 def _settle_seconds(stage: dict[str, Any]) -> float:
     try:
         if stage.get("settle_s") not in (None, ""):
-            return float(stage.get("settle_s", 0.2))
-        if stage.get("settle_ms") not in (None, ""):
-            return float(stage["settle_ms"]) / 1000.0
-        return 0.2
+            seconds = float(stage.get("settle_s", 0.2))
+        elif stage.get("settle_ms") not in (None, ""):
+            seconds = float(stage["settle_ms"]) / 1000.0
+        else:
+            seconds = 0.2
     except (TypeError, ValueError) as exc:
         raise StageConnectionError(
             "Zaber 안정화 시간은 숫자로 입력해야 합니다.",
             f"Invalid stage settle value: {exc}",
         ) from exc
+    if not math.isfinite(seconds):
+        raise StageConnectionError(
+            "Zaber settle time must be finite.",
+            f"Invalid stage settle value: {seconds!r}",
+        )
+    return seconds
 
 
 def list_serial_ports() -> list[dict[str, str]]:
@@ -190,6 +199,11 @@ class ZaberXYStage:
         cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
         active_moves: list[Axis] = []
+        if self.settings.x.enabled:
+            x_mm = _validate_move_target_mm(x_mm, "X")
+        if self.settings.y.enabled:
+            y_mm = _validate_move_target_mm(y_mm, "Y")
+        velocity_mm_s = _validate_move_velocity(velocity_mm_s)
         move_kwargs = _move_kwargs(velocity_mm_s)
         try:
             if self.settings.x.enabled:
@@ -405,12 +419,18 @@ def _optional_float(value: Any, field_name: str = "value") -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError) as exc:
         raise StageConnectionError(
             f"{field_name} 값은 숫자로 입력해야 합니다.",
             f"Invalid float for {field_name}: {value!r}",
         ) from exc
+    if not math.isfinite(number):
+        raise StageConnectionError(
+            f"{field_name} must be finite.",
+            f"Invalid float for {field_name}: {value!r}",
+        )
+    return number
 
 
 def _optional_str(value: Any) -> str | None:
@@ -418,6 +438,45 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _validate_move_target_mm(value: Any, axis_name: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise StageConnectionError(
+            f"{axis_name} move target must be a number in mm.",
+            f"Invalid {axis_name} target: {value!r}",
+        ) from exc
+    if not math.isfinite(number):
+        raise StageConnectionError(
+            f"{axis_name} move target must be finite.",
+            f"Invalid {axis_name} target: {value!r}",
+        )
+    if number < POSITION_MIN_MM or number > POSITION_MAX_MM:
+        raise StageConnectionError(
+            f"{axis_name} move target is outside {POSITION_MIN_MM:g}-{POSITION_MAX_MM:g} mm.",
+            f"Out-of-range {axis_name} target: {number}",
+        )
+    return number
+
+
+def _validate_move_velocity(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise StageConnectionError(
+            "Move velocity must be blank or a number in mm/s.",
+            f"Invalid move velocity: {value!r}",
+        ) from exc
+    if not math.isfinite(number) or number <= 0:
+        raise StageConnectionError(
+            "Move velocity must be greater than 0 mm/s.",
+            f"Invalid move velocity: {value!r}",
+        )
+    return number
 
 
 def _move_kwargs(velocity_mm_s: float | None) -> dict[str, Any]:

@@ -4,9 +4,13 @@ import numpy as np
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 
+MAX_PREVIEW_PIXELS = 64_000_000
+MAX_PREVIEW_SOURCE_BYTES = 256 * 1024 * 1024
+
 
 def qimage_from_array(array: object) -> QImage:
     arr = np.asarray(array)
+    _validate_preview_array(arr)
     if arr.ndim == 2:
         arr8 = _to_uint8(arr)
         return QImage(
@@ -19,6 +23,8 @@ def qimage_from_array(array: object) -> QImage:
     if arr.ndim == 3:
         if arr.shape[2] == 1:
             return qimage_from_array(arr[:, :, 0])
+        if arr.shape[2] not in (3, 4):
+            raise ValueError(f"Unsupported live frame channel count: {arr.shape[2]}")
         arr8 = _to_uint8(arr[:, :, :4])
         if arr8.shape[2] >= 4:
             return QImage(
@@ -36,6 +42,25 @@ def qimage_from_array(array: object) -> QImage:
             QImage.Format_RGB888,
         ).copy()
     raise ValueError(f"Unsupported live frame shape: {arr.shape}")
+
+
+def _validate_preview_array(arr: np.ndarray) -> None:
+    if arr.ndim not in (2, 3):
+        raise ValueError(f"Unsupported live frame shape: {arr.shape}")
+    if any(int(size) <= 0 for size in arr.shape[:2]):
+        raise ValueError(f"Live frame has an empty dimension: {arr.shape}")
+    if arr.dtype == np.dtype("O") or np.issubdtype(arr.dtype, np.complexfloating):
+        raise TypeError(f"Unsupported live frame dtype: {arr.dtype}")
+    pixels = int(arr.shape[0]) * int(arr.shape[1])
+    if pixels > MAX_PREVIEW_PIXELS:
+        raise MemoryError(
+            f"Preview frame is too large: {arr.shape[1]}x{arr.shape[0]} px "
+            f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
+        )
+    if int(arr.nbytes) > MAX_PREVIEW_SOURCE_BYTES:
+        raise MemoryError(
+            f"Preview frame uses too much source memory: {arr.nbytes / (1024 * 1024):.1f} MiB"
+        )
 
 
 def render_preview_qimage(

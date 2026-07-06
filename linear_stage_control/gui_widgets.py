@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .gui_support import apply_button_icon as _apply_button_icon
+from .preview_rendering import MAX_PREVIEW_PIXELS, qimage_from_array
 from .text_formatting import um_text as _um_text
 
 
@@ -481,9 +483,15 @@ class ErrorChartWidget(QWidget):
 
 def _pixmap_from_image_path(path: Path) -> QPixmap:
     with Image.open(path) as source_image:
+        width, height = source_image.size
+        pixels = int(width) * int(height)
+        if pixels > MAX_PREVIEW_PIXELS:
+            raise MemoryError(
+                f"Fullscreen image is too large: {width}x{height} px "
+                f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
+            )
         image = source_image.convert("RGB")
-        data = image.tobytes("raw", "RGB")
-        qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
+        qimage = qimage_from_array(np.asarray(image))
     return QPixmap.fromImage(qimage)
 
 

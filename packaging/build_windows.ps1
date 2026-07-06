@@ -54,6 +54,8 @@ $pyinstallerArgs = @(
   "--collect-submodules", "pypylon",
   "--collect-all", "zaber_motion",
   "--collect-binaries", "zaber_motion_bindings",
+  "--collect-submodules", "cv2",
+  "--collect-all", "scipy",
   "--collect-submodules", "serial"
 )
 
@@ -98,7 +100,30 @@ $excludeModules = @(
   "PySide6.QtXml",
   "matplotlib",
   "pandas",
-  "scipy",
+  "scipy.conftest",
+  "scipy._lib.tests",
+  "scipy.cluster.tests",
+  "scipy.constants.tests",
+  "scipy.datasets.tests",
+  "scipy.fft.tests",
+  "scipy.fftpack.tests",
+  "scipy.integrate.tests",
+  "scipy.interpolate.tests",
+  "scipy.io.tests",
+  "scipy.linalg.tests",
+  "scipy.misc.tests",
+  "scipy.ndimage.tests",
+  "scipy.odr.tests",
+  "scipy.optimize.tests",
+  "scipy.optimize._trustregion_constr.tests",
+  "scipy.signal.tests",
+  "scipy.sparse.tests",
+  "scipy.sparse.csgraph.tests",
+  "scipy.sparse.linalg.tests",
+  "scipy.spatial.tests",
+  "scipy.spatial.transform.tests",
+  "scipy.special.tests",
+  "scipy.stats.tests",
   "tkinter"
 )
 foreach ($module in $excludeModules) {

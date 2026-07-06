@@ -42,6 +42,8 @@ OUTPUT_PIXEL_TYPE_ALIASES = {
     "RGBA8": "RGBA8packed",
     "BGRA8": "BGRA8packed",
 }
+MAX_CAPTURE_PIXELS = 128_000_000
+MAX_CAPTURE_SOURCE_BYTES = 1024 * 1024 * 1024
 
 
 @dataclass
@@ -720,6 +722,7 @@ def apply_camera_orientation(
 def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
     image: Image.Image | None = None
     try:
+        array = _validate_image_array_for_save(array, context="converted image")
         path.parent.mkdir(parents=True, exist_ok=True)
         output_format = _normalise_pixel_format_name(pixel_format)
         if array.ndim == 2:
@@ -743,6 +746,7 @@ def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
 def save_original_array(path: Path, array: np.ndarray) -> None:
     image: Image.Image | None = None
     try:
+        array = _validate_image_array_for_save(array, context="original image")
         path.parent.mkdir(parents=True, exist_ok=True)
         if array.ndim == 2:
             image = Image.fromarray(np.ascontiguousarray(array))
@@ -768,6 +772,7 @@ def save_original_capture(
     npy_path: str | Path | None = None,
 ) -> CaptureResult:
     image_path = Path(output_path)
+    _validate_capture_array_metadata(array, metadata)
     save_original_array(image_path, array)
 
     saved_npy_path: Path | None = None
@@ -789,6 +794,65 @@ def save_original_capture(
         camera_timestamp_ns=metadata.get("camera_timestamp_ns"),
         block_id=metadata.get("block_id"),
     )
+
+
+def _validate_capture_array_metadata(array: np.ndarray, metadata: dict[str, Any]) -> None:
+    array = _validate_image_array_for_save(array, context="camera image")
+    if "captured_at" not in metadata or "completed_at" not in metadata:
+        raise DatasetWriteError(
+            "카메라 캡처 metadata에 필수 timestamp가 없습니다.",
+            f"Missing captured_at/completed_at in metadata keys: {sorted(metadata)}",
+        )
+    if array.ndim not in (2, 3) or array.size == 0:
+        raise DatasetWriteError("카메라 이미지 배열이 비어 있거나 지원하지 않는 형태입니다.", f"shape={array.shape}")
+
+    height = _optional_metadata_int(metadata.get("height"), "height")
+    width = _optional_metadata_int(metadata.get("width"), "width")
+    actual_height, actual_width = array.shape[:2]
+    if height is not None and height != actual_height:
+        raise DatasetWriteError(
+            "카메라 metadata 높이와 실제 이미지 높이가 일치하지 않습니다.",
+            f"metadata height={height}, array height={actual_height}",
+        )
+    if width is not None and width != actual_width:
+        raise DatasetWriteError(
+            "카메라 metadata 너비와 실제 이미지 너비가 일치하지 않습니다.",
+            f"metadata width={width}, array width={actual_width}",
+        )
+
+
+def _optional_metadata_int(value: Any, name: str) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise DatasetWriteError(
+            f"카메라 metadata {name} 값이 정수가 아닙니다.",
+            f"{name}={value!r}",
+        ) from exc
+
+
+def _validate_image_array_for_save(array: np.ndarray, *, context: str) -> np.ndarray:
+    arr = np.asarray(array)
+    if arr.ndim not in (2, 3) or arr.size == 0:
+        raise DatasetWriteError(f"{context} array is empty or has an unsupported shape.", f"shape={arr.shape}")
+    if arr.ndim == 3 and arr.shape[2] not in (3, 4):
+        raise DatasetWriteError(f"{context} channel count is unsupported.", f"shape={arr.shape}")
+    if arr.dtype == np.dtype("O") or np.issubdtype(arr.dtype, np.complexfloating):
+        raise DatasetWriteError(f"{context} dtype is unsupported.", f"dtype={arr.dtype}")
+    pixels = int(arr.shape[0]) * int(arr.shape[1])
+    if pixels > MAX_CAPTURE_PIXELS:
+        raise DatasetWriteError(
+            f"{context} is too large to save safely.",
+            f"{arr.shape[1]}x{arr.shape[0]} px ({pixels:,} px > {MAX_CAPTURE_PIXELS:,} px)",
+        )
+    if int(arr.nbytes) > MAX_CAPTURE_SOURCE_BYTES:
+        raise DatasetWriteError(
+            f"{context} uses too much source memory to save safely.",
+            f"{arr.nbytes / (1024 * 1024):.1f} MiB",
+        )
+    return arr
 
 
 def _save_image(image: Image.Image, path: Path) -> None:

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 from PIL import Image
 from PySide6.QtCore import QSize, Qt, QTimer
@@ -112,7 +113,7 @@ from .position_validation import (
     parse_position_rows,
     short_issue_text,
 )
-from .preview_rendering import qimage_from_array, render_preview_qimage
+from .preview_rendering import MAX_PREVIEW_PIXELS, qimage_from_array, render_preview_qimage
 from .process_guard import pylon_viewer_block_message, running_pylon_viewer_processes
 from .scan import (
     ScanPoint,
@@ -547,14 +548,22 @@ class MainWindow(QMainWindow):
                 return
         if self.worker is not None and not self.worker.isRunning():
             self.cleanup_finished_worker()
-        self.stop_live_preview(wait_ms=1500)
+        if not self.stop_live_preview(wait_ms=1500):
+            self.logger.warning("close deferred while live worker is still running", extra={"event": "live_close_deferred"})
+            if hasattr(event, "ignore"):
+                event.ignore()
+            return
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_scan_worker.wait(2000)
         for worker in (self.diagnostics_worker, self.manual_stage_worker):
             if worker is not None and worker.isRunning():
                 if hasattr(worker, "request_stop"):
                     worker.request_stop()
-                worker.wait(1500)
+                if not worker.wait(1500):
+                    self.logger.warning("close deferred while background worker is still running", extra={"event": "background_close_deferred"})
+                    if hasattr(event, "ignore"):
+                        event.ignore()
+                    return
         for worker in (self.update_check_worker, self.update_download_worker):
             if worker is not None and worker.isRunning():
                 worker.wait(1000)
@@ -986,15 +995,20 @@ class MainWindow(QMainWindow):
         zoom = self.preview_zoom_slider.value() if hasattr(self, "preview_zoom_slider") else 100
         grid = self.preview_grid_check.isChecked() if hasattr(self, "preview_grid_check") else False
         cross = self.preview_cross_check.isChecked() if hasattr(self, "preview_cross_check") else False
-        pixmap, crop_rect = render_preview_qimage(
-            self.preview_source_qimage,
-            self.preview_target_size(),
-            zoom,
-            self.preview_center_x,
-            self.preview_center_y,
-            grid,
-            cross,
-        )
+        try:
+            pixmap, crop_rect = render_preview_qimage(
+                self.preview_source_qimage,
+                self.preview_target_size(),
+                zoom,
+                self.preview_center_x,
+                self.preview_center_y,
+                grid,
+                cross,
+            )
+        except Exception as exc:
+            self.preview_label.setText(f"Preview render error\n{exc}")
+            self.preview_crop_rect = None
+            return
         self.preview_crop_rect = crop_rect
         self.preview_label.setPixmap(pixmap)
 
@@ -2152,7 +2166,9 @@ class MainWindow(QMainWindow):
     def restart_live_preview_from_button(self) -> None:
         self.preview_mode = "live"
         self.reset_live_preview_view()
-        self.stop_live_preview(wait_ms=1500, update_label=False)
+        if not self.stop_live_preview(wait_ms=1500, update_label=False):
+            self.live_status_label.setText("Live 정지 처리 중")
+            return
         if self.camera_combo.count() <= 1:
             self.live_status_label.setText("카메라 재검색 중")
             self.start_camera_scan("live_recover")
@@ -2167,7 +2183,9 @@ class MainWindow(QMainWindow):
             return
         if self._block_if_pylon_viewer_running("Live preview"):
             return
-        self.stop_live_preview(wait_ms=800, update_label=False)
+        if not self.stop_live_preview(wait_ms=800, update_label=False):
+            self.live_status_label.setText("이전 Live 정리 중")
+            return
         self.preview_mode = "live"
         self.current_image_path = None
         self.fullscreen_button.setEnabled(False)
@@ -2199,23 +2217,27 @@ class MainWindow(QMainWindow):
         self.live_worker.start()
         self.apply_state(AppRunState.LIVE_PREVIEW)
 
-    def stop_live_preview(self, wait_ms: int = 0, update_label: bool = True) -> None:
+    def stop_live_preview(self, wait_ms: int = 0, update_label: bool = True) -> bool:
         if self.live_worker is None:
             if update_label and hasattr(self, "live_status_label"):
                 self.live_status_label.setText("Live 정지")
             if self.app_state == AppRunState.LIVE_PREVIEW:
                 self.apply_ambient_state()
-            return
+            return True
         worker = self.live_worker
         worker.request_stop()
-        if wait_ms > 0:
-            worker.wait(wait_ms)
-        if not worker.isRunning():
-            self.live_worker = None
+        if wait_ms > 0 and not worker.wait(wait_ms):
+            if update_label and hasattr(self, "live_status_label"):
+                self.live_status_label.setText("Live 정지 처리 중")
+            return False
+        if worker.isRunning():
+            return False
+        self.live_worker = None
         if update_label and hasattr(self, "live_status_label"):
             self.live_status_label.setText("Live 정지")
         if self.app_state == AppRunState.LIVE_PREVIEW:
             self.apply_ambient_state()
+        return True
 
     def _block_if_pylon_viewer_running(self, action: str) -> bool:
         viewers = running_pylon_viewer_processes()
@@ -2248,7 +2270,16 @@ class MainWindow(QMainWindow):
         self.live_first_frame_pending = False
         if reset_center:
             self.reset_live_preview_view()
-        qimage = qimage_from_array(array)
+        try:
+            qimage = qimage_from_array(array)
+        except Exception as exc:
+            message = f"Live preview frame skipped: {exc}"
+            self.live_status_label.setText("Live frame skipped")
+            self.preview_info_label.setText(message)
+            if getattr(self, "_last_live_frame_error", "") != str(exc):
+                self._last_live_frame_error = str(exc)
+                self.log(message)
+            return
         self.set_preview_source(qimage, reset_center=reset_center)
         if reset_center:
             shape = getattr(array, "shape", None)
@@ -2724,11 +2755,19 @@ class MainWindow(QMainWindow):
         self.start_manual_stage_action("position")
 
     def home_manual_stage(self) -> None:
-        reply = QMessageBox.question(
-            self,
-            "원점 복귀",
-            "활성화된 Zaber 축을 원점 복귀한 뒤 X=105, Y=105 mm로 50 mm/s 이동할까요?",
-        )
+        if self.manual_stage_worker is not None:
+            self.manual_stage_status_label.setText("이전 수동 명령 정리 중")
+            return
+        self._set_manual_stage_enabled(False)
+        try:
+            reply = QMessageBox.question(
+                self,
+                "원점 복귀",
+                "활성화된 Zaber 축을 원점 복귀한 뒤 X=105, Y=105 mm로 50 mm/s 이동할까요?",
+            )
+        finally:
+            if self.manual_stage_worker is None:
+                self._set_manual_stage_enabled(True)
         if reply == QMessageBox.StandardButton.Yes:
             self.start_manual_stage_action("home")
 
@@ -2755,9 +2794,12 @@ class MainWindow(QMainWindow):
         self.start_manual_stage_action("move", x_mm=x_mm, y_mm=y_mm)
 
     def stop_manual_stage(self) -> None:
-        if self.manual_stage_worker is not None and self.manual_stage_worker.isRunning():
-            self.manual_stage_worker.request_stop()
-            self.manual_stage_status_label.setText("정지 요청됨")
+        if self.manual_stage_worker is not None:
+            if self.manual_stage_worker.isRunning():
+                self.manual_stage_worker.request_stop()
+                self.manual_stage_status_label.setText("정지 요청됨")
+                return
+            self.manual_stage_status_label.setText("이전 명령 정리 중")
             return
         self.start_manual_stage_action("stop")
 
@@ -2771,7 +2813,7 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "수동 스테이지", "촬영 run 중에는 수동 스테이지 명령을 보낼 수 없습니다.")
             return
-        if self.manual_stage_worker is not None and self.manual_stage_worker.isRunning():
+        if self.manual_stage_worker is not None:
             self.manual_stage_status_label.setText("이전 수동 명령 정리 중")
             return
         try:
@@ -2782,19 +2824,24 @@ class MainWindow(QMainWindow):
             return
         self.manual_stage_status_label.setText("명령 준비 중")
         self.apply_state(AppRunState.MANUAL_STAGE)
-        self.manual_stage_worker = ManualStageWorker(
-            config,
-            action,
-            x_mm=x_mm,
-            y_mm=y_mm,
-            velocity_mm_s=velocity,
-        )
-        self.manual_stage_worker.status_changed.connect(self.manual_stage_status_label.setText)
-        self.manual_stage_worker.position_done.connect(self.on_manual_stage_position)
-        self.manual_stage_worker.action_done.connect(self.on_manual_stage_done)
-        self.manual_stage_worker.action_failed.connect(self.on_manual_stage_failed)
-        self.manual_stage_worker.finished.connect(self.on_manual_stage_finished)
-        self.manual_stage_worker.start()
+        try:
+            self.manual_stage_worker = ManualStageWorker(
+                config,
+                action,
+                x_mm=x_mm,
+                y_mm=y_mm,
+                velocity_mm_s=velocity,
+            )
+            self.manual_stage_worker.status_changed.connect(self.manual_stage_status_label.setText)
+            self.manual_stage_worker.position_done.connect(self.on_manual_stage_position)
+            self.manual_stage_worker.action_done.connect(self.on_manual_stage_done)
+            self.manual_stage_worker.action_failed.connect(self.on_manual_stage_failed)
+            self.manual_stage_worker.finished.connect(self.on_manual_stage_finished)
+            self.manual_stage_worker.start()
+        except Exception as exc:
+            self.manual_stage_worker = None
+            self.apply_ambient_state()
+            QMessageBox.warning(self, "수동 스테이지 시작 오류", str(exc))
 
     def on_manual_stage_position(self, position: object) -> None:
         try:
@@ -3221,7 +3268,9 @@ class MainWindow(QMainWindow):
         if not self.show_preflight_dialog(points, config, validation):
             return
 
-        self.stop_live_preview(wait_ms=2000, update_label=True)
+        if not self.stop_live_preview(wait_ms=2000, update_label=True):
+            self.set_run_status("Live 정지 처리 중")
+            return
         self.capture_results_model.clear()
         self.pending_capture_rows = []
         self.run_stats = RunStatsAccumulator()
@@ -3468,9 +3517,15 @@ class MainWindow(QMainWindow):
             self.preview_mode = "capture"
             self.current_image_path = path
             with Image.open(path) as source_image:
+                width, height = source_image.size
+                pixels = int(width) * int(height)
+                if pixels > MAX_PREVIEW_PIXELS:
+                    raise MemoryError(
+                        f"Preview image is too large: {width}x{height} px "
+                        f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
+                    )
                 image = source_image.convert("RGB")
-                data = image.tobytes("raw", "RGB")
-                qimage = QImage(data, image.width, image.height, image.width * 3, QImage.Format_RGB888).copy()
+                qimage = qimage_from_array(np.asarray(image))
             self.set_preview_source(qimage, reset_center=True)
             self.fullscreen_button.setEnabled(True)
         except Exception as exc:
@@ -3482,7 +3537,12 @@ class MainWindow(QMainWindow):
         if self.current_image_path is None or not self.current_image_path.exists():
             QMessageBox.information(self, "이미지 없음", "전체화면으로 볼 이미지가 없습니다.")
             return
-        self.image_viewer = FullscreenImageWindow(self.current_image_path)
+        try:
+            self.image_viewer = FullscreenImageWindow(self.current_image_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Fullscreen image", str(exc))
+            self.image_viewer = None
+            return
         self.image_viewer.showFullScreen()
 
     def open_current_dataset(self) -> None:

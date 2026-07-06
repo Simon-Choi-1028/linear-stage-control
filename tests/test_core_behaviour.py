@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt, QThread
+from PySide6.QtCore import QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -18,6 +18,7 @@ from linear_stage_control.camera import (
     BaslerCamera,
     apply_camera_orientation,
     camera_settings_from_config,
+    save_original_capture,
 )
 from linear_stage_control.dataset import (
     DatasetRun,
@@ -34,7 +35,7 @@ from linear_stage_control.dataset_exports import (
 )
 from linear_stage_control.disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
-from linear_stage_control.exceptions import StageConnectionError
+from linear_stage_control.exceptions import DatasetWriteError, StageConnectionError
 from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
 from linear_stage_control.scan import (
     linear_path_points,
@@ -322,6 +323,30 @@ class CameraCompatibilityTests(unittest.TestCase):
             self.assertGreaterEqual(result.disk_write_duration_ms, 0.0)
             np.testing.assert_array_equal(np.load(npy_path), array)
 
+    def test_original_capture_rejects_metadata_dimension_mismatch(self) -> None:
+        array = np.zeros((4, 4), dtype=np.uint8)
+        metadata = {
+            "captured_at": "2026-06-17T10:00:00.000+09:00",
+            "completed_at": "2026-06-17T10:00:00.010+09:00",
+            "width": 5,
+            "height": 4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(DatasetWriteError):
+                save_original_capture(Path(directory) / "capture.png", array, metadata)
+            self.assertFalse((Path(directory) / "capture.png").exists())
+
+    def test_qimage_conversion_rejects_unsupported_or_huge_preview_frames(self) -> None:
+        from linear_stage_control.preview_rendering import MAX_PREVIEW_PIXELS, qimage_from_array
+
+        with self.assertRaises(ValueError):
+            qimage_from_array(np.zeros((8, 8, 2), dtype=np.uint8))
+
+        backing = np.zeros((1,), dtype=np.uint8)
+        huge = np.lib.stride_tricks.as_strided(backing, shape=(MAX_PREVIEW_PIXELS + 1, 1), strides=(0, 0))
+        with self.assertRaises(MemoryError):
+            qimage_from_array(huge)
+
     def test_camera_orientation_flips_arrays_after_rotation(self) -> None:
         array = np.arange(12, dtype=np.uint8).reshape(3, 4)
 
@@ -412,6 +437,9 @@ class StageAxisSettingsTests(unittest.TestCase):
 
         with self.assertRaises(StageConnectionError):
             stage_settings_from_config({"stage": {"axes": {"y": {"enabled": "sometimes"}}}})
+
+        with self.assertRaises(StageConnectionError):
+            stage_settings_from_config({"stage": {"move_velocity_mm_s": "nan"}})
 
     def test_disabled_axis_must_remain_constant(self) -> None:
         points = points_from_records(
@@ -581,6 +609,26 @@ class StageAxisSettingsTests(unittest.TestCase):
         self.assertEqual(x_axis.move_calls, 1)
         self.assertEqual(y_axis.move_calls, 1)
         self.assertEqual(x_axis.stop_calls, 1)
+
+    def test_stage_rejects_out_of_bounds_move_before_command(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        x_axis = _FakeAxis()
+        stage.x_axis = x_axis  # type: ignore[assignment]
+
+        with self.assertRaises(StageConnectionError):
+            stage.move_absolute_mm(-0.001, 0.0)
+        with self.assertRaises(StageConnectionError):
+            stage.move_absolute_mm(float("inf"), 0.0)
+        with self.assertRaises(StageConnectionError):
+            stage.move_absolute_mm(1.0, 0.0, velocity_mm_s=0.0)
+
+        self.assertEqual(x_axis.move_calls, 0)
 
     def test_stage_cancel_uses_open_axis_stop_and_raises_cancelled(self) -> None:
         stage = ZaberXYStage(
@@ -832,6 +880,38 @@ class GuiSmokeTests(unittest.TestCase):
         app.processEvents()
 
         self.assertEqual(fake_worker.requests[-1]["camera"]["exposure_us"], 12345)
+        window.live_worker = None
+        window.close()
+
+    def test_live_restart_does_not_stack_workers_when_stop_is_pending(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        class StuckLiveWorker:
+            def __init__(self) -> None:
+                self.stop_requested = False
+
+            def isRunning(self) -> bool:
+                return True
+
+            def request_stop(self) -> None:
+                self.stop_requested = True
+
+            def wait(self, _timeout_ms: int) -> bool:
+                return False
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.camera_combo.addItem("자동 선택", "")
+        window.camera_combo.addItem("Basler test", "123")
+        fake_worker = StuckLiveWorker()
+        window.live_worker = fake_worker  # type: ignore[assignment]
+
+        window.start_live_preview()
+        app.processEvents()
+
+        self.assertIs(window.live_worker, fake_worker)
+        self.assertTrue(fake_worker.stop_requested)
+        self.assertEqual(window.live_status_label.text(), "이전 Live 정리 중")
         window.live_worker = None
         window.close()
 
@@ -1087,6 +1167,45 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("중앙 이동", done_messages[-1])
         finally:
             gui_workers.ZaberXYStage = original_stage
+
+    def test_manual_stage_action_rejects_second_command_until_cleanup(self) -> None:
+        from linear_stage_control import gui_app
+        from linear_stage_control.gui_app import MainWindow
+
+        created: list[QThread] = []
+
+        class PendingManualStageWorker(QThread):
+            status_changed = Signal(str)
+            position_done = Signal(object)
+            action_done = Signal(str)
+            action_failed = Signal(str)
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                super().__init__()
+                created.append(self)
+
+            def start(self, priority: QThread.Priority = QThread.InheritPriority) -> None:  # type: ignore[override]
+                return
+
+            def request_stop(self) -> None:
+                return
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        original_worker = gui_app.ManualStageWorker
+        gui_app.ManualStageWorker = PendingManualStageWorker  # type: ignore[assignment]
+        try:
+            window.start_manual_stage_action("position")
+            window.start_manual_stage_action("move", x_mm=1.0, y_mm=1.0)
+
+            self.assertEqual(len(created), 1)
+            self.assertIs(window.manual_stage_worker, created[0])
+            self.assertEqual(window.manual_stage_status_label.text(), "이전 수동 명령 정리 중")
+        finally:
+            gui_app.ManualStageWorker = original_worker
+            window.manual_stage_worker = None
+            window.close()
+            app.processEvents()
 
     def test_app_state_centralizes_button_enablement(self) -> None:
         from linear_stage_control.app_state import AppRunState

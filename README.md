@@ -36,8 +36,8 @@
 | Portable ZIP | [LinearStageControl-Portable.zip](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControl-Portable.zip) | 설치기 EXE 없이 압축 해제 후 실행 | 앱, Zaber Motion Library, Zaber Device Database |
 | Portable manifest | [portable_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/portable_manifest.json) | portable ZIP SHA256 검증 | ZIP 파일 hash, 크기, 진입점 |
 
-- Current public release: `v0.1.10`
-- Current local verification candidate: `v0.1.10`
+- Current public release: `v0.1.11`
+- Current local verification candidate: `v0.1.11`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)

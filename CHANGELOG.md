@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.1.11 - 2026-07-07
+
+- Added RS485 laser power control using the PCB controller protocol `L0` through `L100` over 9600 8N1 serial.
+- Added a Laser RS485 GUI panel with separate COM port selection, 0-100% slider, numeric percent input, response reading, Apply, and 0% Off controls.
+- Added laser serial diagnostics and preflight visibility without sending hardware commands during checks.
+- Added regression coverage for laser command formatting, percent validation, GUI config persistence, and diagnostics output.
+- Verified the updated UI with manual screenshot capture and the release verification harness.
+
 ## v0.1.9 - 2026-07-03
 
 - Added a dedicated offline installer build that emits the setup EXE, SHA256 file, and manifest into the Windows Downloads folder.

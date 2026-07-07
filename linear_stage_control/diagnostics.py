@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .camera import PYLON_IMPORT_ERROR, enumerate_cameras
+from .laser import DEFAULT_LASER_PORT
 from .process_guard import describe_processes, running_pylon_viewer_processes
 from .stage import configure_zaber_device_database, list_serial_ports, stage_settings_from_config
 from .updater import fetch_latest_update, update_settings_from_config
@@ -31,6 +32,7 @@ def collect_diagnostics(
         _pylon_result(),
         _pylon_viewer_result(),
         _serial_port_result(config),
+        _laser_serial_port_result(config),
         _zaber_database_result(config),
         _output_root_result(output_root or config.get("dataset", {}).get("output_root")),
     ]
@@ -78,6 +80,18 @@ def _serial_port_result(config: dict[str, Any]) -> DiagnosticResult:
     status = "통과" if selected in port_names else "경고"
     detail = f"감지: {', '.join(port_names)} | 설정값 {selected}"
     return DiagnosticResult("Zaber COM 포트", status, detail)
+
+
+def _laser_serial_port_result(config: dict[str, Any]) -> DiagnosticResult:
+    laser = config.get("laser", {})
+    selected = str(laser.get("serial_port") or DEFAULT_LASER_PORT) if isinstance(laser, dict) else DEFAULT_LASER_PORT
+    ports = list_serial_ports()
+    if not ports:
+        return DiagnosticResult("Laser RS485 COM", "경고", f"감지된 COM 포트 없음 | 설정값 {selected}")
+    port_names = [port["device"] for port in ports]
+    status = "통과" if selected in port_names else "경고"
+    detail = f"감지: {', '.join(port_names)} | 설정값 {selected}"
+    return DiagnosticResult("Laser RS485 COM", status, detail)
 
 
 def _zaber_database_result(config: dict[str, Any]) -> DiagnosticResult:

@@ -16,6 +16,7 @@ from .diagnostics import collect_diagnostics
 from .disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from .error_model import error_budget_from_config, estimate_position_error_um
 from .exceptions import UpdateVerificationError, user_error_message
+from .laser import LaserSettings, send_laser_percent
 from .logging_setup import add_run_file_handler, get_logger, remove_log_handler
 from .scan import (
     ScanPoint,
@@ -543,6 +544,31 @@ class UpdateDownloadWorker(QThread):
                 extra={"event": "update_download_failed", "version": self.update.version},
             )
             self.download_failed.emit(user_error_message(exc))
+
+
+class LaserCommandWorker(QThread):
+    command_done = Signal(int, str)
+    command_failed = Signal(str)
+
+    def __init__(self, settings: LaserSettings, percent: int):
+        super().__init__()
+        self.settings = settings
+        self.percent = percent
+
+    def run(self) -> None:
+        try:
+            result = send_laser_percent(self.settings, self.percent)
+            self.command_done.emit(result.percent, result.response or "")
+        except Exception as exc:
+            get_logger("worker.laser").exception(
+                "laser command failed",
+                extra={
+                    "event": "laser_command_failed",
+                    "port": self.settings.serial_port,
+                    "percent": self.percent,
+                },
+            )
+            self.command_failed.emit(user_error_message(exc))
 
 
 class DiagnosticsWorker(QThread):

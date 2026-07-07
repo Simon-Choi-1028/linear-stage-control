@@ -396,6 +396,49 @@ class ProcessGuardTests(unittest.TestCase):
         self.assertEqual([viewer.pid for viewer in viewers], [200, 300])
 
 
+class LaserControlTests(unittest.TestCase):
+    def test_laser_command_uses_percent_protocol(self) -> None:
+        from linear_stage_control.laser import read_response_line, send_laser_command
+
+        class FakeSerial:
+            def __init__(self) -> None:
+                self.timeout: float | None = 1.0
+                self.commands: list[bytes] = []
+                self.responses = [b"L42\n", b"OK 42 PWM 64\n"]
+
+            def write(self, data: bytes) -> int:
+                self.commands.append(data)
+                return len(data)
+
+            def flush(self) -> None:
+                return
+
+            def readline(self) -> bytes:
+                return self.responses.pop(0) if self.responses else b""
+
+        ser = FakeSerial()
+
+        command = send_laser_command(ser, 42)
+        response = read_response_line(ser, {"L42"}, 1.0)
+
+        self.assertEqual(command, b"L42\n")
+        self.assertEqual(ser.commands, [b"L42\n"])
+        self.assertEqual(response, "OK 42 PWM 64")
+
+    def test_laser_settings_validate_percent_and_defaults(self) -> None:
+        from linear_stage_control.exceptions import LaserConnectionError
+        from linear_stage_control.laser import laser_percent_from_config, laser_settings_from_config
+
+        settings = laser_settings_from_config({"laser": {"serial_port": "COM9", "expect_response": "false"}})
+
+        self.assertEqual(settings.serial_port, "COM9")
+        self.assertEqual(settings.baud_rate, 9600)
+        self.assertFalse(settings.expect_response)
+        self.assertEqual(laser_percent_from_config({"laser": {"percent": "100"}}), 100)
+        with self.assertRaises(LaserConnectionError):
+            laser_percent_from_config({"laser": {"percent": 101}})
+
+
 class StageAxisSettingsTests(unittest.TestCase):
     def test_stage_settings_parse_enabled_axes_and_default_chained_stages(self) -> None:
         settings = stage_settings_from_config({"stage": {"serial_port": "COM9", "axes": {"y": {"enabled": False}}}})
@@ -1076,6 +1119,8 @@ class GuiSmokeTests(unittest.TestCase):
         app.processEvents()
 
         tab_names = [window.preview_tabs.tabText(index) for index in range(window.preview_tabs.count())]
+        self.assertEqual(window.laser_percent_spin.minimum(), 0)
+        self.assertEqual(window.laser_percent_spin.maximum(), 100)
         self.assertIn("진단", tab_names)
         self.assertEqual(window.manual_stage_status_label.text(), "대기 중")
         window.manual_x_edit.setText("1.5")
@@ -1093,14 +1138,18 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(config["camera"]["rotate_180"])
         self.assertFalse(config["camera"]["flip_horizontal"])
         self.assertFalse(config["camera"]["flip_vertical"])
+        self.assertEqual(config["laser"]["baud_rate"], 9600)
+        self.assertEqual(config["laser"]["percent"], 0)
 
         window.camera_rotate_180_check.setChecked(False)
         window.camera_flip_horizontal_check.setChecked(True)
         window.camera_flip_vertical_check.setChecked(True)
+        window.laser_percent_spin.setValue(37)
         config = window.build_config([])
         self.assertFalse(config["camera"]["rotate_180"])
         self.assertTrue(config["camera"]["flip_horizontal"])
         self.assertTrue(config["camera"]["flip_vertical"])
+        self.assertEqual(config["laser"]["percent"], 37)
 
         live_config = window.build_live_config()
         self.assertFalse(live_config["camera"]["rotate_180"])
@@ -1635,6 +1684,7 @@ class DiagnosticsTests(unittest.TestCase):
         items = {result.item for result in results}
         self.assertIn("Basler pylon/Python", items)
         self.assertIn("pylon Viewer", items)
+        self.assertIn("Laser RS485 COM", items)
         self.assertIn("Zaber COM 포트", items)
         self.assertIn("저장 폴더 권한", items)
 

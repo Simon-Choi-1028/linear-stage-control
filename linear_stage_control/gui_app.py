@@ -97,10 +97,19 @@ from .gui_workers import (
     AcquisitionWorker,
     CameraDiscoveryWorker,
     DiagnosticsWorker,
+    LaserCommandWorker,
     LivePreviewWorker,
     ManualStageWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
+)
+from .laser import (
+    DEFAULT_LASER_BAUD_RATE,
+    DEFAULT_LASER_PORT,
+    DEFAULT_LASER_RESPONSE_TIMEOUT_S,
+    laser_percent_from_config,
+    laser_settings_from_config,
+    parse_laser_percent,
 )
 from .linear_path_dialog import show_linear_path_dialog
 from .logging_setup import configure_logging, get_logger
@@ -451,6 +460,7 @@ class MainWindow(QMainWindow):
         self.live_worker: LivePreviewWorker | None = None
         self.diagnostics_worker: DiagnosticsWorker | None = None
         self.manual_stage_worker: ManualStageWorker | None = None
+        self.laser_worker: LaserCommandWorker | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
         self.pending_run_result: tuple[str, bool] | None = None
@@ -555,7 +565,7 @@ class MainWindow(QMainWindow):
             return
         if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
             self.camera_scan_worker.wait(2000)
-        for worker in (self.diagnostics_worker, self.manual_stage_worker):
+        for worker in (self.diagnostics_worker, self.manual_stage_worker, self.laser_worker):
             if worker is not None and worker.isRunning():
                 if hasattr(worker, "request_stop"):
                     worker.request_stop()
@@ -711,6 +721,7 @@ class MainWindow(QMainWindow):
         camera_scanning = state == AppRunState.DISCOVERING_CAMERA or self._worker_running(self.camera_scan_worker)
         diagnostics = state == AppRunState.DIAGNOSTICS or self._worker_running(self.diagnostics_worker)
         manual_stage = state == AppRunState.MANUAL_STAGE or self._worker_running(self.manual_stage_worker)
+        laser_busy = self._worker_running(self.laser_worker)
         update_busy = (
             state in {AppRunState.UPDATE_CHECKING, AppRunState.UPDATE_DOWNLOADING}
             or self._worker_running(self.update_check_worker)
@@ -741,6 +752,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "manual_position_button"):
             self._set_manual_stage_enabled(not blocked and not manual_stage)
             self.manual_stop_button.setEnabled(manual_stage)
+        if hasattr(self, "laser_apply_button"):
+            self._set_laser_controls_enabled(not blocked and not laser_busy)
+            self.laser_off_button.setEnabled(not laser_busy)
 
     def apply_ambient_state(self) -> None:
         self.apply_state(self._ambient_state())
@@ -1020,6 +1034,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         layout.addWidget(self._build_device_group())
+        layout.addWidget(self._build_laser_group())
         layout.addWidget(self._build_manual_stage_group())
         layout.addWidget(self._build_settings_group())
         layout.addWidget(self._build_positions_group(), 1)
@@ -1098,6 +1113,62 @@ class MainWindow(QMainWindow):
         self.pylon_runtime_button.clicked.connect(self.open_pylon_runtime_download)
         self.x_axis_enabled_check.stateChanged.connect(self.refresh_position_feedback)
         self.y_axis_enabled_check.stateChanged.connect(self.refresh_position_feedback)
+        return group
+
+    def _build_laser_group(self) -> QGroupBox:
+        group = QGroupBox("레이저 RS485")
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
+
+        self.laser_port_combo = QComboBox()
+        self.laser_percent_slider = QSlider(Qt.Horizontal)
+        self.laser_percent_slider.setRange(0, 100)
+        self.laser_percent_slider.setSingleStep(1)
+        self.laser_percent_slider.setPageStep(10)
+        self.laser_percent_slider.setTickInterval(10)
+        self.laser_percent_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.laser_percent_spin = QSpinBox()
+        self.laser_percent_spin.setRange(0, 100)
+        self.laser_percent_spin.setSuffix(" %")
+        self.laser_percent_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.laser_expect_response_check = QCheckBox("응답 확인")
+        self.laser_expect_response_check.setChecked(True)
+        self.laser_apply_button = QPushButton("적용")
+        self.laser_off_button = QPushButton("0% 끄기")
+        self.laser_status_label = QLabel("대기 중")
+        self.laser_status_label.setObjectName("manualStageStatus")
+        self.laser_status_label.setWordWrap(True)
+
+        self.laser_port_combo.setToolTip("USB-RS485 컨버터가 연결된 COM 포트입니다. 기본값: COM5")
+        self.laser_percent_slider.setToolTip("레이저 출력 퍼센트입니다. 0%는 레이저 OFF 명령 L0을 보냅니다.")
+        self.laser_percent_spin.setToolTip("레이저 출력 퍼센트를 숫자로 직접 입력합니다. 범위: 0-100%")
+        self.laser_expect_response_check.setToolTip("PCB 펌웨어 DEBUG_RS485_REPLY가 켜져 있으면 OK/PCT 응답을 읽습니다.")
+        _apply_button_icon(self.laser_apply_button, QStyle.SP_ArrowForward, "현재 레이저 출력 값을 RS485로 전송")
+        _apply_button_icon(self.laser_off_button, QStyle.SP_MediaStop, "레이저 OFF 명령 L0 전송")
+
+        layout.addWidget(QLabel("포트"), 0, 0)
+        layout.addWidget(self.laser_port_combo, 0, 1, 1, 2)
+        layout.addWidget(self.laser_expect_response_check, 0, 3)
+        layout.addWidget(QLabel("출력"), 1, 0)
+        layout.addWidget(self.laser_percent_slider, 1, 1, 1, 2)
+        layout.addWidget(self.laser_percent_spin, 1, 3)
+        layout.addWidget(self.laser_apply_button, 2, 0, 1, 2)
+        layout.addWidget(self.laser_off_button, 2, 2, 1, 2)
+        layout.addWidget(self.laser_status_label, 3, 0, 1, 4)
+
+        self.laser_percent_slider.valueChanged.connect(self.laser_percent_spin.setValue)
+        self.laser_percent_spin.valueChanged.connect(self.laser_percent_slider.setValue)
+        self.laser_percent_slider.sliderReleased.connect(
+            lambda: self.send_laser_percent_from_ui(self.laser_percent_spin.value())
+        )
+        self.laser_percent_spin.editingFinished.connect(
+            lambda: self.send_laser_percent_from_ui(self.laser_percent_spin.value())
+        )
+        self.laser_apply_button.clicked.connect(
+            lambda: self.send_laser_percent_from_ui(self.laser_percent_spin.value())
+        )
+        self.laser_off_button.clicked.connect(self.turn_laser_off)
         return group
 
     def _build_manual_stage_group(self) -> QGroupBox:
@@ -1915,6 +1986,7 @@ class MainWindow(QMainWindow):
         self.config_path = config_path
         camera = config.get("camera", {})
         stage = config.get("stage", {})
+        laser = config.get("laser", {})
         dataset = config.get("dataset", {})
         self._preferred_camera_serial = str(camera.get("serial_number") or "")
         self._camera_user_touched = False
@@ -1953,6 +2025,20 @@ class MainWindow(QMainWindow):
         )
 
         self._set_combo_text(self.stage_port_combo, str(stage.get("serial_port", "COM3")))
+        if isinstance(laser, dict):
+            self._set_combo_text(self.laser_port_combo, str(laser.get("serial_port") or DEFAULT_LASER_PORT))
+            try:
+                laser_percent = laser_percent_from_config(config)
+            except Exception:
+                laser_percent = 0
+            self.set_laser_percent(laser_percent)
+            self.laser_expect_response_check.setChecked(
+                _bool_config_value(laser.get("expect_response", True), True)
+            )
+        else:
+            self._set_combo_text(self.laser_port_combo, DEFAULT_LASER_PORT)
+            self.set_laser_percent(0)
+            self.laser_expect_response_check.setChecked(True)
         self.set_positions(points_from_config(config, base_dir=config_path.parent))
         self.update_error_summary()
         self.log(f"설정 불러옴: {config_path}")
@@ -1985,18 +2071,41 @@ class MainWindow(QMainWindow):
         self.start_camera_scan("manual")
 
     def refresh_stage_ports(self) -> None:
-        current_port = self.stage_port_combo.currentText() or "COM3"
-        self.stage_port_combo.clear()
+        current_port = self._current_serial_combo_port(self.stage_port_combo, "COM3")
+        current_laser_port = (
+            self._current_serial_combo_port(self.laser_port_combo, DEFAULT_LASER_PORT)
+            if hasattr(self, "laser_port_combo")
+            else DEFAULT_LASER_PORT
+        )
         ports = list_serial_ports()
+        self._populate_serial_combo(self.stage_port_combo, current_port, ports)
+        if hasattr(self, "laser_port_combo"):
+            self._populate_serial_combo(self.laser_port_combo, current_laser_port, ports)
+
+    def _populate_serial_combo(self, combo: QComboBox, current_port: str, ports: list[dict[str, str]]) -> None:
+        combo.clear()
         if not ports:
-            self.stage_port_combo.addItem(current_port)
-        else:
-            for port in ports:
-                self.stage_port_combo.addItem(
-                    f"{port['device']} - {port['description']}",
-                    port["device"],
-                )
-            self._set_combo_data(self.stage_port_combo, current_port)
+            combo.addItem(current_port, current_port)
+            return
+        for port in ports:
+            combo.addItem(
+                f"{port['device']} - {port['description']}",
+                port["device"],
+            )
+        self._set_combo_data(combo, current_port)
+        if combo.currentIndex() < 0:
+            combo.addItem(current_port, current_port)
+            combo.setCurrentIndex(combo.count() - 1)
+
+    @staticmethod
+    def _current_serial_combo_port(combo: QComboBox, default: str) -> str:
+        data = combo.currentData()
+        if data:
+            return str(data)
+        text = combo.currentText().strip()
+        if text:
+            return text.split(" - ")[0]
+        return default
 
     def start_camera_scan(self, reason: str = "manual") -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -2751,6 +2860,71 @@ class MainWindow(QMainWindow):
                 )
         self.log(f"위치 목록 저장됨: {path}")
 
+    def set_laser_percent(self, percent: int) -> None:
+        percent = parse_laser_percent(percent)
+        self.laser_percent_spin.setValue(percent)
+        self.laser_percent_slider.setValue(percent)
+
+    def turn_laser_off(self) -> None:
+        self.set_laser_percent(0)
+        self.send_laser_percent_from_ui(0)
+
+    def send_laser_percent_from_ui(self, percent: int) -> None:
+        if self.laser_worker is not None:
+            self.laser_status_label.setText("이전 레이저 명령 정리 중")
+            return
+        try:
+            percent = parse_laser_percent(percent)
+            config = self.build_config([], embed_positions=False)
+            settings = laser_settings_from_config(config)
+        except Exception as exc:
+            QMessageBox.warning(self, "레이저 설정 오류", str(exc))
+            return
+
+        self.laser_status_label.setText(f"{percent}% 전송 중")
+        try:
+            self.laser_worker = LaserCommandWorker(settings, percent)
+            self.laser_worker.command_done.connect(self.on_laser_command_done)
+            self.laser_worker.command_failed.connect(self.on_laser_command_failed)
+            self.laser_worker.finished.connect(self.on_laser_command_finished)
+            self.apply_ambient_state()
+            self.laser_worker.start()
+        except Exception as exc:
+            self.laser_worker = None
+            self.apply_ambient_state()
+            QMessageBox.warning(self, "레이저 명령 오류", str(exc))
+
+    def on_laser_command_done(self, percent: int, response: str) -> None:
+        if response:
+            message = f"{percent}% 적용 | {response}"
+        elif self.laser_expect_response_check.isChecked():
+            message = f"{percent}% 적용 | 응답 없음"
+        else:
+            message = f"{percent}% 적용"
+        self.laser_status_label.setText(message)
+        self.log(f"Laser RS485: {message}")
+
+    def on_laser_command_failed(self, message: str) -> None:
+        self.laser_status_label.setText("레이저 명령 실패")
+        self.log(f"Laser RS485 error: {message}")
+        QMessageBox.warning(self, "레이저 RS485 오류", message)
+
+    def on_laser_command_finished(self) -> None:
+        worker = self.laser_worker
+        self.laser_worker = None
+        self._delete_worker_later(worker)
+        self.apply_ambient_state()
+
+    def _set_laser_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.laser_port_combo,
+            self.laser_percent_slider,
+            self.laser_percent_spin,
+            self.laser_expect_response_check,
+            self.laser_apply_button,
+        ):
+            widget.setEnabled(enabled)
+
     def read_manual_stage_position(self) -> None:
         self.start_manual_stage_action("position")
 
@@ -2900,6 +3074,7 @@ class MainWindow(QMainWindow):
         config = deepcopy(self.config)
         camera = config.setdefault("camera", {})
         stage = config.setdefault("stage", {})
+        laser = config.setdefault("laser", {})
         dataset = config.setdefault("dataset", {})
         scan = config.setdefault("scan", {})
 
@@ -2934,6 +3109,12 @@ class MainWindow(QMainWindow):
         y_axis.setdefault("axis_number", 1)
         x_axis["enabled"] = self.x_axis_enabled_check.isChecked()
         y_axis["enabled"] = self.y_axis_enabled_check.isChecked()
+
+        laser["serial_port"] = self._current_serial_combo_port(self.laser_port_combo, DEFAULT_LASER_PORT)
+        laser["baud_rate"] = int(laser.get("baud_rate") or DEFAULT_LASER_BAUD_RATE)
+        laser["percent"] = self.laser_percent_spin.value()
+        laser["expect_response"] = self.laser_expect_response_check.isChecked()
+        laser.setdefault("response_timeout_s", DEFAULT_LASER_RESPONSE_TIMEOUT_S)
 
         dataset["output_root"] = self.output_root_edit.text() or "output/datasets"
         dataset["image_format"] = "png"
@@ -3059,6 +3240,30 @@ class MainWindow(QMainWindow):
                     "스테이지 포트",
                     "경고",
                     f"현재 감지된 COM 포트가 없습니다. 설정값 {selected_port}로 실행됩니다.",
+                )
+            )
+
+        laser = config.get("laser", {})
+        laser_port = str(laser.get("serial_port") or DEFAULT_LASER_PORT).strip() if isinstance(laser, dict) else ""
+        laser_percent = str(laser.get("percent", 0)) if isinstance(laser, dict) else "0"
+        if not laser_port:
+            issues.append(PreflightIssue("Laser RS485", "오류", "Laser RS485 COM port is empty."))
+        elif detected_ports and laser_port in detected_ports:
+            issues.append(PreflightIssue("Laser RS485", "통과", f"{laser_port} | {laser_percent}%"))
+        elif detected_ports:
+            issues.append(
+                PreflightIssue(
+                    "Laser RS485",
+                    "경고",
+                    f"{laser_port} is not in the current COM port list. Detected: {', '.join(sorted(detected_ports))}",
+                )
+            )
+        else:
+            issues.append(
+                PreflightIssue(
+                    "Laser RS485",
+                    "경고",
+                    f"No COM ports detected. Laser command will still try {laser_port}.",
                 )
             )
 

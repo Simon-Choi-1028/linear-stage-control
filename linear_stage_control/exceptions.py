@@ -18,6 +18,10 @@ class StageConnectionError(LinearStageControlError):
     """Zaber stage connection or axis resolution failed."""
 
 
+class LaserConnectionError(LinearStageControlError):
+    """RS485 laser controller connection or command failed."""
+
+
 class PositionValidationError(LinearStageControlError):
     """Position input could not be parsed or validated."""
 

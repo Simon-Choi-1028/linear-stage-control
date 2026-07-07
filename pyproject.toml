@@ -1,6 +1,6 @@
 [project]
 name = "linear-stage-control"
-version = "0.1.10"
+version = "0.1.11"
 description = "Baseline Basler ace 2 and Zaber XY stage acquisition scripts."
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -62,6 +62,7 @@ typeCheckingMode = "basic"
 include = [
   "linear_stage_control/camera.py",
   "linear_stage_control/stage.py",
+  "linear_stage_control/laser.py",
   "linear_stage_control/dataset.py",
   "linear_stage_control/scan.py",
   "linear_stage_control/position_validation.py",

@@ -69,6 +69,15 @@ stage:
       device_index: 1
       axis_number: 1
 
+laser:
+  # USB-RS485 converter connected to the custom PCB.
+  # Command protocol is L0..L100 followed by LF. 0% turns the laser off.
+  serial_port: COM5
+  baud_rate: 9600
+  percent: 0
+  expect_response: true
+  response_timeout_s: 1.0
+
 updates:
   enabled: true
   repo: Simon-Choi-1028/linear-stage-control

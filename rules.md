@@ -8,7 +8,7 @@
 - Live 중 노출/Gain/Gamma/Black Level/FrameRate처럼 grabbing 중 writable인 파라미터는 active worker에 debounce update로 적용한다. ROI, Binning, Decimation, PixelFormat처럼 grabbing 중 변경이 불안정한 항목은 Live worker를 짧게 재시작해 전체 frame fit 상태로 복귀시킨다.
 - 원본 보존은 변환 없는 `grab_result.GetArray().copy()`를 기준으로 한다. 저장 기본값은 lossless PNG이며, 완전한 numpy 배열 재현이 필요할 때만 `dataset.save_numpy: true`를 켠다.
 - 데이터셋은 run 단위 timestamp 디렉터리로 격리한다. 각 run에는 `dataset_manifest.json`, legacy 호환용 `manifest.json`, `config.yaml` 스냅샷, `captures.csv`, `images/`를 둔다.
-- `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 상대 경로, 파일 크기, SHA256 hash를 저장한다. 실험/논문 데이터셋을 옮길 때 파일 누락이나 변조 여부를 재검증할 수 있어야 한다.
+- `dataset_manifest.json`에는 앱 버전, record 수와 주요 산출물의 상대 경로를 저장한다. 파일 크기와 SHA256 hash가 필요한 검증용 run은 `manifest_detail: full`을 사용하고, 파일 항목은 전체 목록을 메모리에 쌓지 않고 순차 기록한다.
 - 각 캡처 레코드에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡처 순번, 이동/settle/capture timestamp, 카메라 timestamp, 이미지 경로를 모두 기록한다.
 - 위치 입력은 `scan.positions` 또는 `scan.positions_file`을 우선한다. `scan.linear_path`는 명시적으로 설정된 선형 연속 경로 fallback이고, grid scan은 테스트나 균일 스캔이 필요할 때의 최종 fallback으로만 둔다. 파일 입력은 CSV, TSV, TXT, JSON, JSONL, YAML, XLSX를 지원하고, `label/name/id`, `x/x_mm/X mm/target_x_mm`, `y/y_mm/Y mm/target_y_mm`, `velocity/move_velocity_mm_s/speed_mm_s`, `capture_count/captures/frames`처럼 흔한 컬럼명 변형을 허용한다.
 - GUI 위치 입력은 Zaber 210 mm 이동 범위 기준 `0-210 mm`를 즉시 검사한다. 범위를 벗어난 좌표는 오류로 표시하고 촬영 run 시작을 막는다. 위치별 이동속도는 비워 두거나 0보다 커야 하며, 위치별 캡쳐 수는 비워 두거나 1 이상 정수여야 한다. 중복 좌표, 빈 라벨, 매우 큰 위치 목록은 경고로 표시한다.
@@ -33,6 +33,7 @@
 - 배포는 PyInstaller one-folder portable 빌드와 online/slim installer를 기본으로 한다. Basler pylon Runtime은 기본 Setup에 묶지 않고, Runtime이 없는 PC에서는 앱에서 설치 안내/다운로드 버튼을 제공한다. 현장 PC가 인터넷 없이 설치되어야 할 때만 별도 offline installer에 pylon Runtime installer를 포함한다.
 - slim installer를 만들 때는 이전 offline build의 pylon Runtime payload가 `dist`에 남아 있는지 먼저 확인한다. `build_installer.ps1`는 `-IncludePylonRuntime` 없이 Runtime payload가 감지되면 중단해 accidental 1GB+ setup 생성을 막는다.
 - PyInstaller slim build 후에는 사용하지 않는 Qt QML/Quick/PDF/VirtualKeyboard 파일, Qt translations, pypylon DataProcessing 바이너리를 prune한다. 단, `LinearStageControl.exe --smoke-test`를 prune 이후 반드시 실행해 누락된 DLL을 즉시 잡는다.
+- PyInstaller는 runtime dependency에 넣지 않고 `build` optional dependency로 관리한다. installer 빌드 직후 portable ZIP을 만들 때는 smoke를 통과하고 버전·전체 소스 fingerprint가 현재 worktree와 일치하는 app build만 재사용해 대규모 파일 생성을 반복하지 않는다.
 - 기본 릴리즈에는 `LinearStageControlSetup.exe`, `update_manifest.json`, `LinearStageControl-Portable.zip`, `portable_manifest.json`을 함께 올린다. offline 빌드를 수행한 경우에만 manifest에 선언된 `LinearStageControlSetup-Offline.exe`를 추가한다. update manifest의 top-level `asset_name`과 `sha256`은 항상 online/slim Setup을 가리키게 둔다.
 - dual installer 릴리즈 빌드에서는 online/slim 패키지에서 `--smoke-test`를 수행하고, offline 패키지는 동일 앱 코드에 Basler pylon Runtime installer payload만 추가하므로 별도 smoke를 반복하지 않는다.
 - GitHub Release 업데이트는 `update_manifest.json`의 SHA256과 Setup asset을 함께 검증한다. 검증 실패 시 설치 파일을 실행하지 않는다.
@@ -49,5 +50,5 @@
 - `gui_app.py`는 화면 구성과 이벤트 처리 중심으로 유지하고, 장시간 실행되는 acquisition/camera discovery thread는 별도 모듈에 둔다. 하드웨어 제어 loop가 커질 때는 UI 파일에 직접 누적하지 않는다.
 - Live/image preview 렌더링처럼 NumPy/QImage/QPixmap 변환, crop, overlay drawing이 커지는 코드는 `preview_rendering.py`처럼 render-only 모듈로 분리한다. UI class에는 상태 전환과 사용자 이벤트만 남겨 GUI 파일 비대화를 늦춘다.
 - Optical calibration 오차 표시는 Zaber 210 mm LDM/X-LDM-AE crossed XY 스테이지 제조사 스펙을 고정값으로 사용한다. 사용자 입력형 `오차 예산`을 두지 않는다. 단축 정확도 1.00 um, 반복 정밀도 0.08 um, 수평 런아웃 5.00 um을 합산해 `xy_axis_worst_case_um = 6.08 um`로 두고, XY 반경 기준은 `sqrt(2) * 6.08 = 8.60 um`로 둔다. 수직 런아웃 8.00 um은 Z/초점 참고값으로 별도 표시한다.
-- 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_stage_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
+- 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
 - 각 사진에는 개별 `predicted_min_error_um`, `predicted_max_error_um`, X/Y 예측 범위를 저장하고, run 전체에는 GUI Error 탭에서 캔들차트와 최대/평균/제한 초과 개수를 표시한다.

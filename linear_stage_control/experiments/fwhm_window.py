@@ -162,12 +162,22 @@ class FwhmWindow(ExperimentWindowBase):
             if 0 <= col < output.shape[1]:
                 line_color = color if x1 <= col <= x2 - 1 else tuple(max(50, channel // 3) for channel in color)
                 cv2.line(output, (col, y1), (col, y2 - 1), line_color, 2)
-                y_src = int(result.center_row) if result.center_row is not None and np.isfinite(result.center_row) else y1
+                y_src = (
+                    int(result.center_row) if result.center_row is not None and np.isfinite(result.center_row) else y1
+                )
                 y_src = max(0, min(output.shape[0] - 1, y_src))
                 text = f"{result.fwhm_px:.2f}px" if result.fwhm_px is not None else result.status
                 if result.saturated:
                     text = f"SAT {text}"
-                cv2.putText(output, text, (min(col + 6, output.shape[1] - 140), y_src), cv2.FONT_HERSHEY_SIMPLEX, 0.55, line_color, 2)
+                cv2.putText(
+                    output,
+                    text,
+                    (min(col + 6, output.shape[1] - 140), y_src),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    line_color,
+                    2,
+                )
         average = average_valid_fwhm(results)
         label = "Average FWHM: --" if average is None else f"Average FWHM: {average:.3f}px"
         cv2.rectangle(output, (12, 12), (430, 58), (0, 0, 0), -1)

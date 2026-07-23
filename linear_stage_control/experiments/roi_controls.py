@@ -58,19 +58,6 @@ class RoiControls(QWidget):
         bottom = max(bottom, top + 0.1)
         return left, right, top, bottom
 
-    def roi_for_shape(self, shape: tuple[int, ...]) -> Rect:
-        height, width = shape[:2]
-        left, right, top, bottom = self.percentages()
-        x1 = int(round(width * left / 100.0))
-        x2 = int(round(width * right / 100.0))
-        y1 = int(round(height * top / 100.0))
-        y2 = int(round(height * bottom / 100.0))
-        x1 = max(0, min(width - 1, x1))
-        y1 = max(0, min(height - 1, y1))
-        x2 = min(width, max(x1 + 2, x2))
-        y2 = min(height, max(y1 + 2, y2))
-        return x1, y1, x2, y2
-
     def update_summary(self, roi: Rect | None) -> None:
         if roi is None:
             self.summary_label.setText("ROI: --")

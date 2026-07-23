@@ -6,6 +6,9 @@
 - Added per-capture camera identity, GenICam parameter readbacks, trigger settings, and image orientation settings to `captures.csv`.
 - Removed the legacy export module, unused compatibility fields, and the unused `python-dotenv` dependency; reduced dataset statistics and image-name planning to constant memory per run and O(point count), respectively.
 - Bounded large-run ETA checkpoints, capture UI batching, asynchronous image-write memory, fullscreen rendering, and linear-path preview sampling to prevent oversized allocations.
+- Removed additional unused timestamp, capture counter, experiment mirror-state, preview-state, and validation compatibility paths.
+- Reduced 16-bit live-preview conversion memory, deferred repeated live validation for very large position lists, and bounded stage cancellation/home waits.
+- Isolated PyInstaller as a build-only dependency and added verified app-build reuse for portable packaging to avoid duplicate full builds.
 - Reduced preview image copies and hardened live-preview, update, camera-discovery, and laser worker lifecycles against stale signals, orphaned `QThread` objects, and rapid-command buildup.
 - Hardened release publishing so exact versioned changelog notes and manifest-verified assets are required before publication.
 

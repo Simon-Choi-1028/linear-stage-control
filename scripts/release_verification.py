@@ -37,7 +37,8 @@ class VirtualAxis:
     def is_homed(self) -> bool:
         return self.homed
 
-    def home(self) -> None:
+    def home(self, *, wait_until_idle: bool = True) -> None:
+        _ = wait_until_idle
         self.home_calls += 1
         self.position_mm = 0.0
         self.homed = True
@@ -103,7 +104,8 @@ class FakeAcquisitionStage:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         return
 
-    def home(self) -> None:
+    def home(self, *, cancel_requested: object = None) -> None:
+        _ = cancel_requested
         self.home_calls += 1
         self.x_mm = 0.0
         self.y_mm = 0.0

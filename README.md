@@ -38,8 +38,8 @@
 | Portable ZIP | [LinearStageControl-Portable.zip](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControl-Portable.zip) | 설치기 EXE 없이 압축 해제 후 실행 | 앱, Zaber Motion Library, Zaber Device Database |
 | Portable manifest | [portable_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/portable_manifest.json) | portable ZIP SHA256 검증 | ZIP 파일 hash, 크기, 진입점 |
 
-- Current public release: `v0.1.12`
-- Current local verification candidate: `v0.1.12`
+- Latest published release: [GitHub Releases](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest)
+- Current source candidate: `v0.1.12`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -155,13 +155,13 @@ xy_radial_worst_case_um = sqrt(6.08^2 + 6.08^2) = 8.60 um
 
 ```text
 predicted_max_error_um =
-  max(measured_radial_stage_error_um, xy_radial_worst_case_um)
+  max(measured_radial_error_um, xy_radial_worst_case_um)
 
 predicted_min_error_um =
-  max(0, measured_radial_stage_error_um - xy_radial_worst_case_um)
+  max(0, measured_radial_error_um - xy_radial_worst_case_um)
 ```
 
-`measured_radial_stage_error_um`은 Zaber가 보고한 실제 위치와 목표 위치의 차이를 um로 환산한 값입니다. `config.yaml`의 `calibration` 항목은 저장용 스냅샷이며 계산은 코드의 고정 제조사 스펙을 사용합니다.
+`measured_radial_error_um`은 Zaber가 보고한 실제 위치와 목표 위치의 차이를 um로 환산한 값입니다. `config.yaml`의 `calibration` 항목은 저장용 스냅샷이며 계산은 코드의 고정 제조사 스펙을 사용합니다.
 
 ```yaml
 calibration:
@@ -235,7 +235,7 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
     X000.000_Y000.000.png
 ```
 
-`captures.csv`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 각 행의 `camera_*` 열에는 캡처 직전에 실제 카메라에서 읽은 파라미터와 앱에서 적용한 trigger·회전·반전 설정이 함께 저장됩니다. 이미지 파일명은 기본적으로 `X000.000_Y000.000.png` 형태로 저장됩니다. X/Y는 소수점 3자리까지 반올림 없이 절삭되며, 같은 좌표에서 여러 장을 촬영하거나 중복 좌표가 있으면 `_C02`, `_P0002` 같은 suffix가 필요한 경우에만 붙습니다. `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 크기와 SHA256 hash가 저장됩니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
+`captures.csv`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 각 행의 `camera_*` 열에는 캡처 직전에 실제 카메라에서 읽은 파라미터와 앱에서 적용한 trigger·회전·반전 설정이 함께 저장됩니다. 이미지 파일명은 기본적으로 `X000.000_Y000.000.png` 형태로 저장됩니다. X/Y는 소수점 3자리까지 반올림 없이 절삭되며, 같은 좌표에서 여러 장을 촬영하거나 중복 좌표가 있으면 `_C02`, `_P0002` 같은 suffix가 필요한 경우에만 붙습니다. `dataset_manifest.json`에는 앱 버전, record 수와 주요 산출물 경로가 저장되며, `dataset.manifest_detail: full`일 때는 파일별 크기와 SHA256 hash도 메모리에 누적하지 않고 순차 기록합니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
 
 ## 원본 이미지
 
@@ -289,7 +289,7 @@ updates:
 
 ## Windows 빌드와 설치
 
-Python이 없는 다른 PC에서 실행할 수 있도록 PyInstaller portable 빌드를 만들 수 있습니다.
+Python이 없는 다른 PC에서 실행할 수 있도록 PyInstaller portable 빌드를 만들 수 있습니다. PyInstaller는 실행 환경이 아니라 `build` optional dependency이며, 아래 스크립트가 자동으로 설치합니다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
@@ -341,8 +341,10 @@ dist/LinearStageControlSetup.exe
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1 -SkipOffline
-powershell -ExecutionPolicy Bypass -File packaging\build_portable_release.ps1
+powershell -ExecutionPolicy Bypass -File packaging\build_portable_release.ps1 -SkipAppBuild
 ```
+
+두 번째 명령의 `-SkipAppBuild`는 installer 단계에서 smoke test를 통과한 `dist\LinearStageControl`의 버전과 전체 소스 fingerprint를 현재 worktree와 대조한 뒤 재사용하므로 동일한 PyInstaller 전체 빌드를 반복하지 않습니다. portable만 단독으로 만들 때는 옵션 없이 실행합니다.
 
 릴리즈 빌드 결과:
 

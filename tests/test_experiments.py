@@ -314,13 +314,12 @@ class ExperimentGuiTests(unittest.TestCase):
             )
             self.assertTrue(fake_worker.consumed)
             self.assertIsNone(window.latest_measurement)
-            self.assertIsNone(window.latest_result)
         finally:
             window.worker = None
             window.close()
             app.processEvents()
 
-    def test_csv_rows_use_measurement_snapshot_not_mutable_latest_fields(self) -> None:
+    def test_csv_rows_use_latest_measurement_context(self) -> None:
         from linear_stage_control.experiments.fwhm_window import FwhmWindow
 
         app = QApplication.instance() or QApplication([])
@@ -329,9 +328,7 @@ class ExperimentGuiTests(unittest.TestCase):
             self.assertTrue(_wait_for(lambda: window.latest_measurement is not None, app))
             measurement = window.latest_measurement
             self.assertIsNotNone(measurement)
-            window.latest_source_name = "wrong source"
-            window.latest_roi = (0, 0, 1, 1)
-            rows = window.csv_rows(window.latest_result)
+            rows = window.csv_rows(measurement.result)  # type: ignore[union-attr]
             self.assertTrue(rows)
             self.assertEqual(rows[0]["source"], measurement.source_name)  # type: ignore[union-attr]
             self.assertEqual(rows[0]["timestamp"], measurement.timestamp)  # type: ignore[union-attr]
@@ -410,8 +407,10 @@ class ExperimentGuiTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         for window_class in (FwhmWindow, AlignmentWindow, VPWindow):
             window = window_class()
-            self.assertTrue(_wait_for(lambda window=window: window.latest_overlay_bgr is not None, app))
-            self.assertIsNotNone(window.latest_result)
+            self.assertTrue(_wait_for(lambda window=window: window.latest_measurement is not None, app))
+            self.assertIsNotNone(window.latest_measurement)
+            self.assertIsNotNone(window.latest_measurement.overlay_bgr)
+            self.assertIsNotNone(window.latest_measurement.result)
             self.assertGreater(window.result_table.rowCount(), 0)
             self.assertFalse(window.preview_label.pixmap().isNull())
             window.close()
@@ -424,9 +423,11 @@ class ExperimentGuiTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:
             window = FwhmWindow()
-            self.assertTrue(_wait_for(lambda: window.latest_result is not None, app))
+            self.assertTrue(_wait_for(lambda: window.latest_measurement is not None, app))
+            measurement = window.latest_measurement
+            self.assertIsNotNone(measurement)
             path = Path(directory) / "fwhm.csv"
-            save_csv(path, window.csv_fieldnames, window.csv_rows(window.latest_result))
+            save_csv(path, window.csv_fieldnames, window.csv_rows(measurement.result))  # type: ignore[union-attr]
             with path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertTrue(rows)

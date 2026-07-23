@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 
 MAX_PREVIEW_PIXELS = 64_000_000
 MAX_PREVIEW_SOURCE_BYTES = 256 * 1024 * 1024
+MAX_INTEGER_PREVIEW_LUT_VALUES = 1 << 16
 
 
 def qimage_from_array(array: object) -> QImage:
@@ -156,6 +157,10 @@ def _to_uint8(array: np.ndarray) -> np.ndarray:
     if np.issubdtype(arr.dtype, np.integer):
         min_value = float(arr.min())
         max_value = float(arr.max())
+        if max_value <= min_value:
+            return np.zeros(arr.shape, dtype=np.uint8)
+        if 1 << (arr.dtype.itemsize * 8) <= MAX_INTEGER_PREVIEW_LUT_VALUES:
+            return _small_integer_to_uint8(arr, min_value, max_value)
         arr_float = arr.astype(np.float32, copy=False)
     else:
         arr_float = arr.astype(np.float32, copy=False)
@@ -169,3 +174,19 @@ def _to_uint8(array: np.ndarray) -> np.ndarray:
         return np.zeros(arr.shape, dtype=np.uint8)
     scaled = (arr_float - min_value) * (255.0 / (max_value - min_value))
     return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
+
+
+def _small_integer_to_uint8(array: np.ndarray, min_value: float, max_value: float) -> np.ndarray:
+    """Scale an 8/16-bit integer frame through a small LUT instead of full-frame floats."""
+    value_count = 1 << (array.dtype.itemsize * 8)
+    values = np.arange(value_count, dtype=np.int32)
+    if np.issubdtype(array.dtype, np.signedinteger):
+        signed_max = int(np.iinfo(array.dtype).max)
+        values[signed_max + 1 :] -= value_count
+
+    scaled = values.astype(np.float32)
+    scaled -= min_value
+    scaled *= 255.0 / (max_value - min_value)
+    np.clip(scaled, 0, 255, out=scaled)
+    lookup = scaled.astype(np.uint8)
+    return np.ascontiguousarray(lookup[array])

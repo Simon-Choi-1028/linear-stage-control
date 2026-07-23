@@ -92,7 +92,14 @@ def process_laser_line(frame_bgr: np.ndarray, roi: Rect, settings: ProcessingSet
         vx *= -1.0
         vy *= -1.0
     if abs(vx) < 1e-8:
-        return LineResult(False, "Fitted line is nearly vertical", point_count=len(points), threshold_used=threshold_used, points=points, roi=roi)
+        return LineResult(
+            False,
+            "Fitted line is nearly vertical",
+            point_count=len(points),
+            threshold_used=threshold_used,
+            points=points,
+            roi=roi,
+        )
 
     slope = vy / vx
     intercept = py - slope * px
@@ -158,7 +165,9 @@ def _line_endpoints_for_roi(slope: float, intercept: float, roi: Rect) -> Tuple[
     )
 
 
-def draw_overlay(frame_bgr: np.ndarray, result: LineResult, show_points: bool = True, show_fit: bool = True) -> np.ndarray:
+def draw_overlay(
+    frame_bgr: np.ndarray, result: LineResult, show_points: bool = True, show_fit: bool = True
+) -> np.ndarray:
     output = _ensure_bgr(frame_bgr).copy()
     if result.roi is not None:
         x1, y1, x2, y2 = result.roi

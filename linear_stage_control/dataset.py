@@ -4,6 +4,8 @@ import csv
 import hashlib
 import json
 import os
+import shutil
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
@@ -119,21 +121,17 @@ class DatasetRun:
         except Exception as exc:
             raise DatasetWriteError("데이터셋 종료 처리 또는 manifest 작성에 실패했습니다.", str(exc)) from exc
 
-    def image_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path:
-        del timestamp
+    def image_path(self, point: ScanPoint, capture_index: int = 1) -> Path:
         suffix = self.settings.image_format
         return self.images_dir / f"{self._image_name_stem(point, capture_index)}.{suffix}"
 
-    def npy_path(self, point: ScanPoint, timestamp: str, capture_index: int = 1) -> Path | None:
-        del timestamp
+    def npy_path(self, point: ScanPoint, capture_index: int = 1) -> Path | None:
         if not self.settings.save_numpy:
             return None
         return self.arrays_dir / f"{self._image_name_stem(point, capture_index)}.npy"
 
     def _image_name_stem(self, point: ScanPoint, capture_index: int) -> str:
-        base_stem = self.image_name_stems.get(point.index)
-        if base_stem is None:
-            return point_name(point, capture_index=capture_index)
+        base_stem = self.image_name_stems[point.index]
         capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
         return f"{base_stem}{capture_suffix}"
 
@@ -186,35 +184,50 @@ class DatasetRun:
             "config_snapshot": _relative_manifest_path(self.config_snapshot_path, self.run_dir),
         }
         if status != "running" and self.settings.manifest_detail == "full":
-            manifest["files"] = self._file_manifest_entries()
+            self._write_full_manifest(manifest)
+            return
         manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2)
         self.manifest_path.write_text(manifest_text, encoding="utf-8")
         self.legacy_manifest_path.write_text(manifest_text, encoding="utf-8")
 
-    def _file_manifest_entries(self) -> list[dict[str, Any]]:
-        entries: list[dict[str, Any]] = []
-        candidates: list[tuple[str, Path]] = [("config", self.config_snapshot_path)]
-        candidates.extend(("image", path) for path in sorted(self.images_dir.glob("*")) if path.is_file())
-        if self.arrays_dir.exists():
-            candidates.extend(("array", path) for path in sorted(self.arrays_dir.glob("*")) if path.is_file())
-        if self.csv_path.exists():
-            candidates.append(("metadata", self.csv_path))
+    def _write_full_manifest(self, manifest: dict[str, Any]) -> None:
+        with self.manifest_path.open("w", encoding="utf-8") as stream:
+            stream.write("{\n")
+            for key, value in manifest.items():
+                encoded_key = json.dumps(key, ensure_ascii=False)
+                encoded_value = json.dumps(value, ensure_ascii=False, indent=2).replace("\n", "\n  ")
+                stream.write(f"  {encoded_key}: {encoded_value},\n")
+            stream.write('  "files": [')
+            first_entry = True
+            for entry in self._iter_file_manifest_entries():
+                encoded_entry = json.dumps(entry, ensure_ascii=False, indent=2).replace("\n", "\n    ")
+                stream.write("\n" if first_entry else ",\n")
+                stream.write(f"    {encoded_entry}")
+                first_entry = False
+            stream.write("\n  ]\n}\n" if not first_entry else "]\n}\n")
+        shutil.copyfile(self.manifest_path, self.legacy_manifest_path)
 
-        seen: set[Path] = set()
-        for role, path in candidates:
-            resolved = path.resolve()
-            if resolved in seen or not path.is_file():
-                continue
-            seen.add(resolved)
-            entries.append(
-                {
-                    "path": _relative_manifest_path(path, self.run_dir),
-                    "role": role,
-                    "size_bytes": path.stat().st_size,
-                    "sha256": _sha256_file(path),
-                }
-            )
-        return entries
+    def _iter_file_manifest_entries(self) -> Iterator[dict[str, Any]]:
+        yield self._file_manifest_entry("config", self.config_snapshot_path)
+        with os.scandir(self.images_dir) as entries:
+            for entry in entries:
+                if entry.is_file():
+                    yield self._file_manifest_entry("image", Path(entry.path))
+        if self.arrays_dir.exists():
+            with os.scandir(self.arrays_dir) as entries:
+                for entry in entries:
+                    if entry.is_file():
+                        yield self._file_manifest_entry("array", Path(entry.path))
+        if self.csv_path.exists():
+            yield self._file_manifest_entry("metadata", self.csv_path)
+
+    def _file_manifest_entry(self, role: str, path: Path) -> dict[str, Any]:
+        return {
+            "path": _relative_manifest_path(path, self.run_dir),
+            "role": role,
+            "size_bytes": path.stat().st_size,
+            "sha256": _sha256_file(path),
+        }
 
 
 CAPTURE_FIELDS = [
@@ -343,12 +356,16 @@ def safe_timestamp(value: datetime | None = None) -> str:
     return dt.strftime("%Y%m%dT%H%M%S_%f%z")
 
 
-def validate_image_output_plan(points: list[ScanPoint], default_capture_count: int = 1) -> list[str]:
-    del default_capture_count
-    try:
-        planned_image_name_stems(points)
-    except ValueError as exc:
-        return [str(exc)]
+def validate_image_output_plan(points: list[ScanPoint]) -> list[str]:
+    point_indexes: set[int] = set()
+    for point in points:
+        if point.index in point_indexes:
+            return [f"Duplicate point index in image output plan: {point.index}."]
+        point_indexes.add(point.index)
+        try:
+            _coordinate_stem(point)
+        except ValueError as exc:
+            return [str(exc)]
     return []
 
 
@@ -366,19 +383,16 @@ def planned_image_name_stems(points: list[ScanPoint]) -> dict[int, str]:
     return stems
 
 
-def point_name(point: ScanPoint, timestamp: str | None = None, capture_index: int = 1) -> str:
-    del timestamp
-    capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
-    return f"{_coordinate_stem(point)}{capture_suffix}"
-
-
 def _coordinate_stem(point: ScanPoint) -> str:
     return f"X{_filename_coordinate(point.x_mm)}_Y{_filename_coordinate(point.y_mm)}"
 
 
 def _filename_coordinate(value: float) -> str:
     try:
-        coordinate = Decimal(str(value)).quantize(Decimal("0.001"), rounding=ROUND_DOWN)
+        coordinate = Decimal(str(value))
+        if not coordinate.is_finite():
+            raise ValueError(f"Invalid image coordinate: {value}")
+        coordinate = coordinate.quantize(Decimal("0.001"), rounding=ROUND_DOWN)
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"Invalid image coordinate: {value}") from exc
     if coordinate < 0:

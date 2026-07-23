@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -44,7 +45,6 @@ class CaptureResultsModel(QAbstractTableModel):
         super().__init__()
         self.max_rows = max(1, int(max_rows))
         self._rows: list[CaptureResultRow] = []
-        self.total_seen = 0
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -76,7 +76,6 @@ class CaptureResultsModel(QAbstractTableModel):
     def clear(self) -> None:
         self.beginResetModel()
         self._rows.clear()
-        self.total_seen = 0
         self.endResetModel()
 
     def append_capture(self, values: Sequence[str], image_path: str, record: dict[str, Any]) -> None:
@@ -88,12 +87,8 @@ class CaptureResultsModel(QAbstractTableModel):
     def append_captures(
         self,
         rows: Sequence[tuple[Sequence[str], str, dict[str, Any]]],
-        *,
-        seen_count: int | None = None,
     ) -> None:
         if not rows:
-            if seen_count:
-                self.total_seen += max(0, int(seen_count))
             return
         new_rows: list[CaptureResultRow] = []
         for values, image_path, record in rows:
@@ -101,10 +96,6 @@ class CaptureResultsModel(QAbstractTableModel):
             if len(compact_values) != len(CAPTURE_RESULT_HEADERS):
                 raise ValueError("Capture result row has the wrong column count.")
             new_rows.append(CaptureResultRow(compact_values, image_path, dict(record)))
-        total_increment = len(new_rows) if seen_count is None else int(seen_count)
-        if total_increment < len(new_rows):
-            raise ValueError("seen_count cannot be smaller than the number of retained capture rows.")
-        self.total_seen += total_increment
         if len(new_rows) >= self.max_rows:
             self.beginResetModel()
             self._rows = new_rows[-self.max_rows :]
@@ -296,9 +287,9 @@ class PositionTableModel(QAbstractTableModel):
         if self._rows:
             self.dataChanged.emit(self.index(0, 4), self.index(len(self._rows) - 1, 5), [Qt.DisplayRole])
 
-    def input_rows(self) -> list[PositionInputRow]:
-        return [
-            PositionInputRow(
+    def input_rows(self) -> Iterator[PositionInputRow]:
+        for index, row in enumerate(self._rows):
+            yield PositionInputRow(
                 index=index,
                 label=row.label,
                 x_text=row.x_text,
@@ -306,8 +297,6 @@ class PositionTableModel(QAbstractTableModel):
                 velocity_text=row.velocity_text,
                 capture_count_text=row.capture_count_text,
             )
-            for index, row in enumerate(self._rows)
-        ]
 
     def text(self, row: int, column: int) -> str:
         if 0 <= row < len(self._rows):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from .error_model import ZABER_LDM210_XY_SPECS
@@ -19,10 +21,6 @@ class PositionValidationResult:
     cell_errors: dict[tuple[int, int], str]
     cell_warnings: dict[tuple[int, int], str]
 
-    @property
-    def is_valid(self) -> bool:
-        return not self.errors
-
 
 @dataclass(frozen=True)
 class PositionInputRow:
@@ -35,7 +33,7 @@ class PositionInputRow:
 
 
 def parse_position_rows(
-    rows: list[PositionInputRow],
+    rows: Iterable[PositionInputRow],
 ) -> tuple[list[ScanPoint], PositionValidationResult]:
     points: list[ScanPoint] = []
     errors: list[str] = []
@@ -102,8 +100,14 @@ def validate_scan_points(points: list[ScanPoint]) -> PositionValidationResult:
 
     for point in points:
         row_label = f"{point.index + 1}행"
+        coordinates_are_finite = True
         for column, axis, value in ((2, "X", point.x_mm), (3, "Y", point.y_mm)):
-            if value < POSITION_MIN_MM or value > POSITION_MAX_MM:
+            if not isfinite(value):
+                detail = f"{row_label} {axis} 위치는 유한한 숫자여야 합니다: {value}"
+                errors.append(detail)
+                cell_errors[(point.index, column)] = detail
+                coordinates_are_finite = False
+            elif value < POSITION_MIN_MM or value > POSITION_MAX_MM:
                 detail = (
                     f"{row_label} {axis}={compact_mm(value)} mm: "
                     f"허용 범위 {compact_mm(POSITION_MIN_MM)}-{compact_mm(POSITION_MAX_MM)} mm 밖입니다."
@@ -111,7 +115,9 @@ def validate_scan_points(points: list[ScanPoint]) -> PositionValidationResult:
                 errors.append(detail)
                 cell_errors[(point.index, column)] = detail
 
-        if point.move_velocity_mm_s is not None and point.move_velocity_mm_s <= 0:
+        if point.move_velocity_mm_s is not None and (
+            not isfinite(point.move_velocity_mm_s) or point.move_velocity_mm_s <= 0
+        ):
             detail = f"{row_label} 이동속도는 비워 두거나 0보다 커야 합니다."
             errors.append(detail)
             cell_errors[(point.index, 4)] = detail
@@ -124,19 +130,20 @@ def validate_scan_points(points: list[ScanPoint]) -> PositionValidationResult:
         if not point.label.strip():
             blank_label_rows.append(point.index)
 
-        key = (round(point.x_mm, 6), round(point.y_mm, 6))
-        previous_row = duplicate_positions.get(key)
-        if previous_row is None:
-            duplicate_positions[key] = point.index
-        else:
-            detail = (
-                f"{previous_row + 1}행과 {point.index + 1}행의 좌표가 같습니다 "
-                f"({compact_mm(point.x_mm)}, {compact_mm(point.y_mm)} mm)."
-            )
-            warnings.append(detail)
-            for duplicate_row in (previous_row, point.index):
-                cell_warnings[(duplicate_row, 2)] = detail
-                cell_warnings[(duplicate_row, 3)] = detail
+        if coordinates_are_finite:
+            key = (round(point.x_mm, 6), round(point.y_mm, 6))
+            previous_row = duplicate_positions.get(key)
+            if previous_row is None:
+                duplicate_positions[key] = point.index
+            else:
+                detail = (
+                    f"{previous_row + 1}행과 {point.index + 1}행의 좌표가 같습니다 "
+                    f"({compact_mm(point.x_mm)}, {compact_mm(point.y_mm)} mm)."
+                )
+                warnings.append(detail)
+                for duplicate_row in (previous_row, point.index):
+                    cell_warnings[(duplicate_row, 2)] = detail
+                    cell_warnings[(duplicate_row, 3)] = detail
 
     if blank_label_rows:
         detail = f"라벨이 비어 있는 위치가 {len(blank_label_rows)}개 있습니다."
@@ -208,12 +215,18 @@ def _parse_position_cell(
         cell_errors[(row, column)] = detail
         return None
     try:
-        return float(text)
+        value = float(text)
     except ValueError:
         detail = f"{row + 1}행 {axis} 위치가 숫자가 아닙니다: {text}"
         errors.append(detail)
         cell_errors[(row, column)] = detail
         return None
+    if not isfinite(value):
+        detail = f"{row + 1}행 {axis} 위치는 유한한 숫자여야 합니다: {text}"
+        errors.append(detail)
+        cell_errors[(row, column)] = detail
+        return None
+    return value
 
 
 def _parse_optional_positive_float_cell(
@@ -233,7 +246,7 @@ def _parse_optional_positive_float_cell(
         errors.append(detail)
         cell_errors[(row, column)] = detail
         return None
-    if value <= 0:
+    if not isfinite(value) or value <= 0:
         detail = f"{row + 1}행 {label} 값은 비워 두거나 0보다 커야 합니다: {text}"
         errors.append(detail)
         cell_errors[(row, column)] = detail
@@ -259,7 +272,7 @@ def _parse_optional_int_cell(
         errors.append(detail)
         cell_errors[(row, column)] = detail
         return None
-    if not number.is_integer():
+    if not isfinite(number) or not number.is_integer():
         detail = f"{row + 1}행 {label} 값이 정수가 아닙니다: {text}"
         errors.append(detail)
         cell_errors[(row, column)] = detail

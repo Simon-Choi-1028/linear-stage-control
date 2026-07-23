@@ -22,10 +22,6 @@ class LaserConnectionError(LinearStageControlError):
     """RS485 laser controller connection or command failed."""
 
 
-class PositionValidationError(LinearStageControlError):
-    """Position input could not be parsed or validated."""
-
-
 class DatasetWriteError(LinearStageControlError):
     """Dataset path, image, metadata, or manifest writing failed."""
 

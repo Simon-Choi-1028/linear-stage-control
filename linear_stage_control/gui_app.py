@@ -168,6 +168,7 @@ DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S = 0.03
 MAX_ETA_CAPTURE_CHECKPOINTS = 50_000
 QT_PROGRESS_MAX = 2_147_483_647
 LARGE_RUN_PROGRESS_SCALE = 10_000
+LIVE_POSITION_VALIDATION_LIMIT = 10_000
 LASER_COMMAND_MIN_INTERVAL_MS = 250
 CAMERA_PARAMETER_FIELDS = (
     ("gain", "Gain", "예: 0"),
@@ -468,7 +469,6 @@ class MainWindow(QMainWindow):
         self.image_viewer: FullscreenImageWindow | None = None
         self.run_stats = RunStatsAccumulator()
         self.pending_capture_rows: deque[tuple[list[str], str, dict[str, Any]]] = deque(maxlen=CAPTURE_DISPLAY_LIMIT)
-        self.pending_capture_seen = 0
         self.last_capture_record: dict[str, Any] | None = None
         self.last_capture_image_path: str = ""
         self.last_preview_update_monotonic = 0.0
@@ -484,9 +484,7 @@ class MainWindow(QMainWindow):
         self.run_capture_cumulative_estimates_s: tuple[float, ...] = ()
         self.last_progress_ui_monotonic = 0.0
         self.preview_base_size = QSize(PREVIEW_DEFAULT_WIDTH, self._aspect_height(PREVIEW_DEFAULT_WIDTH))
-        self.preview_base_min_height = self.preview_base_size.height()
         self.preview_user_size: QSize | None = None
-        self.preview_user_min_height: int | None = None
         self.preview_source_qimage: QImage | None = None
         self.preview_crop_rect: tuple[int, int, int, int] | None = None
         self.preview_center_x = 0.5
@@ -606,7 +604,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "positions_model"):
             self.positions_model.clear()
         self.pending_capture_rows.clear()
-        self.pending_capture_seen = 0
         self.clear_preview_source()
         super().closeEvent(event)
         if event.isAccepted() and self.pending_update_installer_path is not None:
@@ -736,7 +733,6 @@ class MainWindow(QMainWindow):
                 self.preview_metrics_table.setMaximumHeight(78)
             if hasattr(self, "preview_tabs"):
                 self.preview_tabs.setMinimumHeight(180)
-            self._set_preview_base_height(160)
             total_height = max(640, self.main_splitter.height())
             self.main_splitter.setSizes([min(430, total_height // 2), max(260, total_height - 430)])
         else:
@@ -751,7 +747,6 @@ class MainWindow(QMainWindow):
                 self.preview_metrics_table.setMaximumHeight(82)
             if hasattr(self, "preview_tabs"):
                 self.preview_tabs.setMinimumHeight(180)
-            self._set_preview_base_height(180)
             left_width = min(520, max(420, int(self.width() * 0.36)))
             self.main_splitter.setSizes([left_width, max(620, self.width() - left_width)])
         self._apply_preview_height()
@@ -904,23 +899,6 @@ class MainWindow(QMainWindow):
         )
         return self._fit_preview_aspect(width, self._aspect_height(width))
 
-    def _set_preview_base_height(self, height: int) -> None:
-        self.preview_base_min_height = max(PREVIEW_MIN_HEIGHT, int(height))
-        self.preview_base_size = self._preview_default_size()
-        self._apply_preview_size()
-
-    def set_live_preview_scale(self, value: int) -> None:
-        scale = int(value)
-        base = self.preview_user_size or self.preview_base_size
-        width = max(PREVIEW_MIN_WIDTH, min(PREVIEW_MAX_WIDTH, int(base.width() * scale / 100)))
-        height = max(PREVIEW_MIN_HEIGHT, min(PREVIEW_MAX_HEIGHT, self._aspect_height(width)))
-        self.preview_user_size = self._clamp_preview_size(QSize(width, height), preserve_aspect=True)
-        height = self.preview_user_size.height()
-        self.preview_user_min_height = height
-        if hasattr(self, "live_size_hint_label"):
-            self.live_size_hint_label.setText(self._preview_size_text(self.preview_user_size))
-        self._apply_preview_size()
-
     def resize_preview_by_drag(self, delta_x: int = 0, delta_y: int | None = None) -> None:
         if not hasattr(self, "preview_label"):
             return
@@ -936,7 +914,6 @@ class MainWindow(QMainWindow):
         self.preview_user_size = self._clamp_preview_size(QSize(width, height), fit_available=False)
         width = self.preview_user_size.width()
         height = self.preview_user_size.height()
-        self.preview_user_min_height = height
         if hasattr(self, "live_size_hint_label"):
             self.live_size_hint_label.setText(self._preview_size_text(self.preview_user_size))
         self.logger.info(
@@ -947,7 +924,6 @@ class MainWindow(QMainWindow):
 
     def reset_preview_height(self) -> None:
         self.preview_user_size = None
-        self.preview_user_min_height = None
         if hasattr(self, "live_size_hint_label"):
             self.live_size_hint_label.setText(self._preview_size_text(self.preview_base_size))
         self._apply_preview_size()
@@ -969,8 +945,6 @@ class MainWindow(QMainWindow):
             self.preview_user_size = size
         else:
             self.preview_base_size = size
-        self.preview_base_min_height = self.preview_base_size.height()
-        self.preview_user_min_height = self.preview_user_size.height() if self.preview_user_size is not None else None
         self.preview_label.setFixedSize(size)
         if hasattr(self, "preview_frame"):
             self.preview_frame.setFixedSize(size)
@@ -2730,6 +2704,20 @@ class MainWindow(QMainWindow):
     def refresh_position_feedback(self, *_: object) -> None:
         if not hasattr(self, "position_status_label"):
             return
+        row_count = self.positions_model.rowCount()
+        if row_count > LIVE_POSITION_VALIDATION_LIMIT:
+            self.positions_model.set_placeholders(
+                self._position_placeholder_text(4),
+                self._position_placeholder_text(5),
+            )
+            self.positions_model.set_validation(PositionValidationResult([], [], {}, {}))
+            self.position_status_label.setText(
+                f"{row_count}개 위치 | 대형 목록의 상세 검증은 촬영 시작 시 한 번 수행합니다."
+            )
+            self.position_status_label.setProperty("state", "warning")
+            self.position_status_label.style().unpolish(self.position_status_label)
+            self.position_status_label.style().polish(self.position_status_label)
+            return
         points, validation = self.read_positions_with_validation()
         self.apply_position_validation_feedback(
             validation,
@@ -3233,7 +3221,7 @@ class MainWindow(QMainWindow):
         else:
             issues.append(PreflightIssue("위치 목록", "오류", "최소 1개 이상의 위치가 필요합니다."))
 
-        image_plan_errors = validate_image_output_plan(points, default_capture_count) if points else []
+        image_plan_errors = validate_image_output_plan(points) if points else []
         if image_plan_errors:
             issues.append(PreflightIssue("이미지 파일명", "오류", short_issue_text(image_plan_errors)))
         elif points:
@@ -3526,7 +3514,6 @@ class MainWindow(QMainWindow):
             return
         self.capture_results_model.clear()
         self.pending_capture_rows.clear()
-        self.pending_capture_seen = 0
         self.run_stats = RunStatsAccumulator()
         self.last_capture_record = None
         self.last_capture_image_path = ""
@@ -3659,18 +3646,14 @@ class MainWindow(QMainWindow):
             self.queue_run_status(message)
 
     def on_capture_updates_available(self, worker: AcquisitionWorker) -> None:
-        records, seen_count, stats, progress = worker.take_capture_updates()
+        records, stats, progress = worker.take_capture_updates()
         if worker is not self.worker:
             return
-        self.pending_capture_seen += max(0, seen_count - len(records))
         self.run_stats.merge(stats)
         for record in records:
             self._queue_capture_for_ui(record, add_stats=False)
         if progress is not None:
             self.on_progress_changed(*progress)
-
-    def on_capture_done(self, record: dict[str, Any]) -> None:
-        self._queue_capture_for_ui(record, add_stats=True)
 
     def _queue_capture_for_ui(self, record: dict[str, Any], *, add_stats: bool) -> None:
         values = [
@@ -3691,7 +3674,6 @@ class MainWindow(QMainWindow):
         compact_record = {field: record.get(field, "") for field in CAPTURE_UI_RECORD_FIELDS}
         image_path = str(record.get("absolute_image_path", "") or "")
         self.pending_capture_rows.append((values, image_path, compact_record))
-        self.pending_capture_seen += 1
         if add_stats:
             self.run_stats.add_record(compact_record)
         self.last_capture_record = compact_record
@@ -3708,10 +3690,8 @@ class MainWindow(QMainWindow):
         if not self.pending_capture_rows and self.last_capture_record is None:
             return
         rows = list(self.pending_capture_rows)
-        seen_count = self.pending_capture_seen
         self.pending_capture_rows.clear()
-        self.pending_capture_seen = 0
-        self.capture_results_model.append_captures(rows, seen_count=seen_count)
+        self.capture_results_model.append_captures(rows)
         self.update_error_summary()
         if rows:
             self.captures_table.scrollToBottom()

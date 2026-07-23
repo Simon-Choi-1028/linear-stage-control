@@ -29,6 +29,9 @@ DEVICE_DB_RELATIVE_DIR = Path("sdk_downloads") / "zaber"
 SQLITE_HEADER = b"SQLite format 3\x00"
 TRUE_CONFIG_VALUES = {"1", "true", "yes", "y", "on"}
 FALSE_CONFIG_VALUES = {"0", "false", "no", "n", "off"}
+STAGE_BUSY_POLL_INTERVAL_S = 0.05
+STAGE_STOP_WAIT_TIMEOUT_S = 5.0
+STAGE_CANCELLED_MESSAGE = "사용자 중지 요청으로 스테이지 이동을 취소했습니다."
 
 
 @dataclass(frozen=True)
@@ -181,14 +184,20 @@ class ZaberXYStage:
         self.x_axis = None
         self.y_axis = None
 
-    def home(self) -> None:
+    def home(self, cancel_requested: Callable[[], bool] | None = None) -> None:
+        active_homes: list[Axis] = []
         try:
             for axis in self._axes():
                 if not axis.is_homed():
-                    axis.home()
+                    axis.home(wait_until_idle=False)
+                    active_homes.append(axis)
+            self._wait_until_idle(active_homes, cancel_requested)
+        except StageMoveCancelled:
+            raise
         except StageConnectionError:
             raise
         except Exception as exc:
+            self._stop_axes(active_homes, wait_until_idle=False, suppress_errors=True)
             raise _stage_command_error(exc, "stage home command failed") from exc
 
     def move_absolute_mm(
@@ -225,6 +234,8 @@ class ZaberXYStage:
         try:
             self._wait_until_idle(active_moves, cancel_requested)
         except StageMoveCancelled:
+            raise
+        except StageConnectionError:
             raise
         except Exception as exc:
             self._stop_axes(active_moves, wait_until_idle=False, suppress_errors=True)
@@ -351,15 +362,31 @@ class ZaberXYStage:
         cancel_requested: Callable[[], bool] | None,
     ) -> None:
         while True:
+            if cancel_requested is not None and cancel_requested():
+                self._stop_axes(axes, wait_until_idle=False, suppress_errors=False)
+                stopped_before_deadline = self._wait_for_stopped_axes(axes)
+                developer_message = None
+                if not stopped_before_deadline:
+                    developer_message = (
+                        f"Zaber axes remained busy for {STAGE_STOP_WAIT_TIMEOUT_S:g}s "
+                        "after cancellation stop commands."
+                    )
+                    logging.getLogger("linear_stage_control.stage").warning(developer_message)
+                raise StageMoveCancelled(STAGE_CANCELLED_MESSAGE, developer_message)
             busy_axes = [axis for axis in axes if axis.is_busy()]
             if not busy_axes:
                 return
-            if cancel_requested is not None and cancel_requested():
-                self._stop_axes(axes, wait_until_idle=False, suppress_errors=False)
-                while any(axis.is_busy() for axis in axes):
-                    time.sleep(0.05)
-                raise StageMoveCancelled("사용자 중지 요청으로 스테이지 이동을 취소했습니다.")
-            time.sleep(0.05)
+            time.sleep(STAGE_BUSY_POLL_INTERVAL_S)
+
+    @staticmethod
+    def _wait_for_stopped_axes(axes: list[Axis]) -> bool:
+        deadline = time.monotonic() + STAGE_STOP_WAIT_TIMEOUT_S
+        while any(axis.is_busy() for axis in axes):
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                return False
+            time.sleep(min(STAGE_BUSY_POLL_INTERVAL_S, remaining_s))
+        return True
 
     def _stop_axes(
         self,
@@ -378,8 +405,6 @@ class ZaberXYStage:
                     "zaber axis stop failed: %s",
                     exc,
                 )
-                if not suppress_errors:
-                    break
         if errors and not suppress_errors:
             raise StageConnectionError(
                 "Zaber 정지 명령을 완료하지 못했습니다. 장비 전원과 COM 포트 점유 상태를 확인하세요.",

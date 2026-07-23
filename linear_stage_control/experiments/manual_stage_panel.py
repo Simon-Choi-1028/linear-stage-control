@@ -226,7 +226,9 @@ class ManualStagePanel(QWidget):
             return
         try:
             config = self.stage_config()
-            velocity = _optional_float_text(self.velocity_edit.text()) or config.get("stage", {}).get("move_velocity_mm_s")
+            velocity = _optional_float_text(self.velocity_edit.text()) or config.get("stage", {}).get(
+                "move_velocity_mm_s"
+            )
         except Exception as exc:
             QMessageBox.warning(self, "수동 스테이지 설정 오류", str(exc))
             return

@@ -6,6 +6,7 @@ import lzma
 import os
 import tempfile
 import tomllib
+import tracemalloc
 import unittest
 from pathlib import Path
 
@@ -28,13 +29,17 @@ from linear_stage_control.dataset import (
     DatasetSettings,
     base_capture_record,
     dataset_settings_from_config,
-    point_name,
     validate_image_output_plan,
 )
 from linear_stage_control.disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
 from linear_stage_control.exceptions import DatasetWriteError, StageConnectionError
-from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
+from linear_stage_control.position_validation import (
+    PositionInputRow,
+    disabled_axis_variation_errors,
+    parse_position_rows,
+    validate_scan_points,
+)
 from linear_stage_control.scan import (
     ScanPoint,
     linear_path_points,
@@ -68,6 +73,7 @@ class _FakeAxis:
         home_exception: Exception | None = None,
         stop_exception: Exception | None = None,
         stays_busy_until_stopped: bool = False,
+        stays_busy_after_stop: bool = False,
         position: float = 0.0,
         homed: bool = True,
     ):
@@ -77,10 +83,12 @@ class _FakeAxis:
         self.home_exception = home_exception
         self.stop_exception = stop_exception
         self.stays_busy_until_stopped = stays_busy_until_stopped
+        self.stays_busy_after_stop = stays_busy_after_stop
         self.position = position
         self.homed = homed
         self.move_calls = 0
         self.home_calls = 0
+        self.home_wait_until_idle_values: list[bool] = []
         self.stop_calls = 0
         self.stopped = False
         self.moved = False
@@ -95,6 +103,8 @@ class _FakeAxis:
         self.stopped = False
 
     def is_busy(self) -> bool:
+        if self.stays_busy_after_stop and self.moved:
+            return True
         return self.stays_busy_until_stopped and self.moved and not self.stopped
 
     def stop(self, *, wait_until_idle: bool = False) -> None:
@@ -112,11 +122,14 @@ class _FakeAxis:
     def is_homed(self) -> bool:
         return self.homed
 
-    def home(self) -> None:
+    def home(self, *, wait_until_idle: bool = True) -> None:
         self.home_calls += 1
+        self.home_wait_until_idle_values.append(wait_until_idle)
         if self.home_exception is not None:
             raise self.home_exception
         self.homed = True
+        self.moved = True
+        self.stopped = False
 
 
 class _FakeDevice:
@@ -204,6 +217,24 @@ class ScanInputTests(unittest.TestCase):
         points = points_from_records([{"label": " ", "x_mm": "0.5", "y_mm": "0.0"}])
 
         self.assertEqual(points[0].label, "point_0000")
+
+    def test_position_validation_rejects_non_finite_values(self) -> None:
+        points, validation = parse_position_rows(
+            [
+                PositionInputRow(
+                    index=0,
+                    label="invalid",
+                    x_text="nan",
+                    y_text="inf",
+                    velocity_text="inf",
+                    capture_count_text="nan",
+                )
+            ]
+        )
+
+        self.assertEqual(points, [])
+        self.assertGreaterEqual(len(validation.errors), 4)
+        self.assertTrue(any("유한한" in error for error in validation.errors))
 
 
 class CameraCompatibilityTests(unittest.TestCase):
@@ -423,6 +454,42 @@ class CameraCompatibilityTests(unittest.TestCase):
         huge = np.lib.stride_tricks.as_strided(backing, shape=(MAX_PREVIEW_PIXELS + 1, 1), strides=(0, 0))
         with self.assertRaises(MemoryError):
             qimage_from_array(huge)
+
+    def test_uint16_preview_scaling_preserves_dynamic_range_without_full_frame_float_copies(self) -> None:
+        from linear_stage_control.preview_rendering import _to_uint8
+
+        values = np.array([[100, 101, 1000], [2048, 4094, 4095]], dtype=np.uint16)
+        expected_float = values.astype(np.float32)
+        expected = np.clip(
+            (expected_float - float(values.min())) * (255.0 / (float(values.max()) - float(values.min()))),
+            0,
+            255,
+        ).astype(np.uint8)
+        np.testing.assert_array_equal(_to_uint8(values), expected)
+
+        frame = np.arange(2048 * 2048, dtype=np.uint16).reshape(2048, 2048)
+        tracemalloc.start()
+        try:
+            converted = _to_uint8(frame)
+            _current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(converted.shape, frame.shape)
+        self.assertTrue(converted.flags.c_contiguous)
+        self.assertLess(peak_bytes, frame.nbytes * 2)
+
+    def test_live_camera_setting_warnings_are_consumed_per_call(self) -> None:
+        settings = camera_settings_from_config({"camera": {"gain": 1.5}})
+        camera = BaslerCamera(settings)
+        camera.camera = object()
+        camera.warnings.append("warning retained from camera open")
+
+        for _ in range(100):
+            warnings = camera.apply_live_settings(settings)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("Gain/GainRaw", warnings[0])
+            self.assertEqual(camera.warnings, ["warning retained from camera open"])
 
     def test_camera_orientation_flips_arrays_after_rotation(self) -> None:
         array = np.arange(12, dtype=np.uint8).reshape(3, 4)
@@ -705,6 +772,51 @@ class StageAxisSettingsTests(unittest.TestCase):
 
         self.assertIn("device 1 axis 1", context.exception.user_message)
 
+    def test_stage_home_uses_non_blocking_command_and_can_be_cancelled(self) -> None:
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        x_axis = _FakeAxis(homed=False, stays_busy_until_stopped=True)
+        stage.x_axis = x_axis  # type: ignore[assignment]
+
+        with self.assertRaises(StageMoveCancelled) as context:
+            stage.home(cancel_requested=lambda: True)
+
+        self.assertEqual(x_axis.home_wait_until_idle_values, [False])
+        self.assertEqual(x_axis.stop_calls, 1)
+        self.assertEqual(context.exception.user_message, "사용자 중지 요청으로 스테이지 이동을 취소했습니다.")
+
+    def test_stage_cancel_busy_wait_has_a_deadline(self) -> None:
+        from linear_stage_control import stage as stage_module
+
+        stage = ZaberXYStage(
+            StageSettings(
+                serial_port="COM_TEST",
+                x=AxisAddress(0, 1, True),
+                y=AxisAddress(0, 2, False),
+            )
+        )
+        x_axis = _FakeAxis(
+            stays_busy_until_stopped=True,
+            stays_busy_after_stop=True,
+        )
+        stage.x_axis = x_axis  # type: ignore[assignment]
+        original_timeout_s = stage_module.STAGE_STOP_WAIT_TIMEOUT_S
+        stage_module.STAGE_STOP_WAIT_TIMEOUT_S = 0.01
+        try:
+            with self.assertRaises(StageMoveCancelled) as context:
+                stage.move_absolute_mm(1.0, 0.0, cancel_requested=lambda: True)
+        finally:
+            stage_module.STAGE_STOP_WAIT_TIMEOUT_S = original_timeout_s
+
+        self.assertEqual(x_axis.stop_calls, 1)
+        self.assertIn("remained busy", context.exception.developer_message)
+        self.assertEqual(context.exception.user_message, "사용자 중지 요청으로 스테이지 이동을 취소했습니다.")
+
     def test_stage_move_stops_started_axis_when_second_axis_command_fails(self) -> None:
         stage = ZaberXYStage(StageSettings(serial_port="COM_TEST"))
         x_axis = _FakeAxis()
@@ -806,6 +918,19 @@ class StageAxisSettingsTests(unittest.TestCase):
 
         self.assertIn("정지", context.exception.user_message)
 
+    def test_stage_stop_attempts_every_axis_when_one_stop_fails(self) -> None:
+        stage = ZaberXYStage(StageSettings(serial_port="COM_TEST"))
+        x_axis = _FakeAxis(stop_exception=RuntimeError("x stop failed"))
+        y_axis = _FakeAxis()
+        stage.x_axis = x_axis  # type: ignore[assignment]
+        stage.y_axis = y_axis  # type: ignore[assignment]
+
+        with self.assertRaises(StageConnectionError):
+            stage.stop(wait_until_idle=False)
+
+        self.assertEqual(x_axis.stop_calls, 1)
+        self.assertEqual(y_axis.stop_calls, 1)
+
 
 class ErrorModelTests(unittest.TestCase):
     def test_single_axis_error_excludes_inactive_axis(self) -> None:
@@ -840,6 +965,22 @@ class UpdaterTests(unittest.TestCase):
 
         self.assertEqual(__version__, project_version)
         self.assertIn(f"## v{project_version} - ", changelog)
+
+    def test_build_tools_are_not_runtime_dependencies(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+        runtime_dependencies = [str(item).lower() for item in project["dependencies"]]
+        build_dependencies = [str(item).lower() for item in project["optional-dependencies"]["build"]]
+        build_script = (root / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+
+        self.assertFalse(any(item.startswith("pyinstaller") for item in runtime_dependencies))
+        self.assertTrue(any(item.startswith("pyinstaller") for item in build_dependencies))
+        self.assertIn('-e ".[build]"', build_script)
+        self.assertNotIn('"--collect-all", "scipy"', build_script)
+        self.assertIn("source_fingerprint", build_script)
+        portable_script = (root / "packaging" / "build_portable_release.ps1").read_text(encoding="utf-8")
+        self.assertIn("Get-SourceFingerprint", portable_script)
+        self.assertIn("source fingerprint does not match", portable_script)
 
 
 class GuiSmokeTests(unittest.TestCase):
@@ -912,13 +1053,16 @@ class GuiSmokeTests(unittest.TestCase):
             record["index"] = index
             record["label"] = f"point_{index:06d}"
             record["unused_camera_payload"] = "not retained by the UI"
-            window.on_capture_done(record)
+            window._queue_capture_for_ui(record, add_stats=True)
         self.assertEqual(len(window.pending_capture_rows), 1000)
         window.flush_capture_ui_updates()
         app.processEvents()
 
-        self.assertEqual(window.capture_results_model.total_seen, 20_000)
         self.assertLessEqual(window.captures_table.rowCount(), 1000)
+        self.assertEqual(
+            (window.capture_results_model.record_at(window.captures_table.rowCount() - 1) or {})["index"],
+            19_999,
+        )
         self.assertEqual(window.run_stats.record_count, 20_000)
         self.assertNotIn(
             "unused_camera_payload",
@@ -949,13 +1093,12 @@ class GuiSmokeTests(unittest.TestCase):
             )
             worker._queue_status(f"capture {index}")
 
-        records, seen_count, stats, progress = worker.take_capture_updates()
+        records, stats, progress = worker.take_capture_updates()
         self.assertEqual(capture_wakes, [True])
         self.assertEqual(status_wakes, [True])
         self.assertEqual(len(records), 1000)
         self.assertEqual(records[0]["index"], 19_000)
         self.assertEqual(records[-1]["index"], 19_999)
-        self.assertEqual(seen_count, 20_000)
         self.assertEqual(stats.record_count, 20_000)
         self.assertEqual(stats.predicted_max_error_um_count, 20_000)
         self.assertEqual(progress, (20_000, total))
@@ -995,6 +1138,21 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertGreaterEqual(window.preview_label.width(), 240)
         self.assertFalse(window.position_feedback_timer.isActive())
+        window.close()
+
+    def test_large_position_list_defers_live_validation(self) -> None:
+        from linear_stage_control.gui_app import LIVE_POSITION_VALIDATION_LIMIT, MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        original_row_count = window.positions_model.rowCount
+        window.positions_model.rowCount = lambda *_: LIVE_POSITION_VALIDATION_LIMIT + 1  # type: ignore[method-assign]
+        window.read_positions_with_validation = lambda: self.fail("large live validation should be deferred")  # type: ignore[method-assign]
+
+        window.refresh_position_feedback()
+
+        self.assertIn("촬영 시작 시", window.position_status_label.text())
+        window.positions_model.rowCount = original_row_count  # type: ignore[method-assign]
         window.close()
 
     def test_live_first_frame_resets_to_full_frame_fit(self) -> None:
@@ -1206,14 +1364,12 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertGreater(window.preview_label.height(), base_size.height())
         self.assertNotEqual(window.preview_label.width() * 3, window.preview_label.height() * 4)
         self.assertIsNotNone(window.preview_user_size)
-        self.assertIsNotNone(window.preview_user_min_height)
         self.assertIn("custom", window.live_size_hint_label.text())
 
         window.live_size_reset_button.click()
         app.processEvents()
         self.assertIsNone(window.preview_user_size)
-        self.assertIsNone(window.preview_user_min_height)
-        self.assertEqual(window.preview_label.minimumHeight(), window.preview_base_min_height)
+        self.assertEqual(window.preview_label.minimumHeight(), window.preview_base_size.height())
         self.assertEqual(window.preview_label.width() * 3, window.preview_label.height() * 4)
         window.close()
 
@@ -1466,6 +1622,7 @@ class GuiSmokeTests(unittest.TestCase):
 
             def __init__(self, _settings: object) -> None:
                 self.home_calls = 0
+                self.home_cancel_requested: object = None
                 self.moves: list[tuple[float, float, float | None]] = []
                 FakeStage.instances.append(self)
 
@@ -1475,7 +1632,8 @@ class GuiSmokeTests(unittest.TestCase):
             def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
                 pass
 
-            def home(self) -> None:
+            def home(self, *, cancel_requested: object = None) -> None:
+                self.home_cancel_requested = cancel_requested
                 self.home_calls += 1
 
             def move_absolute_mm(
@@ -1509,9 +1667,43 @@ class GuiSmokeTests(unittest.TestCase):
 
             stage = FakeStage.instances[-1]
             self.assertEqual(stage.home_calls, 1)
+            self.assertTrue(callable(stage.home_cancel_requested))
             self.assertEqual(stage.moves, [(105.0, 105.0, 50.0)])
             self.assertEqual(positions[-1], (105.0, 105.0))
             self.assertIn("중앙 이동", done_messages[-1])
+        finally:
+            gui_workers.ZaberXYStage = original_stage
+
+    def test_manual_stage_cancellation_is_not_reported_as_failure(self) -> None:
+        from linear_stage_control import gui_workers
+
+        class CancelledStage:
+            def __init__(self, _settings: object) -> None:
+                return
+
+            def __enter__(self) -> CancelledStage:
+                return self
+
+            def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+                return
+
+            def home(self, *, cancel_requested: object = None) -> None:
+                _ = cancel_requested
+                raise StageMoveCancelled("cancelled")
+
+        original_stage = gui_workers.ZaberXYStage
+        gui_workers.ZaberXYStage = CancelledStage  # type: ignore[assignment]
+        done_messages: list[str] = []
+        failed_messages: list[str] = []
+        try:
+            worker = gui_workers.ManualStageWorker({"stage": {"serial_port": "COM_TEST"}}, "home")
+            worker.action_done.connect(done_messages.append)
+            worker.action_failed.connect(failed_messages.append)
+
+            worker.run()
+
+            self.assertEqual(done_messages, ["수동 명령 중지됨"])
+            self.assertEqual(failed_messages, [])
         finally:
             gui_workers.ZaberXYStage = original_stage
 
@@ -1611,10 +1803,10 @@ class GuiSmokeTests(unittest.TestCase):
             def take_latest_status(self) -> str:
                 return ""
 
-            def take_capture_updates(self) -> tuple[list[dict[str, object]], int, object, None]:
+            def take_capture_updates(self) -> tuple[list[dict[str, object]], object, None]:
                 from linear_stage_control.run_stats import RunStatsAccumulator
 
-                return [], 0, RunStatsAccumulator(), None
+                return [], RunStatsAccumulator(), None
 
         class StuckCameraWorker:
             def isRunning(self) -> bool:
@@ -1993,14 +2185,6 @@ class DatasetNamingTests(unittest.TestCase):
         self.assertFalse(hasattr(settings, "metadata_formats"))
         self.assertFalse(hasattr(settings, "summary_formats"))
 
-    def test_point_name_uses_truncated_decimal_xy(self) -> None:
-        first = points_from_records([{"label": "sample a", "x_mm": "33.3339", "y_mm": "0.0009"}])[0]
-        second = points_from_records([{"label": "sample b", "x_mm": "0.5", "y_mm": "210"}])[0]
-
-        self.assertEqual(point_name(first, "20260528T153012_123456+0900", 1), "X033.333_Y000.000")
-        self.assertEqual(point_name(first, "20260528T153012_123456+0900", 2), "X033.333_Y000.000_C02")
-        self.assertEqual(point_name(second), "X000.500_Y210.000")
-
     def test_dataset_image_path_uses_decimal_xy_and_collision_suffixes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             points = points_from_records(
@@ -2012,9 +2196,9 @@ class DatasetNamingTests(unittest.TestCase):
             settings = DatasetSettings(output_root=Path(directory))
 
             with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
-                first = dataset.image_path(points[0], "20260528T153012_123456+0900", 1)
-                second_capture = dataset.image_path(points[0], "20260528T153012_123456+0900", 2)
-                duplicate_point = dataset.image_path(points[1], "20260528T153012_123456+0900", 1)
+                first = dataset.image_path(points[0], 1)
+                second_capture = dataset.image_path(points[0], 2)
+                duplicate_point = dataset.image_path(points[1], 1)
 
             self.assertEqual(first.name, "X033.333_Y000.000.png")
             self.assertEqual(second_capture.name, "X033.333_Y000.000_C02.png")
@@ -2030,7 +2214,7 @@ class DatasetNamingTests(unittest.TestCase):
         )
 
         self.assertEqual(dataset.image_name_stems, {1: "X000.500_Y000.000"})
-        self.assertEqual(dataset.image_path(point, "unused", 1_000_000).name, "X000.500_Y000.000_C1000000.png")
+        self.assertEqual(dataset.image_path(point, 1_000_000).name, "X000.500_Y000.000_C1000000.png")
 
     def test_image_output_plan_allows_fractional_duplicate_and_multi_capture_names(self) -> None:
         points = points_from_records(
@@ -2051,13 +2235,18 @@ class DatasetNamingTests(unittest.TestCase):
 
         self.assertEqual(errors, ["Duplicate point index in image output plan: 7."])
 
+    def test_image_output_plan_rejects_non_finite_coordinates(self) -> None:
+        errors = validate_image_output_plan([ScanPoint(index=0, x_mm=float("nan"), y_mm=0.0)])
+
+        self.assertEqual(errors, ["Invalid image coordinate: nan"])
+
     def test_dataset_open_accepts_fractional_image_output_plan(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             point = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])[0]
             settings = DatasetSettings(output_root=Path(directory))
 
             with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml") as dataset:
-                image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
+                image_path = dataset.image_path(point, 1)
 
             self.assertEqual(image_path.name, "X000.500_Y000.000.png")
 
@@ -2067,7 +2256,7 @@ class DatasetNamingTests(unittest.TestCase):
             settings = DatasetSettings(output_root=Path(directory), manifest_detail="full")
 
             with DatasetRun(settings, {"dataset": {}}, [point], "config.yaml") as dataset:
-                image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
+                image_path = dataset.image_path(point, 1)
                 image_path.write_bytes(b"fake image bytes")
                 record = base_capture_record(dataset.run_id, point)
                 record.update(
@@ -2087,7 +2276,9 @@ class DatasetNamingTests(unittest.TestCase):
             self.assertTrue(manifest_path.exists())
             self.assertTrue(legacy_manifest_path.exists())
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            legacy_manifest = json.loads(legacy_manifest_path.read_text(encoding="utf-8"))
 
+            self.assertEqual(legacy_manifest, manifest)
             self.assertEqual(manifest["record_count"], 1)
             self.assertIn("app_version", manifest)
             image_entries = [entry for entry in manifest["files"] if entry["role"] == "image"]

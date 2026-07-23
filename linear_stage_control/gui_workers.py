@@ -18,7 +18,7 @@ from .camera import (
     enumerate_cameras,
     iso_timestamp,
 )
-from .dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
+from .dataset import DatasetRun, base_capture_record, dataset_settings_from_config
 from .diagnostics import collect_diagnostics
 from .disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from .error_model import error_budget_from_config, estimate_position_error_um
@@ -77,7 +77,6 @@ class AcquisitionWorker(QThread):
         self._status_signal_pending = False
         self._capture_updates_lock = Lock()
         self._pending_capture_records: deque[dict[str, Any]] = deque(maxlen=CAPTURE_UPDATE_QUEUE_LIMIT)
-        self._pending_capture_seen = 0
         self._pending_capture_stats = RunStatsAccumulator()
         self._pending_progress: tuple[int, int] | None = None
         self._capture_update_signal_pending = False
@@ -111,7 +110,6 @@ class AcquisitionWorker(QThread):
         snapshot = dict(record)
         with self._capture_updates_lock:
             self._pending_capture_records.append(snapshot)
-            self._pending_capture_seen += 1
             self._pending_capture_stats.add_record(snapshot)
             if progress is not None:
                 self._pending_progress = progress
@@ -123,18 +121,16 @@ class AcquisitionWorker(QThread):
 
     def take_capture_updates(
         self,
-    ) -> tuple[list[dict[str, Any]], int, RunStatsAccumulator, tuple[int, int] | None]:
+    ) -> tuple[list[dict[str, Any]], RunStatsAccumulator, tuple[int, int] | None]:
         with self._capture_updates_lock:
             records = list(self._pending_capture_records)
-            seen_count = self._pending_capture_seen
             stats = self._pending_capture_stats
             progress = self._pending_progress
             self._pending_capture_records.clear()
-            self._pending_capture_seen = 0
             self._pending_capture_stats = RunStatsAccumulator()
             self._pending_progress = None
             self._capture_update_signal_pending = False
-        return records, seen_count, stats, progress
+        return records, stats, progress
 
     def run(self) -> None:
         run_dir = ""
@@ -171,7 +167,16 @@ class AcquisitionWorker(QThread):
                 if stage_settings.home_on_start and not self.skip_home:
                     self._queue_status("XY 스테이지 원점 복귀 중")
                     self.log_message.emit("XY 스테이지 원점 복귀 중")
-                    stage.home()
+                    try:
+                        stage.home(cancel_requested=lambda: self._stop_requested)
+                    except StageMoveCancelled:
+                        self._queue_status("중지됨")
+                        logger.info(
+                            "acquisition run stopped during stage home",
+                            extra={"event": "run_finished", "stopped": True},
+                        )
+                        self.run_done.emit(run_dir, True)
+                        return
 
                 default_capture_count = default_capture_count_from_config(self.config)
                 total = total_capture_count(self.points, default_capture_count)
@@ -274,10 +279,6 @@ class AcquisitionWorker(QThread):
                             f"{completed}/{total} 이동 중 | 위치 #{point.index} "
                             f"X={_mm_text(point.x_mm)}, Y={_mm_text(point.y_mm)}"
                         )
-                        self.log_message.emit(
-                            f"이동 #{point.index}: X={_mm_text(point.x_mm)}, Y={_mm_text(point.y_mm)}, "
-                            f"속도={_velocity_text(move_velocity)}, 캡쳐={capture_count}"
-                        )
                         logger.info(
                             "stage move started",
                             extra={
@@ -337,9 +338,8 @@ class AcquisitionWorker(QThread):
                                 f"{completed + 1}/{total} 카메라 촬영 중 | "
                                 f"위치 #{point.index} {capture_index}/{capture_count}"
                             )
-                            image_timestamp = safe_timestamp()
-                            image_path = dataset.image_path(point, image_timestamp, capture_index)
-                            npy_path = dataset.npy_path(point, image_timestamp, capture_index)
+                            image_path = dataset.image_path(point, capture_index)
+                            npy_path = dataset.npy_path(point, capture_index)
                             if disk_queue_size > 0 and _image_write_queue_needs_drain(
                                 pending_count=len(pending_disk_writes),
                                 pending_bytes=pending_disk_bytes,
@@ -756,7 +756,7 @@ class ManualStageWorker(QThread):
                     return
                 if self.action == "home":
                     self.status_changed.emit("원점 복귀 중")
-                    stage.home()
+                    stage.home(cancel_requested=lambda: self._stop_requested)
                     self.status_changed.emit(
                         "원점 복귀 후 중앙 이동 중 | "
                         f"X={_mm_text(MANUAL_HOME_CENTER_X_MM)}, "
@@ -791,6 +791,9 @@ class ManualStageWorker(QThread):
                     self.action_done.emit("수동 이동 완료")
                     return
                 raise ValueError(f"Unknown manual stage action: {self.action}")
+        except StageMoveCancelled:
+            self.status_changed.emit("수동 명령 중지됨")
+            self.action_done.emit("수동 명령 중지됨")
         except Exception as exc:
             get_logger("worker.manual_stage").exception(
                 "manual stage action failed",

@@ -85,7 +85,13 @@ def detect_virtual_point(frame_bgr: np.ndarray, roi: Rect, settings: VPSettings)
 
     points = _centroid_thin(gray, mask, threshold_used, settings)
     if len(points) < max(6, settings.min_arm_points * 2):
-        return VPResult(False, "Not enough thinned laser points", roi=roi, threshold_used=threshold_used, points=_offset_points(points, x1, y1))
+        return VPResult(
+            False,
+            "Not enough thinned laser points",
+            roi=roi,
+            threshold_used=threshold_used,
+            points=_offset_points(points, x1, y1),
+        )
 
     points = _offset_points(points, x1, y1)
     points = points[np.argsort(points[:, 0])]
@@ -94,9 +100,27 @@ def detect_virtual_point(frame_bgr: np.ndarray, roi: Rect, settings: VPSettings)
     positive_points = _select_arm_points(points, slopes > abs(settings.min_abs_slope), settings)
 
     if len(negative_points) < settings.min_arm_points:
-        return VPResult(False, "Negative-slope arm not enough", roi=roi, threshold_used=threshold_used, points=points, slopes=slopes, negative_points=negative_points, positive_points=positive_points)
+        return VPResult(
+            False,
+            "Negative-slope arm not enough",
+            roi=roi,
+            threshold_used=threshold_used,
+            points=points,
+            slopes=slopes,
+            negative_points=negative_points,
+            positive_points=positive_points,
+        )
     if len(positive_points) < settings.min_arm_points:
-        return VPResult(False, "Positive-slope arm not enough", roi=roi, threshold_used=threshold_used, points=points, slopes=slopes, negative_points=negative_points, positive_points=positive_points)
+        return VPResult(
+            False,
+            "Positive-slope arm not enough",
+            roi=roi,
+            threshold_used=threshold_used,
+            points=points,
+            slopes=slopes,
+            negative_points=negative_points,
+            positive_points=positive_points,
+        )
 
     negative_line = _fit_line(negative_points, roi)
     positive_line = _fit_line(positive_points, roi)
@@ -105,14 +129,59 @@ def detect_virtual_point(frame_bgr: np.ndarray, roi: Rect, settings: VPSettings)
     if positive_line is None:
         return VPResult(False, "Positive arm fitting failed", roi=roi, threshold_used=threshold_used, points=points)
     if negative_line.rms_px > settings.max_fit_rms_px:
-        return VPResult(False, "Negative arm RMS too high", roi=roi, threshold_used=threshold_used, points=points, slopes=slopes, negative_points=negative_points, positive_points=positive_points, negative_line=negative_line, positive_line=positive_line)
+        return VPResult(
+            False,
+            "Negative arm RMS too high",
+            roi=roi,
+            threshold_used=threshold_used,
+            points=points,
+            slopes=slopes,
+            negative_points=negative_points,
+            positive_points=positive_points,
+            negative_line=negative_line,
+            positive_line=positive_line,
+        )
     if positive_line.rms_px > settings.max_fit_rms_px:
-        return VPResult(False, "Positive arm RMS too high", roi=roi, threshold_used=threshold_used, points=points, slopes=slopes, negative_points=negative_points, positive_points=positive_points, negative_line=negative_line, positive_line=positive_line)
+        return VPResult(
+            False,
+            "Positive arm RMS too high",
+            roi=roi,
+            threshold_used=threshold_used,
+            points=points,
+            slopes=slopes,
+            negative_points=negative_points,
+            positive_points=positive_points,
+            negative_line=negative_line,
+            positive_line=positive_line,
+        )
 
     vp = _intersect_lines(negative_line, positive_line)
     if vp is None:
-        return VPResult(False, "Fitted arms are nearly parallel", roi=roi, threshold_used=threshold_used, points=points, slopes=slopes, negative_points=negative_points, positive_points=positive_points, negative_line=negative_line, positive_line=positive_line)
-    return VPResult(True, "OK", roi=roi, threshold_used=threshold_used, points=points, slopes=slopes, negative_points=negative_points, positive_points=positive_points, negative_line=negative_line, positive_line=positive_line, vp=vp)
+        return VPResult(
+            False,
+            "Fitted arms are nearly parallel",
+            roi=roi,
+            threshold_used=threshold_used,
+            points=points,
+            slopes=slopes,
+            negative_points=negative_points,
+            positive_points=positive_points,
+            negative_line=negative_line,
+            positive_line=positive_line,
+        )
+    return VPResult(
+        True,
+        "OK",
+        roi=roi,
+        threshold_used=threshold_used,
+        points=points,
+        slopes=slopes,
+        negative_points=negative_points,
+        positive_points=positive_points,
+        negative_line=negative_line,
+        positive_line=positive_line,
+        vp=vp,
+    )
 
 
 def draw_overlay(
@@ -245,7 +314,13 @@ def _fit_line(points: np.ndarray, roi: Rect) -> Optional[LineModel]:
     slope = vy / vx
     intercept = py - slope * px
     residuals = points[:, 1] - (slope * points[:, 0] + intercept)
-    return LineModel(float(slope), float(intercept), float(np.sqrt(np.mean(residuals * residuals))), int(len(points)), _line_segment_in_rect(slope, intercept, roi))
+    return LineModel(
+        float(slope),
+        float(intercept),
+        float(np.sqrt(np.mean(residuals * residuals))),
+        int(len(points)),
+        _line_segment_in_rect(slope, intercept, roi),
+    )
 
 
 def _intersect_lines(line_a: LineModel, line_b: LineModel) -> Optional[Point]:
@@ -276,9 +351,14 @@ def _line_segment_in_rect(slope: float, intercept: float, roi: Rect) -> Segment:
         if not any(np.hypot(point[0] - old[0], point[1] - old[1]) < 1.0 for old in unique):
             unique.append(point)
     if len(unique) >= 2:
-        p1, p2 = max(((a, b) for i, a in enumerate(unique) for b in unique[i + 1 :]), key=lambda pair: np.hypot(pair[0][0] - pair[1][0], pair[0][1] - pair[1][1]))
+        p1, p2 = max(
+            ((a, b) for i, a in enumerate(unique) for b in unique[i + 1 :]),
+            key=lambda pair: np.hypot(pair[0][0] - pair[1][0], pair[0][1] - pair[1][1]),
+        )
         return _round_point(p1), _round_point(p2)
-    return _round_point((x_min, float(np.clip(slope * x_min + intercept, y_min, y_max)))), _round_point((x_max, float(np.clip(slope * x_max + intercept, y_min, y_max))))
+    return _round_point((x_min, float(np.clip(slope * x_min + intercept, y_min, y_max)))), _round_point(
+        (x_max, float(np.clip(slope * x_max + intercept, y_min, y_max)))
+    )
 
 
 def _round_point(point: Tuple[float, float]) -> Tuple[int, int]:
@@ -294,7 +374,11 @@ def _draw_points(image: np.ndarray, points: Optional[np.ndarray], color: Tuple[i
 
 def _draw_label(image: np.ndarray, result: VPResult) -> None:
     cv2.rectangle(image, (12, 12), (660, 120), (0, 0, 0), -1)
-    line1 = f"VP: x={result.vp[0]:.2f}, y={result.vp[1]:.2f}" if result.ok and result.vp is not None else f"VP: --   {result.message}"
+    line1 = (
+        f"VP: x={result.vp[0]:.2f}, y={result.vp[1]:.2f}"
+        if result.ok and result.vp is not None
+        else f"VP: --   {result.message}"
+    )
     neg = result.negative_line
     pos = result.positive_line
     if neg is not None and pos is not None:
@@ -309,4 +393,6 @@ def _draw_label(image: np.ndarray, result: VPResult) -> None:
         line2 = f"points={n_all}   negative arm={n_neg}   positive arm={n_pos}"
     cv2.putText(image, line1, (24, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
     cv2.putText(image, line2, (24, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (185, 235, 255), 1)
-    cv2.putText(image, f"threshold={result.threshold_used}", (24, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (185, 235, 255), 1)
+    cv2.putText(
+        image, f"threshold={result.threshold_used}", (24, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (185, 235, 255), 1
+    )

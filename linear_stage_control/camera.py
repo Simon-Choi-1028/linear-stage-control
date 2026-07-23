@@ -302,12 +302,6 @@ class BaslerCamera:
             if self.camera is not None and self.camera.IsGrabbing():
                 self.camera.StopGrabbing()
 
-    def capture_to(self, output_path: str | Path) -> Path:
-        array = self.grab_array()
-        path = Path(output_path)
-        save_array(path, array, self.settings.output_pixel_format)
-        return path
-
     def capture_original_to(
         self,
         output_path: str | Path,
@@ -435,8 +429,11 @@ class BaslerCamera:
             raise RuntimeError("Camera is not open.")
         warning_start = len(self.warnings)
         self.settings = settings
-        self._apply_live_safe_camera_parameters(settings)
-        return self.warnings[warning_start:]
+        try:
+            self._apply_live_safe_camera_parameters(settings)
+            return self.warnings[warning_start:]
+        finally:
+            del self.warnings[warning_start:]
 
     def capture_parameter_snapshot(self) -> dict[str, Any]:
         parameters: dict[str, Any] = {field_name: "" for field_name in CAMERA_CAPTURE_PARAMETER_FIELDS}
@@ -841,30 +838,6 @@ def apply_camera_orientation(
     if flip_horizontal:
         arr = np.flip(arr, axis=1)
     return np.array(arr, copy=True, order="C")
-
-
-def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
-    image: Image.Image | None = None
-    try:
-        array = _validate_image_array_for_save(array, context="converted image")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        output_format = _normalise_pixel_format_name(pixel_format)
-        if array.ndim == 2:
-            image = Image.fromarray(array)
-        elif array.ndim == 3 and array.shape[2] == 3 and output_format in {"BGR8", "BGR8packed"}:
-            image = Image.fromarray(np.ascontiguousarray(array[:, :, ::-1]), "RGB")
-        elif array.ndim == 3 and array.shape[2] == 3:
-            image = Image.fromarray(np.ascontiguousarray(array), "RGB")
-        else:
-            raise ValueError(f"Unsupported image array shape: {array.shape}")
-        _save_image(image, path)
-    except DatasetWriteError:
-        raise
-    except Exception as exc:
-        raise DatasetWriteError("이미지 파일 저장에 실패했습니다.", str(exc)) from exc
-    finally:
-        if image is not None:
-            image.close()
 
 
 def save_original_array(path: Path, array: np.ndarray) -> None:

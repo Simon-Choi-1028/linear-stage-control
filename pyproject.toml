@@ -9,7 +9,6 @@ dependencies = [
   "pillow==12.2.0",
   "pypylon==26.4.1",
   "PySide6==6.10.1",
-  "pyinstaller==6.17.0",
   "pyserial==3.5",
   "PyYAML==6.0.3",
   "rich==15.0.0",
@@ -18,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+build = [
+  "pyinstaller==6.17.0",
+]
 dev = [
   "ruff==0.8.6",
   "pyright[nodejs]==1.1.390",

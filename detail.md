@@ -58,7 +58,7 @@ GitHub 저장소: `Simon-Choi-1028/linear-stage-control`
 | `pillow` | `12.2.0` | lossless 이미지 저장 |
 | `pypylon` | `26.4.1` | Basler Python SDK |
 | `PySide6` | `6.10.1` | GUI |
-| `pyinstaller` | `6.17.0` | Windows 패키징 |
+| `pyinstaller` | `6.17.0` | Windows 패키징 전용 `build` extra |
 | `pyserial` | `3.5` | COM 포트 탐색 보조 |
 | `PyYAML` | `6.0.3` | YAML config |
 | `rich` | `15.0.0` | CLI 출력 |
@@ -432,10 +432,9 @@ Run manifest:
 - 앱 버전.
 - record 수.
 - 산출물 상대 경로.
-- 파일 크기.
-- SHA256 hash.
+- `manifest_detail: full`일 때 파일 크기와 SHA256 hash.
 
-`dataset_manifest.json`이 기준 manifest이고, 기존 자동화 호환을 위해 `manifest.json`도 함께 생성합니다.
+`dataset_manifest.json`이 기준 manifest이고, 기존 자동화 호환을 위해 `manifest.json`도 함께 생성합니다. `full` manifest의 파일 항목은 대형 run에서도 목록 전체를 메모리에 올리지 않고 순차 기록합니다.
 
 ## 10. 원본 이미지 저장 정책
 
@@ -480,10 +479,10 @@ xy_radial_worst_case_um = sqrt(6.08^2 + 6.08^2) = 8.60 um
 
 ```text
 predicted_max_error_um =
-  max(measured_radial_stage_error_um, xy_radial_worst_case_um)
+  max(measured_radial_error_um, xy_radial_worst_case_um)
 
 predicted_min_error_um =
-  max(0, measured_radial_stage_error_um - xy_radial_worst_case_um)
+  max(0, measured_radial_error_um - xy_radial_worst_case_um)
 ```
 
 단일축 run에서는 활성 축 오차만 radial error 기준으로 사용합니다. 비활성 축 actual/error metadata는 빈 값으로 저장합니다.
@@ -617,7 +616,6 @@ GUI worker가 늘어나면서 상태 꼬임을 줄이기 위해 `linear_stage_co
 LinearStageControlError
   CameraConnectionError
   StageConnectionError
-  PositionValidationError
   DatasetWriteError
   UpdateVerificationError
 ```
@@ -669,6 +667,8 @@ PyInstaller portable build:
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
+PyInstaller는 `build` optional dependency로 분리되어 있고 build script가 자동으로 설치합니다. installer 빌드 직후 portable ZIP도 만들 때는 `build_portable_release.ps1 -SkipAppBuild`로 버전과 소스 fingerprint가 일치하는 `dist\LinearStageControl`만 재사용해 전체 앱 빌드를 반복하지 않습니다.
+
 Slim installer:
 
 ```powershell
@@ -692,6 +692,7 @@ Packaging safeguards:
 - 기본 Setup에는 pylon Runtime installer를 포함하지 않음.
 - 이전 offline build의 pylon payload가 `dist`에 남아 있으면 slim installer build 중단.
 - PyInstaller 후 optional Qt/Pylon payload prune.
+- installer와 portable 산출물을 연속 생성할 때 검증된 앱 build 재사용.
 - prune 이후 `LinearStageControl.exe --smoke-test` 실행.
 - Zaber native binding DLL 포함 여부 확인.
 
@@ -745,8 +746,10 @@ Packaging:
 | 파일 | 역할 |
 | --- | --- |
 | `build_windows.ps1` | PyInstaller build, SDK/payload setup, smoke |
+| `build_provenance.ps1` | app build version/source fingerprint |
 | `build_installer.ps1` | Inno Setup installer build |
 | `build_release_installers.ps1` | online/offline installers and manifest |
+| `build_portable_release.ps1` | portable ZIP/manifest, verified app build reuse |
 | `download_zaber_sdk.ps1` | Zaber Motion Library/Device DB download helper |
 | `release_github.ps1` | Release creation/upload with gh or REST fallback |
 | `run_packaged_smoke.ps1` | packaged exe smoke helper |
@@ -891,5 +894,5 @@ updates:
 - `CHANGELOG.md`: 버전별 변경사항.
 - `rules.md`: 제어 원칙과 개발 규칙.
 - `config.example.yaml`: 설정 예시.
-- `requirements.txt`: 의존성 고정 버전.
+- `requirements.txt`: 실행 의존성 고정 버전. 빌드 전용 도구는 `pyproject.toml`의 `build` extra.
 - `packaging/*.ps1`: 빌드/릴리즈 자동화.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import Literal
 
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -20,7 +22,13 @@ from PySide6.QtWidgets import (
 
 from .gui_support import set_placeholder_color
 from .gui_widgets import LinearPathPreviewWidget
-from .scan import LINEAR_PATH_MAX_POINTS, ScanPoint, linear_path_points, linear_path_points_by_spacing
+from .scan import (
+    LINEAR_PATH_MAX_POINTS,
+    ScanPoint,
+    linear_path_points,
+    linear_path_points_by_spacing,
+    linear_spacing_point_count,
+)
 from .text_formatting import (
     linear_distance,
     mm_text,
@@ -28,11 +36,98 @@ from .text_formatting import (
     optional_int_text,
 )
 
+LINEAR_PATH_PREVIEW_MAX_POINTS = 1000
+
 
 @dataclass(frozen=True)
 class LinearPathDialogResult:
     points: list[ScanPoint]
     replace_existing: bool
+
+
+@dataclass(frozen=True)
+class _LinearPathInputs:
+    x_start: float
+    y_start: float
+    x_stop: float
+    y_stop: float
+    label_prefix: str
+    move_velocity_mm_s: float | None
+    capture_count: int | None
+
+
+def _sample_indices(total_count: int, max_points: int = LINEAR_PATH_PREVIEW_MAX_POINTS) -> tuple[int, ...]:
+    if total_count < 1:
+        return ()
+    sample_count = min(total_count, max(2, int(max_points)))
+    if sample_count == total_count:
+        return tuple(range(total_count))
+    return tuple(round(index * (total_count - 1) / (sample_count - 1)) for index in range(sample_count))
+
+
+def _count_path_preview(
+    *,
+    x_start: float,
+    y_start: float,
+    x_stop: float,
+    y_stop: float,
+    count: int,
+    max_points: int = LINEAR_PATH_PREVIEW_MAX_POINTS,
+) -> tuple[list[tuple[float, float]], int]:
+    if count < 2:
+        raise ValueError("선형 경로는 최소 2개 이상의 위치가 필요합니다.")
+    if count > LINEAR_PATH_MAX_POINTS:
+        raise ValueError(f"선형 경로 위치 수는 {LINEAR_PATH_MAX_POINTS}개를 넘을 수 없습니다.")
+    points: list[tuple[float, float]] = []
+    for index in _sample_indices(count, max_points):
+        ratio = index / (count - 1)
+        points.append(
+            (
+                round(x_start + (x_stop - x_start) * ratio, 9),
+                round(y_start + (y_stop - y_start) * ratio, 9),
+            )
+        )
+    return points, count
+
+
+def _spacing_path_preview(
+    *,
+    x_start: float,
+    y_start: float,
+    x_stop: float,
+    y_stop: float,
+    spacing_mm: float,
+    max_points: int = LINEAR_PATH_PREVIEW_MAX_POINTS,
+) -> tuple[list[tuple[float, float]], int]:
+    if spacing_mm <= 0:
+        raise ValueError("선형 경로 간격은 0보다 커야 합니다.")
+    dx = x_stop - x_start
+    dy = y_stop - y_start
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        raise ValueError("선형 경로 시작점과 끝점이 같습니다.")
+
+    total_count = linear_spacing_point_count(
+        x_start,
+        y_start,
+        x_stop,
+        y_stop,
+        spacing_mm,
+    )
+    base_count = int(math.floor(length / spacing_mm)) + 1
+    has_separate_endpoint = total_count > base_count
+
+    points: list[tuple[float, float]] = []
+    for index in _sample_indices(total_count, max_points):
+        distance = length if has_separate_endpoint and index == base_count else round(index * spacing_mm, 9)
+        ratio = distance / length
+        points.append(
+            (
+                round(x_start + dx * ratio, 9),
+                round(y_start + dy * ratio, 9),
+            )
+        )
+    return points, total_count
 
 
 def show_linear_path_dialog(
@@ -107,7 +202,7 @@ def show_linear_path_dialog(
     buttons.button(QDialogButtonBox.Cancel).setText("취소")
     layout.addWidget(buttons)
 
-    def build_points(start_index: int = 0) -> list[ScanPoint]:
+    def read_inputs() -> _LinearPathInputs:
         x_start = float(start_x_edit.text().strip())
         y_start = float(start_y_edit.text().strip())
         x_stop = float(end_x_edit.text().strip())
@@ -119,31 +214,43 @@ def show_linear_path_dialog(
         if capture_count is not None and capture_count < 1:
             raise ValueError("캡쳐 수는 비워 두거나 1 이상이어야 합니다.")
         label_prefix = label_prefix_edit.text().strip() or "line"
+        return _LinearPathInputs(
+            x_start=x_start,
+            y_start=y_start,
+            x_stop=x_stop,
+            y_stop=y_stop,
+            label_prefix=label_prefix,
+            move_velocity_mm_s=move_velocity,
+            capture_count=capture_count,
+        )
+
+    def build_points(start_index: int = 0) -> list[ScanPoint]:
+        inputs = read_inputs()
         if basis_combo.currentData() == "spacing":
             return list(
                 linear_path_points_by_spacing(
-                    x_start=x_start,
-                    y_start=y_start,
-                    x_stop=x_stop,
-                    y_stop=y_stop,
+                    x_start=inputs.x_start,
+                    y_start=inputs.y_start,
+                    x_stop=inputs.x_stop,
+                    y_stop=inputs.y_stop,
                     spacing_mm=spacing_value_mm(),
-                    label_prefix=label_prefix,
+                    label_prefix=inputs.label_prefix,
                     start_index=start_index,
-                    move_velocity_mm_s=move_velocity,
-                    capture_count=capture_count,
+                    move_velocity_mm_s=inputs.move_velocity_mm_s,
+                    capture_count=inputs.capture_count,
                 )
             )
         return list(
             linear_path_points(
-                x_start=x_start,
-                y_start=y_start,
-                x_stop=x_stop,
-                y_stop=y_stop,
+                x_start=inputs.x_start,
+                y_start=inputs.y_start,
+                x_stop=inputs.x_stop,
+                y_stop=inputs.y_stop,
                 count=count_spin.value(),
-                label_prefix=label_prefix,
+                label_prefix=inputs.label_prefix,
                 start_index=start_index,
-                move_velocity_mm_s=move_velocity,
-                capture_count=capture_count,
+                move_velocity_mm_s=inputs.move_velocity_mm_s,
+                capture_count=inputs.capture_count,
             )
         )
 
@@ -162,22 +269,38 @@ def show_linear_path_dialog(
 
     def update_linear_preview() -> None:
         try:
-            points = build_points()
-            if basis_combo.currentData() == "spacing":
+            inputs = read_inputs()
+            basis: Literal["spacing", "count"] = "spacing" if basis_combo.currentData() == "spacing" else "count"
+            if basis == "spacing":
+                preview_points, point_count = _spacing_path_preview(
+                    x_start=inputs.x_start,
+                    y_start=inputs.y_start,
+                    x_stop=inputs.x_stop,
+                    y_stop=inputs.y_stop,
+                    spacing_mm=spacing_value_mm(),
+                )
                 count_spin.blockSignals(True)
-                count_spin.setValue(len(points))
+                count_spin.setValue(point_count)
                 count_spin.blockSignals(False)
+            else:
+                preview_points, point_count = _count_path_preview(
+                    x_start=inputs.x_start,
+                    y_start=inputs.y_start,
+                    x_stop=inputs.x_stop,
+                    y_stop=inputs.y_stop,
+                    count=count_spin.value(),
+                )
             distance = linear_distance(
-                float(start_x_edit.text().strip()),
-                float(start_y_edit.text().strip()),
-                float(end_x_edit.text().strip()),
-                float(end_y_edit.text().strip()),
+                inputs.x_start,
+                inputs.y_start,
+                inputs.x_stop,
+                inputs.y_stop,
             )
-            capture_count = optional_int_text(capture_count_edit.text()) or default_capture_count
-            total_captures = len(points) * capture_count
-            spacing_text = f" | 간격 {spacing_display_text()}" if basis_combo.currentData() == "spacing" else ""
-            summary = f"총 거리 {mm_text(distance)} mm{spacing_text} | 위치 {len(points)}개 | 예상 {total_captures}장"
-            preview_widget.set_path([(point.x_mm, point.y_mm) for point in points], summary)
+            capture_count = inputs.capture_count or default_capture_count
+            total_captures = point_count * capture_count
+            spacing_text = f" | 간격 {spacing_display_text()}" if basis == "spacing" else ""
+            summary = f"총 거리 {mm_text(distance)} mm{spacing_text} | 위치 {point_count}개 | 예상 {total_captures}장"
+            preview_widget.set_path(preview_points, summary)
             preview_status.setText(summary)
             preview_status.setStyleSheet("color: #1f5f43; font-weight: 600;")
             ok_button.setEnabled(True)

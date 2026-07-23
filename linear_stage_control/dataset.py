@@ -4,7 +4,6 @@ import csv
 import hashlib
 import json
 import os
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
@@ -15,26 +14,9 @@ from typing import Any
 import yaml
 
 from . import __version__
-from .dataset_exports import (
-    DEFAULT_METADATA_FORMATS,
-    DEFAULT_SUMMARY_FORMATS,
-    POST_RUN_METADATA_FORMATS,
-    SUPPORTED_METADATA_FORMATS,
-    SUPPORTED_SUMMARY_FORMATS,
-    RunStatsAccumulator,
-    iter_jsonl_records,
-    json_ready,
-    normalise_formats,
-    write_records_json_stream,
-    write_records_tsv_stream,
-    write_records_xlsx_stream,
-    write_records_yaml_stream,
-    write_summary_json,
-    write_summary_markdown,
-    write_summary_yaml,
-)
+from .camera import CAMERA_CAPTURE_PARAMETER_FIELDS
 from .exceptions import DatasetWriteError
-from .scan import ScanPoint, default_capture_count_from_config, effective_capture_count
+from .scan import ScanPoint
 
 
 @dataclass(frozen=True)
@@ -42,9 +24,6 @@ class DatasetSettings:
     output_root: Path
     image_format: str = "png"
     save_numpy: bool = False
-    write_jsonl: bool = True
-    metadata_formats: tuple[str, ...] = DEFAULT_METADATA_FORMATS
-    summary_formats: tuple[str, ...] = DEFAULT_SUMMARY_FORMATS
     manifest_detail: str = "summary"
     metadata_flush_records: int = 100
     metadata_flush_interval_s: float = 1.0
@@ -57,29 +36,10 @@ def dataset_settings_from_config(
     dataset = config.get("dataset", {})
     scan = config.get("scan", {})
     output_root = output_override or dataset.get("output_root") or scan.get("output_dir")
-    write_jsonl = bool(dataset.get("write_jsonl", True))
-    metadata_formats = normalise_formats(
-        dataset.get("metadata_formats"),
-        DEFAULT_METADATA_FORMATS
-        if write_jsonl
-        else tuple(item for item in DEFAULT_METADATA_FORMATS if item != "jsonl"),
-        SUPPORTED_METADATA_FORMATS,
-    )
-    if "csv" not in metadata_formats:
-        metadata_formats = ("csv",) + metadata_formats
-    if write_jsonl and "jsonl" not in metadata_formats:
-        metadata_formats = metadata_formats + ("jsonl",)
     return DatasetSettings(
         output_root=Path(os.path.expandvars(os.path.expanduser(str(output_root or "output/datasets")))),
         image_format=_normalise_image_format(dataset.get("image_format", "png")),
         save_numpy=bool(dataset.get("save_numpy", False)),
-        write_jsonl="jsonl" in metadata_formats,
-        metadata_formats=metadata_formats,
-        summary_formats=normalise_formats(
-            dataset.get("summary_formats"),
-            DEFAULT_SUMMARY_FORMATS,
-            SUPPORTED_SUMMARY_FORMATS,
-        ),
         manifest_detail=_normalise_manifest_detail(dataset.get("manifest_detail", "summary")),
         metadata_flush_records=_positive_int(dataset.get("metadata_flush_records", 100), "metadata_flush_records"),
         metadata_flush_interval_s=_non_negative_float(
@@ -105,33 +65,14 @@ class DatasetRun:
         self.run_dir = self.settings.output_root / self.run_id
         self.images_dir = self.run_dir / "images"
         self.arrays_dir = self.run_dir / "arrays"
-        self.default_capture_count = default_capture_count_from_config(config)
-        self.image_name_stems = planned_image_name_stems(points, self.default_capture_count)
+        self.image_name_stems = planned_image_name_stems(points)
         self.csv_path = self.run_dir / "captures.csv"
-        self.jsonl_path = self.run_dir / "captures.jsonl"
-        self.metadata_paths = {
-            "csv": self.csv_path,
-            "jsonl": self.jsonl_path,
-            "json": self.run_dir / "captures.json",
-            "tsv": self.run_dir / "captures.tsv",
-            "yaml": self.run_dir / "captures.yaml",
-            "xlsx": self.run_dir / "captures.xlsx",
-        }
-        self.summary_paths = {
-            "json": self.run_dir / "summary.json",
-            "yaml": self.run_dir / "summary.yaml",
-            "md": self.run_dir / "summary.md",
-        }
         self.manifest_path = self.run_dir / "dataset_manifest.json"
         self.legacy_manifest_path = self.run_dir / "manifest.json"
         self.config_snapshot_path = self.run_dir / "config.yaml"
-        self.export_source_jsonl_path = self.run_dir / ".captures_export_source.jsonl"
-        self.records: list[dict[str, Any]] = []
-        self.stats = RunStatsAccumulator()
+        self.record_count = 0
         self._csv_file: Any = None
         self._csv_writer: csv.DictWriter | None = None
-        self._jsonl_file: Any = None
-        self._jsonl_is_export_source = False
         self._metadata_dirty_records = 0
         self._last_metadata_flush_monotonic = monotonic()
 
@@ -144,21 +85,12 @@ class DatasetRun:
 
     def open(self) -> None:
         try:
-            image_plan_errors = validate_image_output_plan(
-                self.points,
-                self.default_capture_count,
-            )
-            if image_plan_errors:
-                raise DatasetWriteError(
-                    "이미지 파일명 계획을 확인하세요.",
-                    "; ".join(image_plan_errors),
-                )
             self.images_dir.mkdir(parents=True, exist_ok=False)
             if self.settings.save_numpy:
                 self.arrays_dir.mkdir(parents=True, exist_ok=True)
 
             self.config_snapshot_path.write_text(
-                yaml.safe_dump(self.config, sort_keys=False, allow_unicode=True),
+                yaml.safe_dump(_csv_only_config_snapshot(self.config), sort_keys=False, allow_unicode=True),
                 encoding="utf-8",
             )
             self._write_manifest(status="running")
@@ -168,10 +100,6 @@ class DatasetRun:
             self._csv_writer.writeheader()
             self._metadata_dirty_records = 1
             self._last_metadata_flush_monotonic = monotonic()
-            if self._needs_jsonl_stream():
-                self._jsonl_is_export_source = not self.settings.write_jsonl
-                jsonl_path = self.export_source_jsonl_path if self._jsonl_is_export_source else self.jsonl_path
-                self._jsonl_file = jsonl_path.open("w", encoding="utf-8")
             self.flush_metadata(force=True)
         except DatasetWriteError:
             raise
@@ -181,17 +109,11 @@ class DatasetRun:
     def close(self, status: str = "complete") -> None:
         try:
             self.flush_metadata(force=True)
-            if self._jsonl_file is not None:
-                self._jsonl_file.close()
-                self._jsonl_file = None
             if self._csv_file is not None:
                 self._csv_file.close()
                 self._csv_file = None
             if self.run_dir.exists():
-                self._write_post_run_exports(status=status)
                 self._write_manifest(status=status)
-                if self._jsonl_is_export_source and self.export_source_jsonl_path.exists():
-                    self.export_source_jsonl_path.unlink()
         except DatasetWriteError:
             raise
         except Exception as exc:
@@ -209,18 +131,19 @@ class DatasetRun:
         return self.arrays_dir / f"{self._image_name_stem(point, capture_index)}.npy"
 
     def _image_name_stem(self, point: ScanPoint, capture_index: int) -> str:
-        return self.image_name_stems.get((point.index, capture_index), point_name(point, capture_index=capture_index))
+        base_stem = self.image_name_stems.get(point.index)
+        if base_stem is None:
+            return point_name(point, capture_index=capture_index)
+        capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
+        return f"{base_stem}{capture_suffix}"
 
     def write_capture(self, record: dict[str, Any]) -> None:
         try:
-            clean_record = json_ready(record)
-            self.stats.add_record(clean_record)
             row = {field: _csv_value(record.get(field, "")) for field in CAPTURE_FIELDS}
             if self._csv_writer is None:
                 raise RuntimeError("Dataset CSV writer is not open.")
             self._csv_writer.writerow(row)
-            if self._jsonl_file is not None:
-                self._jsonl_file.write(json.dumps(clean_record, ensure_ascii=False) + "\n")
+            self.record_count += 1
             self._metadata_dirty_records += 1
             self.flush_metadata()
         except DatasetWriteError:
@@ -240,35 +163,8 @@ class DatasetRun:
             return
         if self._csv_file is not None:
             self._csv_file.flush()
-        if self._jsonl_file is not None:
-            self._jsonl_file.flush()
         self._metadata_dirty_records = 0
         self._last_metadata_flush_monotonic = monotonic()
-
-    def _write_post_run_exports(self, status: str) -> None:
-        formats = set(self.settings.metadata_formats)
-        post_run_formats = formats & POST_RUN_METADATA_FORMATS
-        if post_run_formats:
-            source_path = self._post_run_jsonl_source()
-            if source_path is None:
-                raise DatasetWriteError("Post-run metadata export requires a JSONL stream source.")
-            if "json" in post_run_formats:
-                write_records_json_stream(self.metadata_paths["json"], iter_jsonl_records(source_path))
-            if "tsv" in post_run_formats:
-                write_records_tsv_stream(self.metadata_paths["tsv"], CAPTURE_FIELDS, iter_jsonl_records(source_path))
-            if "yaml" in post_run_formats:
-                write_records_yaml_stream(self.metadata_paths["yaml"], iter_jsonl_records(source_path))
-            if "xlsx" in post_run_formats:
-                write_records_xlsx_stream(self.metadata_paths["xlsx"], CAPTURE_FIELDS, iter_jsonl_records(source_path))
-
-        summary = self.stats.as_summary(run_id=self.run_id, status=status, point_count=len(self.points))
-        summary_formats = set(self.settings.summary_formats)
-        if "json" in summary_formats:
-            write_summary_json(self.summary_paths["json"], summary)
-        if "yaml" in summary_formats:
-            write_summary_yaml(self.summary_paths["yaml"], summary)
-        if "md" in summary_formats:
-            write_summary_markdown(self.summary_paths["md"], summary)
 
     def _write_manifest(self, status: str) -> None:
         manifest = {
@@ -280,17 +176,13 @@ class DatasetRun:
             "config_path": str(self.config_path),
             "dataset": asdict(self.settings) | {"output_root": str(self.settings.output_root)},
             "point_count": len(self.points),
-            "record_count": self.stats.record_count,
-            "metadata_files": {
-                key: _relative_manifest_path(path, self.run_dir)
-                for key, path in self.metadata_paths.items()
-                if path.exists()
-            },
-            "summary_files": {
-                key: _relative_manifest_path(path, self.run_dir)
-                for key, path in self.summary_paths.items()
-                if path.exists()
-            },
+            "record_count": self.record_count,
+            "metadata_format": "csv",
+            "metadata_files": (
+                {"csv": _relative_manifest_path(self.csv_path, self.run_dir)} if self.csv_path.exists() else {}
+            ),
+            # Retained as an empty compatibility key for existing manifest readers.
+            "summary_files": {},
             "config_snapshot": _relative_manifest_path(self.config_snapshot_path, self.run_dir),
         }
         if status != "running" and self.settings.manifest_detail == "full":
@@ -299,22 +191,14 @@ class DatasetRun:
         self.manifest_path.write_text(manifest_text, encoding="utf-8")
         self.legacy_manifest_path.write_text(manifest_text, encoding="utf-8")
 
-    def _needs_jsonl_stream(self) -> bool:
-        return self.settings.write_jsonl or bool(set(self.settings.metadata_formats) & POST_RUN_METADATA_FORMATS)
-
-    def _post_run_jsonl_source(self) -> Path | None:
-        if self._jsonl_is_export_source:
-            return self.export_source_jsonl_path if self.export_source_jsonl_path.exists() else None
-        return self.jsonl_path if self.jsonl_path.exists() else None
-
     def _file_manifest_entries(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         candidates: list[tuple[str, Path]] = [("config", self.config_snapshot_path)]
         candidates.extend(("image", path) for path in sorted(self.images_dir.glob("*")) if path.is_file())
         if self.arrays_dir.exists():
             candidates.extend(("array", path) for path in sorted(self.arrays_dir.glob("*")) if path.is_file())
-        candidates.extend(("metadata", path) for path in self.metadata_paths.values() if path.exists())
-        candidates.extend(("summary", path) for path in self.summary_paths.values() if path.exists())
+        if self.csv_path.exists():
+            candidates.append(("metadata", self.csv_path))
 
         seen: set[Path] = set()
         for role, path in candidates:
@@ -380,11 +264,11 @@ CAPTURE_FIELDS = [
     "settle_duration_ms",
     "capture_duration_ms",
     "disk_write_duration_ms",
-]
+] + list(CAMERA_CAPTURE_PARAMETER_FIELDS)
 
 
 def base_capture_record(run_id: str, point: ScanPoint) -> dict[str, Any]:
-    return {
+    record = {
         "run_id": run_id,
         "index": point.index,
         "label": point.label,
@@ -432,6 +316,26 @@ def base_capture_record(run_id: str, point: ScanPoint) -> dict[str, Any]:
         "capture_duration_ms": "",
         "disk_write_duration_ms": "",
     }
+    record.update({field: "" for field in CAMERA_CAPTURE_PARAMETER_FIELDS})
+    return record
+
+
+def _csv_only_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    snapshot = dict(config)
+    dataset = config.get("dataset")
+    if isinstance(dataset, dict):
+        dataset_snapshot = dict(dataset)
+        dataset_snapshot.pop("metadata_formats", None)
+        dataset_snapshot.pop("summary_formats", None)
+        dataset_snapshot.pop("write_jsonl", None)
+        snapshot["dataset"] = dataset_snapshot
+    scan = config.get("scan")
+    if isinstance(scan, dict):
+        scan_snapshot = dict(scan)
+        scan_snapshot.pop("estimated_export_overhead_s", None)
+        scan_snapshot.pop("estimated_export_per_capture_s", None)
+        snapshot["scan"] = scan_snapshot
+    return snapshot
 
 
 def safe_timestamp(value: datetime | None = None) -> str:
@@ -440,47 +344,25 @@ def safe_timestamp(value: datetime | None = None) -> str:
 
 
 def validate_image_output_plan(points: list[ScanPoint], default_capture_count: int = 1) -> list[str]:
-    errors: list[str] = []
+    del default_capture_count
     try:
-        stems = planned_image_name_stems(points, default_capture_count)
+        planned_image_name_stems(points)
     except ValueError as exc:
         return [str(exc)]
-    seen_names: dict[str, tuple[int, int]] = {}
-    for key, stem in stems.items():
-        filename = f"{stem}.png"
-        previous = seen_names.get(filename)
-        if previous is not None:
-            previous_point, previous_capture = previous
-            point_index, capture_index = key
-            errors.append(
-                f"위치 #{previous_point}({previous_capture})와 #{point_index}({capture_index})가 "
-                f"같은 이미지 파일명 {filename}을 사용합니다."
-            )
-        else:
-            seen_names[filename] = key
-    return errors
+    return []
 
 
-def planned_image_name_stems(points: list[ScanPoint], default_capture_count: int = 1) -> dict[tuple[int, int], str]:
-    stems: dict[tuple[int, int], str] = {}
+def planned_image_name_stems(points: list[ScanPoint]) -> dict[int, str]:
+    stems: dict[int, str] = {}
     coordinate_stem_counts: dict[str, int] = {}
-    used_stems: set[str] = set()
     for point in points:
+        if point.index in stems:
+            raise ValueError(f"Duplicate point index in image output plan: {point.index}.")
         base_stem = _coordinate_stem(point)
         coordinate_stem_counts[base_stem] = coordinate_stem_counts.get(base_stem, 0) + 1
         occurrence_index = coordinate_stem_counts[base_stem]
         point_suffix = f"_P{occurrence_index:04d}" if occurrence_index > 1 else ""
-        for capture_index in range(1, effective_capture_count(point, default_capture_count) + 1):
-            capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
-            stem = f"{base_stem}{point_suffix}{capture_suffix}"
-            if stem in used_stems:
-                stem = f"{base_stem}_P{occurrence_index:04d}{capture_suffix}"
-            duplicate_index = 2
-            while stem in used_stems:
-                stem = f"{base_stem}_P{occurrence_index:04d}_D{duplicate_index:02d}{capture_suffix}"
-                duplicate_index += 1
-            stems[(point.index, capture_index)] = stem
-            used_stems.add(stem)
+        stems[point.index] = f"{base_stem}{point_suffix}"
     return stems
 
 
@@ -488,11 +370,6 @@ def point_name(point: ScanPoint, timestamp: str | None = None, capture_index: in
     del timestamp
     capture_suffix = f"_C{capture_index:02d}" if capture_index > 1 else ""
     return f"{_coordinate_stem(point)}{capture_suffix}"
-
-
-def sanitize_label(label: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", label.strip())
-    return normalized.strip("._")[:80]
 
 
 def _coordinate_stem(point: ScanPoint) -> str:

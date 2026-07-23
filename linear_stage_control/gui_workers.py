@@ -10,7 +10,14 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
-from .camera import BaslerCamera, CaptureResult, camera_settings_from_config, enumerate_cameras, iso_timestamp
+from .camera import (
+    CAMERA_CAPTURE_PARAMETER_FIELDS,
+    BaslerCamera,
+    CaptureResult,
+    camera_settings_from_config,
+    enumerate_cameras,
+    iso_timestamp,
+)
 from .dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
 from .diagnostics import collect_diagnostics
 from .disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
@@ -18,6 +25,7 @@ from .error_model import error_budget_from_config, estimate_position_error_um
 from .exceptions import UpdateVerificationError, user_error_message
 from .laser import LaserSettings, send_laser_percent
 from .logging_setup import add_run_file_handler, get_logger, remove_log_handler
+from .run_stats import RunStatsAccumulator
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
@@ -32,6 +40,10 @@ from .updater import UpdateInfo, download_file, fetch_latest_update, verify_file
 MANUAL_HOME_CENTER_X_MM = 105.0
 MANUAL_HOME_CENTER_Y_MM = 105.0
 MANUAL_HOME_CENTER_VELOCITY_MM_S = 50.0
+DEFAULT_IMAGE_WRITE_QUEUE_MAX_BYTES = 256 * 1024 * 1024
+MIN_IMAGE_WRITE_QUEUE_MAX_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_WRITE_QUEUE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+CAPTURE_UPDATE_QUEUE_LIMIT = 1000
 
 
 class _CaptureRecordAlreadyWritten(RuntimeError):
@@ -40,11 +52,10 @@ class _CaptureRecordAlreadyWritten(RuntimeError):
 
 class AcquisitionWorker(QThread):
     log_message = Signal(str)
-    status_changed = Signal(str)
-    capture_done = Signal(dict)
+    status_available = Signal()
+    capture_updates_available = Signal()
     run_done = Signal(str, bool)
     run_failed = Signal(str)
-    progress_changed = Signal(int, int)
 
     def __init__(
         self,
@@ -61,9 +72,69 @@ class AcquisitionWorker(QThread):
         self.output_root = output_root
         self.skip_home = skip_home
         self._stop_requested = False
+        self._status_lock = Lock()
+        self._latest_status = ""
+        self._status_signal_pending = False
+        self._capture_updates_lock = Lock()
+        self._pending_capture_records: deque[dict[str, Any]] = deque(maxlen=CAPTURE_UPDATE_QUEUE_LIMIT)
+        self._pending_capture_seen = 0
+        self._pending_capture_stats = RunStatsAccumulator()
+        self._pending_progress: tuple[int, int] | None = None
+        self._capture_update_signal_pending = False
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def _queue_status(self, message: str) -> None:
+        should_emit = False
+        with self._status_lock:
+            self._latest_status = message
+            if not self._status_signal_pending:
+                self._status_signal_pending = True
+                should_emit = True
+        if should_emit:
+            self.status_available.emit()
+
+    def take_latest_status(self) -> str:
+        with self._status_lock:
+            message = self._latest_status
+            self._status_signal_pending = False
+        return message
+
+    def _queue_capture_update(
+        self,
+        record: dict[str, Any],
+        *,
+        progress: tuple[int, int] | None = None,
+    ) -> None:
+        should_emit = False
+        snapshot = dict(record)
+        with self._capture_updates_lock:
+            self._pending_capture_records.append(snapshot)
+            self._pending_capture_seen += 1
+            self._pending_capture_stats.add_record(snapshot)
+            if progress is not None:
+                self._pending_progress = progress
+            if not self._capture_update_signal_pending:
+                self._capture_update_signal_pending = True
+                should_emit = True
+        if should_emit:
+            self.capture_updates_available.emit()
+
+    def take_capture_updates(
+        self,
+    ) -> tuple[list[dict[str, Any]], int, RunStatsAccumulator, tuple[int, int] | None]:
+        with self._capture_updates_lock:
+            records = list(self._pending_capture_records)
+            seen_count = self._pending_capture_seen
+            stats = self._pending_capture_stats
+            progress = self._pending_progress
+            self._pending_capture_records.clear()
+            self._pending_capture_seen = 0
+            self._pending_capture_stats = RunStatsAccumulator()
+            self._pending_progress = None
+            self._capture_update_signal_pending = False
+        return records, seen_count, stats, progress
 
     def run(self) -> None:
         run_dir = ""
@@ -77,7 +148,7 @@ class AcquisitionWorker(QThread):
             error_budget = error_budget_from_config(self.config)
             x_active = stage_settings.x.enabled
             y_active = stage_settings.y.enabled
-            self.status_changed.emit("데이터셋, 스테이지, 카메라 연결 중")
+            self._queue_status("데이터셋, 스테이지, 카메라 연결 중")
             self.log_message.emit("데이터셋, 스테이지, 카메라 연결 중")
 
             with (
@@ -98,7 +169,7 @@ class AcquisitionWorker(QThread):
                     },
                 )
                 if stage_settings.home_on_start and not self.skip_home:
-                    self.status_changed.emit("XY 스테이지 원점 복귀 중")
+                    self._queue_status("XY 스테이지 원점 복귀 중")
                     self.log_message.emit("XY 스테이지 원점 복귀 중")
                     stage.home()
 
@@ -106,7 +177,9 @@ class AcquisitionWorker(QThread):
                 total = total_capture_count(self.points, default_capture_count)
                 completed = 0
                 disk_queue_size = _image_write_queue_size_from_config(self.config)
-                pending_disk_writes: deque[tuple[Future[CaptureResult], dict[str, Any]]] = deque()
+                disk_queue_max_bytes = _image_write_queue_max_bytes_from_config(self.config)
+                pending_disk_bytes = 0
+                pending_disk_writes: deque[tuple[Future[CaptureResult], dict[str, Any], int]] = deque()
 
                 def finish_disk_write(future: Future[CaptureResult], capture_record: dict[str, Any]) -> None:
                     nonlocal completed
@@ -116,7 +189,7 @@ class AcquisitionWorker(QThread):
                         capture_record["status"] = "error"
                         capture_record["error_message"] = str(exc)
                         dataset.write_capture(capture_record)
-                        self.capture_done.emit(capture_record)
+                        self._queue_capture_update(capture_record)
                         raise _CaptureRecordAlreadyWritten(str(exc)) from exc
 
                     _validate_saved_capture(capture)
@@ -138,7 +211,8 @@ class AcquisitionWorker(QThread):
                         }
                     )
                     dataset.write_capture(capture_record)
-                    self.capture_done.emit(capture_record)
+                    completed += 1
+                    self._queue_capture_update(capture_record, progress=(completed, total))
                     logger.info(
                         "capture saved",
                         extra={
@@ -148,12 +222,12 @@ class AcquisitionWorker(QThread):
                             "image_path": str(capture.image_path),
                         },
                     )
-                    completed += 1
-                    self.progress_changed.emit(completed, total)
-                    self.status_changed.emit(f"{completed}/{total} 저장 완료")
+                    self._queue_status(f"{completed}/{total} 저장 완료")
 
                 def finish_oldest_disk_write() -> None:
-                    future, capture_record = pending_disk_writes.popleft()
+                    nonlocal pending_disk_bytes
+                    future, capture_record, array_bytes = pending_disk_writes.popleft()
+                    pending_disk_bytes = max(0, pending_disk_bytes - array_bytes)
                     finish_disk_write(future, capture_record)
 
                 def drain_completed_disk_writes() -> None:
@@ -196,7 +270,7 @@ class AcquisitionWorker(QThread):
                         record["capture_count"] = capture_count
                         record["point_move_velocity_mm_s"] = point.move_velocity_mm_s or ""
                         record["effective_move_velocity_mm_s"] = move_velocity or ""
-                        self.status_changed.emit(
+                        self._queue_status(
                             f"{completed}/{total} 이동 중 | 위치 #{point.index} "
                             f"X={_mm_text(point.x_mm)}, Y={_mm_text(point.y_mm)}"
                         )
@@ -226,7 +300,7 @@ class AcquisitionWorker(QThread):
                         record["move_completed_at"] = iso_timestamp()
                         record["move_duration_ms"] = _elapsed_ms(move_started_monotonic)
 
-                        self.status_changed.emit(f"{completed}/{total} 위치 확인 및 오차 계산 중")
+                        self._queue_status(f"{completed}/{total} 위치 확인 및 오차 계산 중")
                         actual_x_mm, actual_y_mm = stage.position_mm()
                         error_x_mm = actual_x_mm - point.x_mm if x_active and actual_x_mm is not None else None
                         error_y_mm = actual_y_mm - point.y_mm if y_active and actual_y_mm is not None else None
@@ -244,7 +318,7 @@ class AcquisitionWorker(QThread):
                             ).as_record()
                         )
 
-                        self.status_changed.emit(f"{completed}/{total} 안정화 대기 중")
+                        self._queue_status(f"{completed}/{total} 안정화 대기 중")
                         settle_started_monotonic = monotonic()
                         self._sleep_interruptible(max(0, int(stage_settings.settle_s * 1000)))
                         if self._stop_requested:
@@ -259,19 +333,32 @@ class AcquisitionWorker(QThread):
                                 break
                             capture_record = dict(record)
                             capture_record["capture_index"] = capture_index
-                            self.status_changed.emit(
+                            self._queue_status(
                                 f"{completed + 1}/{total} 카메라 촬영 중 | "
                                 f"위치 #{point.index} {capture_index}/{capture_count}"
                             )
                             image_timestamp = safe_timestamp()
                             image_path = dataset.image_path(point, image_timestamp, capture_index)
                             npy_path = dataset.npy_path(point, image_timestamp, capture_index)
-                            if disk_queue_size > 0 and len(pending_disk_writes) >= disk_queue_size:
-                                self.status_changed.emit(f"{completed + 1}/{total} 이미지 저장 대기 중")
+                            if disk_queue_size > 0 and _image_write_queue_needs_drain(
+                                pending_count=len(pending_disk_writes),
+                                pending_bytes=pending_disk_bytes,
+                                next_array_bytes=0,
+                                queue_size=disk_queue_size,
+                                max_bytes=disk_queue_max_bytes,
+                            ):
+                                self._queue_status(f"{completed + 1}/{total} 이미지 저장 대기 중")
                                 finish_oldest_disk_write()
 
                             capture_started_monotonic = monotonic()
                             array, metadata = camera.grab_original_array()
+                            array_bytes = max(0, int(getattr(array, "nbytes", 0)))
+                            capture_record.update(
+                                {
+                                    field_name: metadata.get(field_name, "")
+                                    for field_name in CAMERA_CAPTURE_PARAMETER_FIELDS
+                                }
+                            )
                             capture_record["capture_duration_ms"] = _elapsed_ms(capture_started_monotonic)
                             if disk_queue_size <= 0:
                                 finish_disk_write(
@@ -279,12 +366,23 @@ class AcquisitionWorker(QThread):
                                     capture_record,
                                 )
                                 continue
+                            while _image_write_queue_needs_drain(
+                                pending_count=len(pending_disk_writes),
+                                pending_bytes=pending_disk_bytes,
+                                next_array_bytes=array_bytes,
+                                queue_size=disk_queue_size,
+                                max_bytes=disk_queue_max_bytes,
+                            ):
+                                self._queue_status(f"{completed + 1}/{total} 이미지 메모리 확보 대기 중")
+                                finish_oldest_disk_write()
                             pending_disk_writes.append(
                                 (
                                     submit_disk_write(image_path, npy_path, array, metadata),
                                     capture_record,
+                                    array_bytes,
                                 )
                             )
+                            pending_disk_bytes += array_bytes
                             drain_completed_disk_writes()
                     except StageMoveCancelled:
                         wait_for_all_disk_writes()
@@ -292,7 +390,7 @@ class AcquisitionWorker(QThread):
                         record["status"] = "stopped"
                         record["error_message"] = "사용자 중지 요청으로 이동을 취소했습니다."
                         dataset.write_capture(record)
-                        self.capture_done.emit(record)
+                        self._queue_capture_update(record)
                         break
                     except _CaptureRecordAlreadyWritten:
                         wait_for_all_disk_writes()
@@ -302,7 +400,7 @@ class AcquisitionWorker(QThread):
                         record["status"] = "error"
                         record["error_message"] = str(exc)
                         dataset.write_capture(record)
-                        self.capture_done.emit(record)
+                        self._queue_capture_update(record)
                         raise
 
                 wait_for_all_disk_writes()
@@ -310,11 +408,11 @@ class AcquisitionWorker(QThread):
                 for warning in camera.warnings:
                     self.log_message.emit(f"카메라 경고: {warning}")
 
-            self.status_changed.emit("중지됨" if stopped else "완료")
+            self._queue_status("중지됨" if stopped else "완료")
             logger.info("acquisition run finished", extra={"event": "run_finished", "stopped": stopped})
             self.run_done.emit(run_dir, stopped)
         except Exception as exc:
-            self.status_changed.emit("오류 발생")
+            self._queue_status("오류 발생")
             logger.exception("acquisition run failed", extra={"event": "run_failed"})
             self.run_failed.emit(user_error_message(exc))
             if run_dir:
@@ -331,7 +429,6 @@ class AcquisitionWorker(QThread):
 
 
 class LivePreviewWorker(QThread):
-    frame_ready = Signal(object, dict)
     frame_available = Signal()
     status_changed = Signal(str)
     live_failed = Signal(str)
@@ -461,6 +558,34 @@ def _image_write_queue_size_from_config(config: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         return 2
     return max(1, min(8, value))
+
+
+def _image_write_queue_max_bytes_from_config(config: dict[str, Any]) -> int:
+    dataset = config.get("dataset", {})
+    if not isinstance(dataset, dict):
+        return DEFAULT_IMAGE_WRITE_QUEUE_MAX_BYTES
+    try:
+        value_mib = int(dataset.get("image_write_queue_max_mib", 256))
+    except (TypeError, ValueError):
+        return DEFAULT_IMAGE_WRITE_QUEUE_MAX_BYTES
+    value_bytes = value_mib * 1024 * 1024
+    return max(
+        MIN_IMAGE_WRITE_QUEUE_MAX_BYTES,
+        min(MAX_IMAGE_WRITE_QUEUE_MAX_BYTES, value_bytes),
+    )
+
+
+def _image_write_queue_needs_drain(
+    *,
+    pending_count: int,
+    pending_bytes: int,
+    next_array_bytes: int,
+    queue_size: int,
+    max_bytes: int,
+) -> bool:
+    if pending_count <= 0:
+        return False
+    return pending_count >= queue_size or pending_bytes + next_array_bytes > max_bytes
 
 
 def _bool_config(value: Any, *, default: bool) -> bool:

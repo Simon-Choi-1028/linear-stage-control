@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 
 MAX_PREVIEW_PIXELS = 64_000_000
@@ -58,9 +58,7 @@ def _validate_preview_array(arr: np.ndarray) -> None:
             f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
         )
     if int(arr.nbytes) > MAX_PREVIEW_SOURCE_BYTES:
-        raise MemoryError(
-            f"Preview frame uses too much source memory: {arr.nbytes / (1024 * 1024):.1f} MiB"
-        )
+        raise MemoryError(f"Preview frame uses too much source memory: {arr.nbytes / (1024 * 1024):.1f} MiB")
 
 
 def render_preview_qimage(
@@ -74,12 +72,21 @@ def render_preview_qimage(
 ) -> tuple[QPixmap, tuple[int, int, int, int]]:
     crop_rect = preview_crop_rect(qimage, zoom_percent, center_x, center_y)
     crop_x, crop_y, crop_w, crop_h = crop_rect
-    cropped = qimage.copy(crop_x, crop_y, crop_w, crop_h)
-    pixmap = QPixmap.fromImage(cropped).scaled(
-        target_size,
-        Qt.KeepAspectRatio,
-        Qt.SmoothTransformation,
+    target_w = max(1, target_size.width())
+    target_h = max(1, target_size.height())
+    scale = min(target_w / crop_w, target_h / crop_h)
+    render_w = max(1, min(target_w, round(crop_w * scale)))
+    render_h = max(1, min(target_h, round(crop_h * scale)))
+    pixmap = QPixmap(render_w, render_h)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    painter.drawImage(
+        QRectF(0, 0, render_w, render_h),
+        qimage,
+        QRectF(crop_x, crop_y, crop_w, crop_h),
     )
+    painter.end()
     if show_grid or show_cross:
         draw_preview_overlays(pixmap, show_grid=show_grid, show_cross=show_cross)
     return pixmap, crop_rect

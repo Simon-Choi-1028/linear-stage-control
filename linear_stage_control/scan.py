@@ -167,24 +167,19 @@ def linear_path_points_by_spacing(
     move_velocity_mm_s: float | None = None,
     capture_count: int | None = None,
 ) -> Iterable[ScanPoint]:
-    if spacing_mm <= 0:
-        raise ValueError("선형 경로 간격은 0보다 커야 합니다.")
     dx = x_stop - x_start
     dy = y_stop - y_start
     length = math.hypot(dx, dy)
-    if length <= 0:
-        raise ValueError("선형 경로 시작점과 끝점이 같습니다.")
-
+    total_count = linear_spacing_point_count(
+        x_start,
+        y_start,
+        x_stop,
+        y_stop,
+        spacing_mm,
+    )
     base_count = int(math.floor(length / spacing_mm)) + 1
-    endpoint_count = 0 if math.isclose((base_count - 1) * spacing_mm, length, rel_tol=0.0, abs_tol=1e-9) else 1
-    if base_count + endpoint_count > LINEAR_PATH_MAX_POINTS:
-        raise ValueError(f"선형 경로 위치 수는 {LINEAR_PATH_MAX_POINTS}개를 넘을 수 없습니다.")
-
-    distances = [round(index * spacing_mm, 9) for index in range(base_count)]
-    if not math.isclose(distances[-1], length, rel_tol=0.0, abs_tol=1e-9):
-        distances.append(length)
-
-    for offset, distance in enumerate(distances):
+    for offset in range(total_count):
+        distance = length if offset == base_count else round(offset * spacing_mm, 9)
         ratio = distance / length
         yield ScanPoint(
             index=start_index + offset,
@@ -194,6 +189,27 @@ def linear_path_points_by_spacing(
             move_velocity_mm_s=move_velocity_mm_s,
             capture_count=capture_count,
         )
+
+
+def linear_spacing_point_count(
+    x_start: float,
+    y_start: float,
+    x_stop: float,
+    y_stop: float,
+    spacing_mm: float,
+) -> int:
+    if spacing_mm <= 0:
+        raise ValueError("선형 경로 간격은 0보다 커야 합니다.")
+    length = math.hypot(x_stop - x_start, y_stop - y_start)
+    if length <= 0:
+        raise ValueError("선형 경로 시작점과 끝점이 같습니다.")
+    base_count = int(math.floor(length / spacing_mm)) + 1
+    last_distance = round((base_count - 1) * spacing_mm, 9)
+    endpoint_count = int(not math.isclose(last_distance, length, rel_tol=0.0, abs_tol=1e-9))
+    total_count = base_count + endpoint_count
+    if total_count > LINEAR_PATH_MAX_POINTS:
+        raise ValueError(f"선형 경로 위치 수는 {LINEAR_PATH_MAX_POINTS}개를 넘을 수 없습니다.")
+    return total_count
 
 
 def points_from_file(path: str | Path) -> list[ScanPoint]:

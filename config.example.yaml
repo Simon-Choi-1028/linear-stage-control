@@ -87,18 +87,16 @@ dataset:
   # Raw image output is kept lossless. Supported: tiff, png, bmp.
   image_format: png
   save_numpy: false
-  # CSV/JSONL are streamed during the run. Enable json/tsv/yaml/xlsx only when
-  # a post-run export is required for smaller runs.
-  metadata_formats: [csv, jsonl]
-  summary_formats: [json, yaml, md]
+  # Capture metadata is always streamed to captures.csv, including actual
+  # camera parameter readbacks for each frame.
   # summary = lightweight manifest; full also hashes every output file.
   manifest_detail: summary
-  write_jsonl: true
   # Save captured image arrays on a small background disk queue so stage motion can
   # overlap PNG/NPY writes without allowing unbounded RAM growth.
   async_image_writes: true
   image_write_queue_size: 2
-  # Flush streamed CSV/JSONL metadata in batches. Close always performs a final flush.
+  image_write_queue_max_mib: 256
+  # Flush streamed CSV metadata in batches. Close always performs a final flush.
   metadata_flush_records: 100
   metadata_flush_interval_s: 1.0
 
@@ -132,8 +130,6 @@ scan:
   estimated_capture_overhead_s: 0.35
   estimated_npy_save_overhead_s: 0.15
   estimated_ui_capture_overhead_s: 0.03
-  estimated_export_overhead_s: 0.50
-  estimated_export_per_capture_s: 0.02
   # Preferred: enter a fixed position list here, or set positions_file below.
   positions:
     - label: origin

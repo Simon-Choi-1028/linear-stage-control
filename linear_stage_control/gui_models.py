@@ -85,8 +85,15 @@ class CaptureResultsModel(QAbstractTableModel):
             raise ValueError("Capture result row has the wrong column count.")
         self.append_captures([(compact_values, image_path, record)])
 
-    def append_captures(self, rows: Sequence[tuple[Sequence[str], str, dict[str, Any]]]) -> None:
+    def append_captures(
+        self,
+        rows: Sequence[tuple[Sequence[str], str, dict[str, Any]]],
+        *,
+        seen_count: int | None = None,
+    ) -> None:
         if not rows:
+            if seen_count:
+                self.total_seen += max(0, int(seen_count))
             return
         new_rows: list[CaptureResultRow] = []
         for values, image_path, record in rows:
@@ -94,7 +101,10 @@ class CaptureResultsModel(QAbstractTableModel):
             if len(compact_values) != len(CAPTURE_RESULT_HEADERS):
                 raise ValueError("Capture result row has the wrong column count.")
             new_rows.append(CaptureResultRow(compact_values, image_path, dict(record)))
-        self.total_seen += len(new_rows)
+        total_increment = len(new_rows) if seen_count is None else int(seen_count)
+        if total_increment < len(new_rows):
+            raise ValueError("seen_count cannot be smaller than the number of retained capture rows.")
+        self.total_seen += total_increment
         if len(new_rows) >= self.max_rows:
             self.beginResetModel()
             self._rows = new_rows[-self.max_rows :]
@@ -267,10 +277,10 @@ class PositionTableModel(QAbstractTableModel):
                 self._rows.pop(row)
                 self.endRemoveRows()
 
-    def set_validation(self, validation: PositionValidationResult, highlight_limit: int = POSITION_HIGHLIGHT_LIMIT) -> None:
-        self._cell_errors = {
-            key: value for key, value in validation.cell_errors.items() if key[0] < highlight_limit
-        }
+    def set_validation(
+        self, validation: PositionValidationResult, highlight_limit: int = POSITION_HIGHLIGHT_LIMIT
+    ) -> None:
+        self._cell_errors = {key: value for key, value in validation.cell_errors.items() if key[0] < highlight_limit}
         self._cell_warnings = {
             key: value for key, value in validation.cell_warnings.items() if key[0] < highlight_limit
         }

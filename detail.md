@@ -1,17 +1,16 @@
 # Linear Stage Control 상세 개발 기록
 
-작성일: 2026-05-29  
-최종 갱신: 2026-06-01  
-현재 기준 버전: `v0.1.5` 릴리즈 후보  
-GitHub 저장소: `Simon-Choi-1028/linear-stage-control`  
-최신 공개 릴리즈: https://github.com/Simon-Choi-1028/linear-stage-control/releases/tag/v0.1.4  
-참고: 기존 `v0.1.5` 릴리즈는 현장 버그 확인 후 삭제했고, 현재 수정본을 같은 `v0.1.5` 태그로 재검증 후 배포한다.
+작성일: 2026-05-29
+최종 갱신: 2026-07-23
+현재 기준 버전: `v0.1.12`
+GitHub 저장소: `Simon-Choi-1028/linear-stage-control`
+최신 공개 릴리즈: https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest
 
 이 문서는 Basler ace 2 카메라와 Zaber Ultra Precision Linear Motor XY 스테이지를 연동하는 optical calibration capture GUI의 현재 개발 상태, 설계 의도, 기능, 빌드/배포 방식, 데이터 저장 구조, 주요 제어 원칙을 한 곳에 기록하기 위한 상세 문서입니다.
 
-## v0.1.5 Hotfix 검증 기록
+## v0.1.5 Hotfix 검증 기록 (과거 기록)
 
-2026-06-01 기준 hotfix 목표는 Live 안정화, Zaber Device DB 복구, 반응형 UI 복구입니다. GitHub Release는 만들지 않고 로컬 online/offline installer와 smoke 검증까지만 수행했습니다.
+아래 내용은 2026-06-01 당시의 hotfix 검증 기록입니다.
 
 - Zaber Device DB: `devices-public-v2.sqlite.lzma`를 직접 DB로 넘기던 문제를 제거했습니다. 빌드 스크립트는 공식 `.sqlite.lzma`를 다운로드한 뒤 `devices-public-v2.sqlite`로 해제하고 `SQLite format 3` header를 검증합니다. 앱 런타임은 `.sqlite`를 우선 사용하며, legacy `.sqlite.lzma`만 있으면 `%LOCALAPPDATA%/LinearStageControl/zaber/devices-public-v2.sqlite`로 해제해 검증합니다. 로컬 DB가 잘못된 경우 Zaber Web Service fallback을 설정하고 원인을 로그에 남깁니다.
 - Live preview: `LivePreviewWorker`에 thread-safe pending settings update를 추가했습니다. 노출, Gain, Gamma, Black Level, AcquisitionFrameRate는 Live worker가 열린 카메라 세션에 debounce update로 적용합니다. Width/Height/Offset/Binning/Decimation/PixelFormat은 grabbing 중 변경 위험이 있으므로 Live worker를 짧게 재시작합니다.
@@ -35,7 +34,7 @@ GitHub 저장소: `Simon-Choi-1028/linear-stage-control`
 - 위치 목록을 GUI 직접 입력 또는 CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 파일로 입력.
 - 각 위치 이동 완료 후 안정화 대기, software trigger 또는 trigger off 방식으로 이미지 캡처.
 - 모든 캡처에 timestamp, target 위치, actual 위치, 위치 오차, 촬영 설정, 이미지 파일명을 기록.
-- 논문/실험에 재사용 가능한 다중 metadata/summary 포맷 생성.
+- 캡처별 실제 카메라 파라미터를 포함한 단일 `captures.csv` 촬영 로그 생성.
 - 실시간 live preview, 저장 이미지 확인, 확대/격자/중앙선 overlay 지원.
 - optical calibration 목적에 맞춘 um 단위 오차 예측 및 캔들차트 표시.
 - 다른 PC에서 설치 가능한 Windows installer 제공.
@@ -43,27 +42,9 @@ GitHub 저장소: `Simon-Choi-1028/linear-stage-control`
 
 ## 2. 현재 릴리즈 상태
 
-현재 공개 릴리즈는 `v0.1.5`로 갱신합니다. 기존 `v0.1.5`는 현장 버그 확인 후 삭제했고, 현재 수정본을 동일 버전으로 재배포합니다.
-
-v0.1.5 로컬 검증 asset:
-
-| 파일 | 용도 | 크기 | SHA256 |
-| --- | --- | ---: | --- |
-| `LinearStageControlSetup.exe` | 기본 online/slim 설치본 | 61.8 MB | `57872c3212dd1d072754420a56549f73fe7d0eabd8c80fd5a830966c27c40c64` |
-| `LinearStageControlSetup-Online.exe` | online/slim 설치본 복사본 | 61.8 MB | `57872c3212dd1d072754420a56549f73fe7d0eabd8c80fd5a830966c27c40c64` |
-| `LinearStageControlSetup-Offline.exe` | Basler pylon Runtime installer 포함 오프라인 설치본 | 1387.2 MB | `127cd1d9dc9bfda29c7bed8b84a2c1feb031beb2b88526bc492a977fbbd05cc3` |
-| `update_manifest.json` | 자동 업데이트 검증 manifest | 로컬 생성 | manifest 내부에 기록 |
+`v0.1.12`는 CSV-only 캡처 로그와 캡처별 카메라 readback, 장시간 실행 메모리 제한, worker 수명주기 안정화, 대형 경로/미리보기 최적화를 포함합니다. 기본 공개 asset은 online Setup, update manifest, portable ZIP, portable manifest이며 offline Setup은 현장에서 별도로 요구할 때만 만듭니다.
 
 `update_manifest.json`의 기본 채널은 online/slim 설치본입니다. 앱의 자동 업데이트 기능은 `LinearStageControlSetup.exe`를 기본 설치 asset으로 사용하고, 다운로드 후 SHA256을 검증한 뒤 사용자 승인 시 설치 파일을 실행합니다.
-
-최근 Git 상태:
-
-```text
-main / origin/main
-current development candidate: v0.1.5
-latest public release: v0.1.4
-GitHub Release creation: planned for v0.1.5 after local QC
-```
 
 ## 3. 개발 환경과 의존성
 
@@ -79,8 +60,7 @@ GitHub Release creation: planned for v0.1.5 after local QC
 | `PySide6` | `6.10.1` | GUI |
 | `pyinstaller` | `6.17.0` | Windows 패키징 |
 | `pyserial` | `3.5` | COM 포트 탐색 보조 |
-| `python-dotenv` | `1.2.2` | 환경변수 |
-| `PyYAML` | `6.0.3` | YAML config/export |
+| `PyYAML` | `6.0.3` | YAML config |
 | `rich` | `15.0.0` | CLI 출력 |
 | `zaber-motion` | `9.3.0` | Zaber Motion Library |
 
@@ -138,7 +118,7 @@ stage:
 8. 이동 완료 후 `stage.settle_s`만큼 안정화 대기합니다.
 9. 지정된 `capture_count`만큼 카메라 캡처를 반복합니다.
 10. 캡처 원본 배열을 lossless image로 저장하고 metadata record를 생성합니다.
-11. 전체 run 종료 후 summary, metadata, manifest를 생성합니다.
+11. 전체 run 종료 후 CSV를 flush하고 manifest를 갱신합니다.
 12. live preview 설정이 켜져 있으면 run 종료 후 live preview를 재시작합니다.
 
 중지/취소:
@@ -276,11 +256,7 @@ Overlay는 render-only입니다. 원본 이미지 파일과 저장 metadata에�
 
 ### 옵션 박스
 
-다음 선택 항목들은 촬영 파라미터와 섞이지 않도록 별도 박스로 나누었습니다.
-
-- 메타데이터 출력 포맷.
-- 요약 출력 포맷.
-- 실행 옵션.
+촬영 로그 형식은 CSV로 고정하고, GUI에는 카메라 파라미터가 포함된다는 안내를 표시합니다. 실행 옵션은 촬영 파라미터와 섞이지 않도록 별도 박스로 나누었습니다.
 
 실행 옵션:
 
@@ -376,46 +352,25 @@ run별 timestamp 디렉터리:
   manifest.json
   config.yaml
   captures.csv
-  captures.jsonl
-  captures.json
-  captures.tsv
-  captures.yaml
-  captures.xlsx
-  summary.json
-  summary.yaml
-  summary.md
   images/
-    sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap001.tiff
+    X000.500_Y001.250.png
 ```
 
-기본 metadata formats:
-
-- `csv`
-- `jsonl`
-- `json`
-- `tsv`
-- `yaml`
-- `xlsx`
-
-기본 summary formats:
-
-- `json`
-- `yaml`
-- `md`
+촬영 metadata는 `captures.csv` 하나에 스트리밍 저장합니다. 각 행에는 target/actual 위치, 오차, timing, 이미지 경로와 함께 카메라 모델/serial, PixelFormat, 노출, Gain, FrameRate, ROI, Gamma, Black Level, Binning/Decimation, trigger, 회전/반전 파라미터가 포함됩니다. 실제 카메라에서 읽을 수 없는 항목은 캡처를 중단하지 않고 빈 칸으로 둡니다.
 
 이미지 파일명 규칙:
 
 ```text
-{label_or_point}_x{X}mm_y{Y}mm_{timestamp}_cap{capture_index:03d}.tiff
+X{X:07.3f}_Y{Y:07.3f}[_Cxx][_Pxxxx].png
 ```
 
 예:
 
 ```text
-sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap001.tiff
+X033.333_Y000.000_C02.png
 ```
 
-이미지 파일명에 위치와 시간이 들어가므로 파일만 분리되어도 어느 위치에서 언제 촬영된 이미지인지 추적할 수 있습니다.
+좌표는 소수점 셋째 자리까지 절삭합니다. 같은 위치의 추가 캡처에는 `_Cxx`, 중복 좌표 포인트에는 `_Pxxxx`가 붙고, 정확한 촬영 시각과 포인트 정보는 같은 run의 `captures.csv`에서 추적합니다.
 
 ## 9. 저장 metadata 주요 필드
 
@@ -424,11 +379,11 @@ sample_a_x0.500mm_y-1.250mm_20260528T153012_123456+0900_cap001.tiff
 대상/위치:
 
 - `run_id`
-- `point_index`
+- `index`
 - `label`
 - `target_x_mm`
 - `target_y_mm`
-- `move_velocity_mm_s`
+- `point_move_velocity_mm_s`
 - `effective_move_velocity_mm_s`
 - `capture_count`
 - `capture_index`
@@ -490,7 +445,7 @@ Run manifest:
 grab_result.GetArray().copy()
 ```
 
-이 배열을 변환 없이 lossless TIFF로 저장합니다. 설정에 따라 PNG/BMP도 가능하지만 기본은 TIFF입니다.
+이 배열을 방향 보정 후 lossless PNG로 저장합니다. 설정에 따라 TIFF/BMP도 사용할 수 있으며, 완전한 NumPy 배열 보존이 필요하면 NPY 저장을 함께 켭니다.
 
 NPY 저장:
 
@@ -729,7 +684,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1
 GitHub Release upload:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\release_github.ps1 -Tag v0.1.5
+powershell -ExecutionPolicy Bypass -File packaging\release_github.ps1 -Tag v0.1.12 -IncludePortable
 ```
 
 Packaging safeguards:
@@ -756,7 +711,7 @@ Prune 대상 예:
 | `camera.py` | Basler camera settings, device enumeration, capture/live support, image save |
 | `config.py` | YAML config load, blank value normalize |
 | `dataset.py` | DatasetRun, path naming, capture record, manifest/hash |
-| `dataset_exports.py` | CSV/JSON/JSONL/TSV/YAML/XLSX metadata, summary export |
+| `run_stats.py` | GUI 실행 중 촬영 통계 집계 |
 | `diagnostics.py` | pylon, camera, serial, Zaber DB, output, update diagnostics |
 | `error_model.py` | fixed Zaber manufacturer specs and um error estimate |
 | `exceptions.py` | user-facing custom exception hierarchy |
@@ -845,11 +800,11 @@ git diff --check
 - dataset manifest with version, record count, hash.
 - diagnostics without hardware checks.
 - single-axis error calculation.
-- export format normalization.
+- CSV-only capture metadata and per-frame camera readbacks.
 - GUI smoke components.
 - centralized `AppRunState` button enablement.
 - live fake frame preview update.
-- live preview size slider.
+- live preview resize handle and bounded rendering.
 - thin white overlay rendering.
 - linear path preview widget rendering.
 - linear spacing endpoint inclusion.
@@ -906,10 +861,9 @@ stage:
     y: {enabled: true, device_index: 0, axis_number: 2}
 
 dataset:
-  image_format: tiff
+  image_format: png
   save_numpy: false
-  metadata_formats: [csv, jsonl, json, tsv, yaml, xlsx]
-  summary_formats: [json, yaml, md]
+  # Capture metadata is always written to captures.csv.
 
 updates:
   enabled: true
@@ -918,10 +872,10 @@ updates:
 
 ## 21. 차후 개선 후보
 
-현재 기능은 `v0.1.5` 로컬 검증 후보 기준으로 smoke와 installer 빌드까지 통과한 상태입니다. 다만 실제 장비 운용이 늘어나면 다음 항목을 우선 검토하면 좋습니다.
+현재 기능은 `v0.1.12` 기준으로 단위 테스트, 정적 검사, release verification, packaged smoke를 수행합니다. 실제 장비 운용이 늘어나면 다음 항목을 우선 검토하면 좋습니다.
 
 - Basler GigE packet size, inter-packet delay, NIC IP 대역 상태를 진단 탭에서 더 직접적으로 표시.
-- live preview 프레임 드롭률과 실제 FPS 표시.
+- live preview 프레임 드롭률 진단.
 - 장시간 run 중 camera reconnect recovery 정책 추가.
 - Zaber 이동 중 latest command wins queue를 GUI 수동 이동에도 더 명확히 노출.
 - 위치 테이블 대량 편집 기능 강화.

@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ import numpy as np
 import yaml
 from PIL import Image
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QCloseEvent, QImage
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -57,12 +58,6 @@ from .app_state import AppRunState
 from .camera import iso_timestamp
 from .config import ConfigError, load_config
 from .dataset import safe_timestamp, validate_image_output_plan
-from .dataset_exports import (
-    DEFAULT_METADATA_FORMATS,
-    DEFAULT_SUMMARY_FORMATS,
-    SUPPORTED_METADATA_FORMATS,
-    RunStatsAccumulator,
-)
 from .error_model import (
     ZABER_LDM210_XY_SPECS,
     error_budget_from_config,
@@ -124,6 +119,7 @@ from .position_validation import (
 )
 from .preview_rendering import MAX_PREVIEW_PIXELS, qimage_from_array, render_preview_qimage
 from .process_guard import pylon_viewer_block_message, running_pylon_viewer_processes
+from .run_stats import RunStatsAccumulator
 from .scan import (
     ScanPoint,
     default_capture_count_from_config,
@@ -169,8 +165,10 @@ DEFAULT_ESTIMATED_CAPTURE_TRIGGER_OVERHEAD_S = 0.05
 DEFAULT_ESTIMATED_CAPTURE_OVERHEAD_S = 0.35
 DEFAULT_ESTIMATED_NPY_SAVE_OVERHEAD_S = 0.15
 DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S = 0.03
-DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S = 0.50
-DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S = 0.02
+MAX_ETA_CAPTURE_CHECKPOINTS = 50_000
+QT_PROGRESS_MAX = 2_147_483_647
+LARGE_RUN_PROGRESS_SCALE = 10_000
+LASER_COMMAND_MIN_INTERVAL_MS = 250
 CAMERA_PARAMETER_FIELDS = (
     ("gain", "Gain", "예: 0"),
     ("acquisition_frame_rate", "FrameRate", "Hz"),
@@ -195,6 +193,25 @@ LIVE_RESTART_CAMERA_PARAMETER_KEYS = {
     "decimation_x",
     "decimation_y",
 }
+CAPTURE_UI_RECORD_FIELDS = (
+    "status",
+    "index",
+    "capture_index",
+    "capture_count",
+    "label",
+    "target_x_mm",
+    "target_y_mm",
+    "actual_x_mm",
+    "actual_y_mm",
+    "measured_radial_error_um",
+    "predicted_min_error_um",
+    "predicted_max_error_um",
+    "configured_error_budget_um",
+    "max_allowed_error_um",
+    "within_error_threshold",
+    "image_filename",
+    "error_message",
+)
 
 
 @dataclass(frozen=True)
@@ -222,9 +239,10 @@ def estimate_run_duration(
 
     stage_settings = stage_settings_from_config(config)
     default_capture_count = default_capture_count_from_config(config)
+    capture_total = total_capture_count(points, default_capture_count)
+    keep_capture_checkpoints = capture_total <= MAX_ETA_CAPTURE_CHECKPOINTS
     scan = config.get("scan", {})
     dataset = config.get("dataset", {})
-    capture_total = total_capture_count(points, default_capture_count)
     camera = config.get("camera", {})
     exposure_per_capture_s = max(0.0, _float_config_value(camera.get("exposure_us"), 0.0)) / 1_000_000.0
     setup_s = _non_negative_timing_value(scan, "estimated_setup_s", DEFAULT_ESTIMATED_SETUP_S)
@@ -263,8 +281,6 @@ def estimate_run_duration(
         "estimated_ui_capture_overhead_s",
         DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S,
     )
-    export_s = _estimated_export_duration_s(scan, dataset, capture_total)
-
     total_s = setup_s
     setup_total_s = setup_s
     home_total_s = home_s if stage_settings.home_on_start and not skip_home else 0.0
@@ -316,27 +332,33 @@ def estimate_run_duration(
         total_s += max(0.0, stage_settings.settle_s)
 
         capture_count = effective_capture_count(point, default_capture_count)
-        for _capture_index in range(capture_count):
-            exposure_total_s += exposure_per_capture_s
-            trigger_total_s += trigger_overhead_s
-            save_total_s += capture_overhead_s + npy_overhead_s
-            ui_total_s += ui_overhead_s
-            total_s += exposure_per_capture_s + trigger_overhead_s + capture_overhead_s + npy_overhead_s + ui_overhead_s
-            capture_cumulative.append(total_s)
+        per_capture_s = (
+            exposure_per_capture_s + trigger_overhead_s + capture_overhead_s + npy_overhead_s + ui_overhead_s
+        )
+        exposure_total_s += exposure_per_capture_s * capture_count
+        trigger_total_s += trigger_overhead_s * capture_count
+        save_total_s += (capture_overhead_s + npy_overhead_s) * capture_count
+        ui_total_s += ui_overhead_s * capture_count
+        if keep_capture_checkpoints:
+            for _capture_index in range(capture_count):
+                total_s += per_capture_s
+                capture_cumulative.append(total_s)
+        else:
+            total_s += per_capture_s * capture_count
 
-    total_s += export_s
     notes: list[str] = []
     if worst_case_start_moves:
         notes.append("첫 이동은 가능한 현재 위치 최장거리 기준")
     if fallback_velocity_moves:
         notes.append(f"속도 미지정 이동 {fallback_velocity_moves}개는 {_number_text(default_move_velocity)} mm/s 추정")
+    if not keep_capture_checkpoints:
+        notes.append(f"대량 촬영 {capture_total:,}장은 메모리 절약형 ETA 사용")
 
     detail = (
         f"예상 {_duration_text(total_s)} | 준비 {_duration_text(setup_total_s)} + "
         f"원점 {_duration_text(home_total_s)} + 이동 {_duration_text(move_total_s)} + "
         f"위치 {_duration_text(position_overhead_total_s)} + 안정화 {_duration_text(settle_total_s)} + "
-        f"촬영 {_duration_text(exposure_total_s + trigger_total_s)} + 저장/UI {_duration_text(save_total_s + ui_total_s)} + "
-        f"종료 {_duration_text(export_s)}"
+        f"촬영 {_duration_text(exposure_total_s + trigger_total_s)} + 저장/UI {_duration_text(save_total_s + ui_total_s)}"
     )
     if notes:
         detail += f" | {', '.join(notes)}"
@@ -361,47 +383,6 @@ def _unknown_start_distance_mm(point: ScanPoint, stage_settings: Any) -> float:
             abs(point.y_mm - POSITION_MAX_MM),
         )
     return max(math.hypot(dx, dy) for dx in x_distances for dy in y_distances)
-
-
-def _estimated_export_duration_s(scan: dict[str, Any], dataset: dict[str, Any], capture_total: int) -> float:
-    metadata_formats = _normalised_format_set(
-        dataset.get("metadata_formats"),
-        DEFAULT_METADATA_FORMATS if bool(dataset.get("write_jsonl", True)) else ("csv",),
-    )
-    summary_formats = _normalised_format_set(dataset.get("summary_formats"), DEFAULT_SUMMARY_FORMATS)
-    streamed_metadata = {"csv", "jsonl"}
-    post_run_metadata = metadata_formats - streamed_metadata
-    has_post_run_work = bool(post_run_metadata or summary_formats)
-    if not has_post_run_work:
-        return 0.0
-    fixed_s = _non_negative_timing_value(scan, "estimated_export_overhead_s", DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S)
-    per_capture_s = _non_negative_timing_value(
-        scan,
-        "estimated_export_per_capture_s",
-        DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S,
-    )
-    format_multiplier = max(1, len(post_run_metadata))
-    return fixed_s + per_capture_s * capture_total * format_multiplier
-
-
-def _normalised_format_set(value: Any, default: tuple[str, ...]) -> set[str]:
-    if value is None:
-        items = default
-    elif isinstance(value, str):
-        items = tuple(item.strip() for item in value.split(","))
-    else:
-        try:
-            items = tuple(str(item).strip() for item in value)
-        except TypeError:
-            items = (str(value).strip(),)
-    result: set[str] = set()
-    for item in items:
-        normalised = item.lower().lstrip(".")
-        if normalised == "yml":
-            normalised = "yaml"
-        if normalised:
-            result.add(normalised)
-    return result
 
 
 def _duration_text(seconds: float) -> str:
@@ -444,6 +425,18 @@ def _bool_config_value(value: Any, default: bool) -> bool:
     return default
 
 
+def _config_without_embedded_positions(config: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in config.items():
+        if key != "scan" or not isinstance(value, dict):
+            compact[key] = deepcopy(value)
+            continue
+        compact[key] = {
+            scan_key: deepcopy(scan_value) for scan_key, scan_value in value.items() if scan_key != "positions"
+        }
+    return compact
+
+
 class MainWindow(QMainWindow):
     def __init__(self, start_device_scan: bool = True) -> None:
         super().__init__()
@@ -463,6 +456,8 @@ class MainWindow(QMainWindow):
         self.laser_worker: LaserCommandWorker | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
+        self._released_worker_ids: set[int] = set()
+        self.pending_update_installer_path: Path | None = None
         self.pending_run_result: tuple[str, bool] | None = None
         self.pending_run_failed = False
         self.restart_live_after_worker = False
@@ -472,7 +467,8 @@ class MainWindow(QMainWindow):
         self.preview_mode = "capture"
         self.image_viewer: FullscreenImageWindow | None = None
         self.run_stats = RunStatsAccumulator()
-        self.pending_capture_rows: list[tuple[list[str], str, dict[str, Any]]] = []
+        self.pending_capture_rows: deque[tuple[list[str], str, dict[str, Any]]] = deque(maxlen=CAPTURE_DISPLAY_LIMIT)
+        self.pending_capture_seen = 0
         self.last_capture_record: dict[str, Any] | None = None
         self.last_capture_image_path: str = ""
         self.last_preview_update_monotonic = 0.0
@@ -497,6 +493,8 @@ class MainWindow(QMainWindow):
         self.preview_center_y = 0.5
         self.live_first_frame_pending = False
         self.live_restart_required = False
+        self.pending_laser_percent: int | None = None
+        self.last_laser_command_monotonic = 0.0
         self.live_settings_timer = QTimer(self)
         self.live_settings_timer.setSingleShot(True)
         self.live_settings_timer.setInterval(250)
@@ -520,6 +518,9 @@ class MainWindow(QMainWindow):
         self.run_timing_timer = QTimer(self)
         self.run_timing_timer.setInterval(1000)
         self.run_timing_timer.timeout.connect(self.update_run_timing_display)
+        self.laser_command_timer = QTimer(self)
+        self.laser_command_timer.setSingleShot(True)
+        self.laser_command_timer.timeout.connect(self.flush_pending_laser_command)
         self._build_ui()
         self._apply_style()
         self._load_initial_config()
@@ -535,7 +536,53 @@ class MainWindow(QMainWindow):
         else:
             self._set_camera_scan_state("idle", "대기", "스모크 테스트 모드")
 
-    def closeEvent(self, event: object) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            self.logger.info("close requested during acquisition", extra={"event": "run_close_requested"})
+            self.worker.request_stop()
+            self.set_run_status("종료 전 촬영 정리 중")
+            if not self.worker.wait(5000):
+                self.logger.warning(
+                    "close deferred while acquisition worker is still running", extra={"event": "run_close_deferred"}
+                )
+                event.ignore()
+                return
+        if not self.stop_live_preview(wait_ms=1500):
+            self.logger.warning(
+                "close deferred while live worker is still running", extra={"event": "live_close_deferred"}
+            )
+            event.ignore()
+            return
+        if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
+            if not self.camera_scan_worker.wait(2000):
+                self.logger.warning(
+                    "close deferred while camera discovery is still running",
+                    extra={"event": "camera_discovery_close_deferred"},
+                )
+                event.ignore()
+                return
+        for worker in (self.diagnostics_worker, self.manual_stage_worker, self.laser_worker):
+            if worker is not None and worker.isRunning():
+                if hasattr(worker, "request_stop"):
+                    worker.request_stop()
+                if not worker.wait(1500):
+                    self.logger.warning(
+                        "close deferred while background worker is still running",
+                        extra={"event": "background_close_deferred"},
+                    )
+                    event.ignore()
+                    return
+        for worker in (self.update_check_worker, self.update_download_worker):
+            if worker is not None and worker.isRunning():
+                if not worker.wait(1000):
+                    self.logger.warning(
+                        "close deferred while update worker is still running",
+                        extra={"event": "update_close_deferred"},
+                    )
+                    event.ignore()
+                    return
+        if self.worker is not None and not self.worker.isRunning():
+            self.cleanup_finished_worker(allow_live_restart=False)
         for timer_name in (
             "capture_ui_timer",
             "run_status_timer",
@@ -543,52 +590,47 @@ class MainWindow(QMainWindow):
             "responsive_layout_timer",
             "run_timing_timer",
             "live_settings_timer",
+            "laser_command_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
-        if self.worker is not None and self.worker.isRunning():
-            self.logger.info("close requested during acquisition", extra={"event": "run_close_requested"})
-            self.worker.request_stop()
-            self.set_run_status("종료 전 촬영 정리 중")
-            if not self.worker.wait(5000):
-                self.logger.warning("close deferred while acquisition worker is still running", extra={"event": "run_close_deferred"})
-                if hasattr(event, "ignore"):
-                    event.ignore()
-                return
-        if self.worker is not None and not self.worker.isRunning():
-            self.cleanup_finished_worker()
-        if not self.stop_live_preview(wait_ms=1500):
-            self.logger.warning("close deferred while live worker is still running", extra={"event": "live_close_deferred"})
-            if hasattr(event, "ignore"):
-                event.ignore()
-            return
-        if self.camera_scan_worker is not None and self.camera_scan_worker.isRunning():
-            self.camera_scan_worker.wait(2000)
-        for worker in (self.diagnostics_worker, self.manual_stage_worker, self.laser_worker):
-            if worker is not None and worker.isRunning():
-                if hasattr(worker, "request_stop"):
-                    worker.request_stop()
-                if not worker.wait(1500):
-                    self.logger.warning("close deferred while background worker is still running", extra={"event": "background_close_deferred"})
-                    if hasattr(event, "ignore"):
-                        event.ignore()
-                    return
-        for worker in (self.update_check_worker, self.update_download_worker):
-            if worker is not None and worker.isRunning():
-                worker.wait(1000)
         if self.image_viewer is not None:
-            self.image_viewer.close()
-            self.image_viewer.deleteLater()
-            self.image_viewer = None
+            viewer = self.image_viewer
+            viewer.close()
+            viewer.deleteLater()
+            if self.image_viewer is viewer:
+                self.image_viewer = None
         if hasattr(self, "capture_results_model"):
             self.capture_results_model.clear()
         if hasattr(self, "positions_model"):
             self.positions_model.clear()
+        self.pending_capture_rows.clear()
+        self.pending_capture_seen = 0
         self.clear_preview_source()
         super().closeEvent(event)
+        if event.isAccepted() and self.pending_update_installer_path is not None:
+            installer_path = self.pending_update_installer_path
+            self.pending_update_installer_path = None
+            try:
+                os.startfile(installer_path)
+            except OSError as exc:
+                self.logger.exception(
+                    "failed to start verified update installer",
+                    extra={"event": "update_installer_start_failed", "path": str(installer_path)},
+                )
+                QMessageBox.warning(self, "업데이트 실행 실패", str(exc))
 
     def _delete_worker_later(self, worker: object | None) -> None:
+        if worker is None:
+            return
+        worker_id = id(worker)
+        if worker_id in self._released_worker_ids:
+            return
+        self._released_worker_ids.add(worker_id)
+        destroyed = getattr(worker, "destroyed", None)
+        if destroyed is not None and hasattr(destroyed, "connect"):
+            destroyed.connect(lambda *_args, worker_id=worker_id: self._released_worker_ids.discard(worker_id))
         delete_later = getattr(worker, "deleteLater", None)
         if callable(delete_later):
             delete_later()
@@ -855,9 +897,9 @@ class MainWindow(QMainWindow):
     def _preview_default_size(self) -> QSize:
         width = int(
             min(
-            PREVIEW_DEFAULT_WIDTH,
-            self._preview_available_width(),
-            self._aspect_width(self._preview_available_height()),
+                PREVIEW_DEFAULT_WIDTH,
+                self._preview_available_width(),
+                self._aspect_width(self._preview_available_height()),
             )
         )
         return self._fit_preview_aspect(width, self._aspect_height(width))
@@ -1143,7 +1185,9 @@ class MainWindow(QMainWindow):
         self.laser_port_combo.setToolTip("USB-RS485 컨버터가 연결된 COM 포트입니다. 기본값: COM5")
         self.laser_percent_slider.setToolTip("레이저 출력 퍼센트입니다. 0%는 레이저 OFF 명령 L0을 보냅니다.")
         self.laser_percent_spin.setToolTip("레이저 출력 퍼센트를 숫자로 직접 입력합니다. 범위: 0-100%")
-        self.laser_expect_response_check.setToolTip("PCB 펌웨어 DEBUG_RS485_REPLY가 켜져 있으면 OK/PCT 응답을 읽습니다.")
+        self.laser_expect_response_check.setToolTip(
+            "PCB 펌웨어 DEBUG_RS485_REPLY가 켜져 있으면 OK/PCT 응답을 읽습니다."
+        )
         _apply_button_icon(self.laser_apply_button, QStyle.SP_ArrowForward, "현재 레이저 출력 값을 RS485로 전송")
         _apply_button_icon(self.laser_off_button, QStyle.SP_MediaStop, "레이저 OFF 명령 L0 전송")
 
@@ -1208,7 +1252,9 @@ class MainWindow(QMainWindow):
         )
         self.manual_step_spin.setToolTip("X+/X-/Y+/Y- 버튼으로 이동할 상대 거리입니다.")
         _apply_button_icon(self.manual_position_button, QStyle.SP_BrowserReload, "현재 Zaber 위치 읽기")
-        _apply_button_icon(self.manual_home_button, QStyle.SP_DialogResetButton, "활성 축 원점 복귀 후 X105/Y105로 이동")
+        _apply_button_icon(
+            self.manual_home_button, QStyle.SP_DialogResetButton, "활성 축 원점 복귀 후 X105/Y105로 이동"
+        )
         _apply_button_icon(self.manual_move_button, QStyle.SP_ArrowForward, "입력한 X/Y 목표 좌표로 이동")
         _apply_button_icon(self.manual_stop_button, QStyle.SP_MediaStop, "현재 수동 이동 정지 요청")
         _apply_button_icon(self.manual_x_minus_button, QStyle.SP_ArrowLeft, "X축 음의 방향으로 jog 이동")
@@ -1311,12 +1357,7 @@ class MainWindow(QMainWindow):
         self.camera_rotate_180_check.setChecked(True)
         self.camera_flip_horizontal_check = QCheckBox("좌우 반전")
         self.camera_flip_vertical_check = QCheckBox("상하 반전")
-        metadata_format_order = ("csv", "jsonl", "json", "tsv", "yaml", "xlsx")
-        self.metadata_format_checks = self._format_checks(
-            tuple(item for item in metadata_format_order if item in SUPPORTED_METADATA_FORMATS),
-            checked=DEFAULT_METADATA_FORMATS,
-        )
-        self.summary_format_checks = self._format_checks(DEFAULT_SUMMARY_FORMATS, checked=DEFAULT_SUMMARY_FORMATS)
+        self.capture_log_format_label = QLabel("CSV (카메라 파라미터 포함)")
         self.exposure_row = ParameterAdjustRow(
             "노출",
             self.exposure_spin,
@@ -1360,8 +1401,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.capture_count_row)
         form.addRow("카메라 파라미터", self.camera_parameter_box)
         form.addRow("픽셀 형식", self.pixel_format_combo)
-        form.addRow("메타데이터", self._format_check_grid(self.metadata_format_checks))
-        form.addRow("요약", self._format_check_grid(self.summary_format_checks))
+        form.addRow("촬영 로그", self.capture_log_format_label)
         form.addRow("실행 옵션", self._option_check_box())
 
         self.output_browse_button.clicked.connect(self.browse_output_root)
@@ -1382,27 +1422,6 @@ class MainWindow(QMainWindow):
                 )
             )
         return group
-
-    def _format_checks(self, formats: tuple[str, ...], *, checked: tuple[str, ...]) -> dict[str, QCheckBox]:
-        checks: dict[str, QCheckBox] = {}
-        checked_set = set(checked)
-        for item in formats:
-            label = "Markdown" if item == "md" else item.upper()
-            check = QCheckBox(label)
-            check.setChecked(item in checked_set)
-            checks[item] = check
-        return checks
-
-    def _format_check_grid(self, checks: dict[str, QCheckBox]) -> QWidget:
-        widget = QWidget()
-        widget.setObjectName("formatBox")
-        layout = QGridLayout(widget)
-        layout.setContentsMargins(8, 7, 8, 7)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(4)
-        for index, check in enumerate(checks.values()):
-            layout.addWidget(check, index // 3, index % 3)
-        return widget
 
     def _option_check_box(self) -> QWidget:
         widget = QWidget()
@@ -1458,11 +1477,9 @@ class MainWindow(QMainWindow):
         self.camera_rotate_180_check.setToolTip("뒤집혀 장착된 Basler 카메라 화면과 저장 이미지를 180도 회전합니다.")
         self.camera_flip_horizontal_check.setToolTip("Live 화면과 저장 이미지를 좌우로 반전합니다.")
         self.camera_flip_vertical_check.setToolTip("Live 화면과 저장 이미지를 상하로 반전합니다.")
-        for name, check in self.metadata_format_checks.items():
-            check.setToolTip(f"run 종료 후 captures.{name} 메타데이터를 저장합니다.")
-        for name, check in self.summary_format_checks.items():
-            suffix = "md" if name == "md" else name
-            check.setToolTip(f"run 종료 후 summary.{suffix} 요약 파일을 저장합니다.")
+        self.capture_log_format_label.setToolTip(
+            "각 캡처의 위치, 시간, 오차, 실제 카메라 파라미터를 captures.csv에 연속 저장합니다."
+        )
 
     def _adjust_spin_value(self, spin: QSpinBox, delta: int) -> None:
         spin.setValue(max(spin.minimum(), min(spin.maximum(), spin.value() + delta)))
@@ -1716,7 +1733,9 @@ class MainWindow(QMainWindow):
         self.live_size_reset_button.setMinimumWidth(64)
         self.live_size_reset_button.setToolTip("Live/이미지 미리보기 높이를 현재 레이아웃의 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
-        _apply_button_icon(self.live_capture_button, QStyle.SP_DialogSaveButton, "현재 Live 미리보기 화면을 PNG로 저장합니다.")
+        _apply_button_icon(
+            self.live_capture_button, QStyle.SP_DialogSaveButton, "현재 Live 미리보기 화면을 PNG로 저장합니다."
+        )
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
         _apply_button_icon(
             self.live_retry_button, QStyle.SP_BrowserReload, "현재 선택한 카메라로 Live preview를 다시 연결합니다."
@@ -1982,7 +2001,8 @@ class MainWindow(QMainWindow):
         self.apply_config(self.config, self.config_path)
 
     def apply_config(self, config: dict[str, Any], config_path: Path) -> None:
-        self.config = deepcopy(config)
+        points = points_from_config(config, base_dir=config_path.parent)
+        self.config = _config_without_embedded_positions(config)
         self.config_path = config_path
         camera = config.get("camera", {})
         stage = config.get("stage", {})
@@ -2010,19 +2030,6 @@ class MainWindow(QMainWindow):
         axes = stage.get("axes", {})
         self.x_axis_enabled_check.setChecked(bool((axes.get("x", {}) or {}).get("enabled", True)))
         self.y_axis_enabled_check.setChecked(bool((axes.get("y", {}) or {}).get("enabled", True)))
-        metadata_default = (
-            DEFAULT_METADATA_FORMATS
-            if bool(dataset.get("write_jsonl", True))
-            else tuple(item for item in DEFAULT_METADATA_FORMATS if item != "jsonl")
-        )
-        self._set_format_checks(
-            self.metadata_format_checks,
-            dataset.get("metadata_formats", metadata_default),
-        )
-        self._set_format_checks(
-            self.summary_format_checks,
-            dataset.get("summary_formats", DEFAULT_SUMMARY_FORMATS),
-        )
 
         self._set_combo_text(self.stage_port_combo, str(stage.get("serial_port", "COM3")))
         if isinstance(laser, dict):
@@ -2032,14 +2039,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 laser_percent = 0
             self.set_laser_percent(laser_percent)
-            self.laser_expect_response_check.setChecked(
-                _bool_config_value(laser.get("expect_response", True), True)
-            )
+            self.laser_expect_response_check.setChecked(_bool_config_value(laser.get("expect_response", True), True))
         else:
             self._set_combo_text(self.laser_port_combo, DEFAULT_LASER_PORT)
             self.set_laser_percent(0)
             self.laser_expect_response_check.setChecked(True)
-        self.set_positions(points_from_config(config, base_dir=config_path.parent))
+        self.set_positions(points)
         self.update_error_summary()
         self.log(f"설정 불러옴: {config_path}")
 
@@ -2224,8 +2229,8 @@ class MainWindow(QMainWindow):
             return 10
 
     def build_live_config(self) -> dict[str, Any]:
-        config = deepcopy(self.config)
-        camera = config.setdefault("camera", {})
+        config = {"camera": deepcopy(self.config.get("camera", {}))}
+        camera = config["camera"]
         camera["serial_number"] = self.camera_combo.currentData() or None
         camera["pixel_format"] = self.pixel_format_combo.currentText()
         camera["exposure_us"] = self.exposure_spin.value()
@@ -2318,12 +2323,13 @@ class MainWindow(QMainWindow):
                 "fps": self.live_preview_fps(),
             },
         )
-        self.live_worker = LivePreviewWorker(live_config, fps=self.live_preview_fps())
-        self.live_worker.frame_available.connect(self.on_live_frame_available)
-        self.live_worker.status_changed.connect(self.live_status_label.setText)
-        self.live_worker.live_failed.connect(self.on_live_failed)
-        self.live_worker.finished.connect(self.on_live_finished)
-        self.live_worker.start()
+        worker = LivePreviewWorker(live_config, fps=self.live_preview_fps())
+        worker.frame_available.connect(lambda worker=worker: self.on_live_frame_available(worker))
+        worker.status_changed.connect(lambda message, worker=worker: self.on_live_status_changed(worker, message))
+        worker.live_failed.connect(lambda message, worker=worker: self.on_live_failed(worker, message))
+        worker.finished.connect(lambda worker=worker: self.on_live_finished(worker))
+        self.live_worker = worker
+        worker.start()
         self.apply_state(AppRunState.LIVE_PREVIEW)
 
     def stop_live_preview(self, wait_ms: int = 0, update_label: bool = True) -> bool:
@@ -2341,7 +2347,9 @@ class MainWindow(QMainWindow):
             return False
         if worker.isRunning():
             return False
-        self.live_worker = None
+        if self.live_worker is worker:
+            self.live_worker = None
+        self._delete_worker_later(worker)
         if update_label and hasattr(self, "live_status_label"):
             self.live_status_label.setText("Live 정지")
         if self.app_state == AppRunState.LIVE_PREVIEW:
@@ -2362,9 +2370,8 @@ class MainWindow(QMainWindow):
         self.apply_state(AppRunState.ERROR)
         return True
 
-    def on_live_frame_available(self) -> None:
-        worker = self.live_worker
-        if worker is None:
+    def on_live_frame_available(self, worker: LivePreviewWorker) -> None:
+        if worker is not self.live_worker:
             return
         frame = worker.take_latest_frame()
         if frame is None:
@@ -2427,7 +2434,7 @@ class MainWindow(QMainWindow):
             live_dir = Path(os.path.expandvars(os.path.expanduser(output_root))) / "live_captures"
             live_dir.mkdir(parents=True, exist_ok=True)
             image_path = live_dir / f"live_{safe_timestamp()}.png"
-            if not pixmap.copy().save(str(image_path), "PNG"):
+            if not pixmap.save(str(image_path), "PNG"):
                 raise OSError(f"PNG 저장 실패: {image_path}")
         except Exception as exc:
             QMessageBox.warning(self, "Live 캡처 실패", str(exc))
@@ -2463,7 +2470,13 @@ class MainWindow(QMainWindow):
         self.capture_results_model.append_capture(values, str(image_path), record)
         self.preview_tabs.setCurrentIndex(0)
 
-    def on_live_failed(self, message: str) -> None:
+    def on_live_status_changed(self, worker: LivePreviewWorker, message: str) -> None:
+        if worker is self.live_worker:
+            self.live_status_label.setText(message)
+
+    def on_live_failed(self, worker: LivePreviewWorker, message: str) -> None:
+        if worker is not self.live_worker:
+            return
         self.live_status_label.setText("Live 오류")
         self.preview_label.setText(f"Live preview 오류\n{message}")
         if "pylon" in message.lower():
@@ -2471,11 +2484,11 @@ class MainWindow(QMainWindow):
         self.log(f"Live preview 오류: {message}")
         self.apply_state(AppRunState.ERROR)
 
-    def on_live_finished(self) -> None:
-        worker = self.live_worker or self.sender()
-        self.live_worker = None
+    def on_live_finished(self, worker: LivePreviewWorker) -> None:
+        if self.live_worker is worker:
+            self.live_worker = None
         self._delete_worker_later(worker)
-        if self.app_state == AppRunState.LIVE_PREVIEW:
+        if self.live_worker is None and self.app_state == AppRunState.LIVE_PREVIEW:
             self.apply_ambient_state()
 
     def check_for_updates(self, silent: bool = False) -> None:
@@ -2560,10 +2573,8 @@ class MainWindow(QMainWindow):
             self.update_status_label.setText(f"다운로드 {_number_text(received / (1024 * 1024))} MB")
 
     def on_update_download_done(self, path: str) -> None:
-        self.update_status_label.setText("업데이트 실행")
-        QMessageBox.information(self, "업데이트", "검증이 완료되었습니다. 설치 프로그램을 실행하고 앱을 종료합니다.")
-        os.startfile(path)
-        QApplication.quit()
+        self.pending_update_installer_path = Path(path)
+        self.update_status_label.setText("업데이트 검증 완료")
 
     def on_update_download_failed(self, message: str) -> None:
         self.update_status_label.setText("업데이트 실패")
@@ -2574,6 +2585,19 @@ class MainWindow(QMainWindow):
         self.update_download_worker = None
         self._delete_worker_later(worker)
         self.apply_ambient_state()
+        if self.pending_update_installer_path is not None:
+            QMessageBox.information(
+                self,
+                "업데이트",
+                "검증이 완료되었습니다. 백그라운드 작업을 안전하게 정리한 뒤 설치 프로그램을 실행합니다.",
+            )
+            QTimer.singleShot(0, self._close_for_pending_update)
+
+    def _close_for_pending_update(self) -> None:
+        if self.pending_update_installer_path is None:
+            return
+        if not self.close():
+            QTimer.singleShot(2000, self._close_for_pending_update)
 
     def run_diagnostics(self) -> None:
         if self.diagnostics_worker is not None and self.diagnostics_worker.isRunning():
@@ -2667,7 +2691,7 @@ class MainWindow(QMainWindow):
             encoding="utf-8",
         )
         self.config_path = Path(path)
-        self.config = config
+        self.config = _config_without_embedded_positions(config)
         self.log(f"설정 저장됨: {path}")
 
     def add_position_row(self, point: ScanPoint | None = None, update_feedback: bool = True) -> None:
@@ -2870,11 +2894,35 @@ class MainWindow(QMainWindow):
         self.send_laser_percent_from_ui(0)
 
     def send_laser_percent_from_ui(self, percent: int) -> None:
-        if self.laser_worker is not None:
-            self.laser_status_label.setText("이전 레이저 명령 정리 중")
-            return
         try:
             percent = parse_laser_percent(percent)
+        except Exception as exc:
+            QMessageBox.warning(self, "레이저 설정 오류", str(exc))
+            return
+        self.pending_laser_percent = percent
+        self.flush_pending_laser_command()
+
+    def flush_pending_laser_command(self) -> None:
+        percent = self.pending_laser_percent
+        if percent is None:
+            return
+        if self.laser_worker is not None:
+            self.laser_status_label.setText(f"{percent}% 최신 명령 대기 중")
+            return
+
+        elapsed_ms = (time.monotonic() - self.last_laser_command_monotonic) * 1000.0
+        remaining_ms = LASER_COMMAND_MIN_INTERVAL_MS - elapsed_ms
+        if percent != 0 and self.last_laser_command_monotonic > 0 and remaining_ms > 0:
+            self.laser_status_label.setText(f"{percent}% 전송 대기 중")
+            self.laser_command_timer.start(max(1, int(math.ceil(remaining_ms))))
+            return
+
+        self.laser_command_timer.stop()
+        self.pending_laser_percent = None
+        self._start_laser_command(percent)
+
+    def _start_laser_command(self, percent: int) -> None:
+        try:
             config = self.build_config([], embed_positions=False)
             settings = laser_settings_from_config(config)
         except Exception as exc:
@@ -2889,6 +2937,7 @@ class MainWindow(QMainWindow):
             self.laser_worker.finished.connect(self.on_laser_command_finished)
             self.apply_ambient_state()
             self.laser_worker.start()
+            self.last_laser_command_monotonic = time.monotonic()
         except Exception as exc:
             self.laser_worker = None
             self.apply_ambient_state()
@@ -2914,6 +2963,7 @@ class MainWindow(QMainWindow):
         self.laser_worker = None
         self._delete_worker_later(worker)
         self.apply_ambient_state()
+        self.flush_pending_laser_command()
 
     def _set_laser_controls_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -3119,9 +3169,9 @@ class MainWindow(QMainWindow):
         dataset["output_root"] = self.output_root_edit.text() or "output/datasets"
         dataset["image_format"] = "png"
         dataset["save_numpy"] = self.save_numpy_check.isChecked()
-        dataset["metadata_formats"] = self._checked_formats(self.metadata_format_checks) or ["csv"]
-        dataset["summary_formats"] = self._checked_formats(self.summary_format_checks)
-        dataset["write_jsonl"] = "jsonl" in dataset["metadata_formats"]
+        dataset.pop("metadata_formats", None)
+        dataset.pop("summary_formats", None)
+        dataset.pop("write_jsonl", None)
         dataset.setdefault("manifest_detail", "summary")
 
         updates = config.setdefault("updates", {})
@@ -3140,8 +3190,8 @@ class MainWindow(QMainWindow):
         scan.setdefault("estimated_capture_overhead_s", DEFAULT_ESTIMATED_CAPTURE_OVERHEAD_S)
         scan.setdefault("estimated_npy_save_overhead_s", DEFAULT_ESTIMATED_NPY_SAVE_OVERHEAD_S)
         scan.setdefault("estimated_ui_capture_overhead_s", DEFAULT_ESTIMATED_UI_CAPTURE_OVERHEAD_S)
-        scan.setdefault("estimated_export_overhead_s", DEFAULT_ESTIMATED_EXPORT_OVERHEAD_S)
-        scan.setdefault("estimated_export_per_capture_s", DEFAULT_ESTIMATED_EXPORT_PER_CAPTURE_S)
+        scan.pop("estimated_export_overhead_s", None)
+        scan.pop("estimated_export_per_capture_s", None)
         if embed_positions:
             scan["positions"] = [_point_config_record(point) for point in resolved_points]
             scan["positions_file"] = None
@@ -3341,13 +3391,11 @@ class MainWindow(QMainWindow):
                 self._camera_parameter_summary(camera),
             )
         )
-        metadata_formats = ", ".join(str(item).upper() for item in dataset.get("metadata_formats", ["csv"]))
-        summary_formats = ", ".join(str(item).upper() for item in dataset.get("summary_formats", [])) or "없음"
         issues.append(
             PreflightIssue(
                 "출력 포맷",
                 "통과",
-                f"메타데이터 {metadata_formats} | 요약 {summary_formats}",
+                "촬영 로그 CSV | 실제 카메라 파라미터 포함",
             )
         )
         issues.append(
@@ -3477,7 +3525,8 @@ class MainWindow(QMainWindow):
             self.set_run_status("Live 정지 처리 중")
             return
         self.capture_results_model.clear()
-        self.pending_capture_rows = []
+        self.pending_capture_rows.clear()
+        self.pending_capture_seen = 0
         self.run_stats = RunStatsAccumulator()
         self.last_capture_record = None
         self.last_capture_image_path = ""
@@ -3489,8 +3538,7 @@ class MainWindow(QMainWindow):
             config,
             skip_home=self.skip_home_check.isChecked(),
         )
-        self.progress_bar.setRange(0, capture_total)
-        self.progress_bar.setValue(0)
+        self._set_capture_progress(0, capture_total)
         self.set_run_status("촬영 준비 중")
         self.start_run_timing(capture_total, duration_estimate.seconds, duration_estimate.capture_cumulative_s)
         self.apply_state(AppRunState.ACQUIRING)
@@ -3512,10 +3560,10 @@ class MainWindow(QMainWindow):
             output_root=self.output_root_edit.text(),
             skip_home=self.skip_home_check.isChecked(),
         )
-        self.worker.log_message.connect(self.log)
-        self.worker.status_changed.connect(self.queue_run_status)
-        self.worker.capture_done.connect(self.on_capture_done)
-        self.worker.progress_changed.connect(self.on_progress_changed)
+        worker = self.worker
+        worker.log_message.connect(self.log)
+        worker.status_available.connect(lambda worker=worker: self.on_acquisition_status_available(worker))
+        worker.capture_updates_available.connect(lambda worker=worker: self.on_capture_updates_available(worker))
         self.worker.run_failed.connect(self.on_run_failed)
         self.worker.run_done.connect(self.on_run_done)
         self.worker.finished.connect(self.on_worker_finished)
@@ -3533,10 +3581,22 @@ class MainWindow(QMainWindow):
         self.run_total_captures = total
         now = time.monotonic()
         if completed == total or now - self.last_progress_ui_monotonic >= 0.25:
-            self.progress_bar.setRange(0, total)
-            self.progress_bar.setValue(completed)
+            self._set_capture_progress(completed, total)
             self.update_run_timing_display()
             self.last_progress_ui_monotonic = now
+
+    def _set_capture_progress(self, completed: int, total: int) -> None:
+        completed = max(0, int(completed))
+        total = max(0, int(total))
+        if total <= QT_PROGRESS_MAX:
+            self.progress_bar.setRange(0, total)
+            self.progress_bar.setValue(min(completed, total))
+            return
+        self.progress_bar.setRange(0, LARGE_RUN_PROGRESS_SCALE)
+        scaled = (
+            LARGE_RUN_PROGRESS_SCALE if completed >= total else completed * LARGE_RUN_PROGRESS_SCALE // max(1, total)
+        )
+        self.progress_bar.setValue(scaled)
 
     def start_run_timing(
         self,
@@ -3573,7 +3633,10 @@ class MainWindow(QMainWindow):
         else:
             estimated_total_s = max(elapsed_s, self.run_estimated_total_s)
         remaining_s = max(0.0, estimated_total_s - elapsed_s)
-        finish_time = time.strftime("%H:%M:%S", time.localtime(time.time() + remaining_s))
+        try:
+            finish_time = time.strftime("%H:%M:%S", time.localtime(time.time() + remaining_s))
+        except (OSError, OverflowError, ValueError):
+            finish_time = "계산 범위 초과"
         self.progress_detail_label.setText(
             f"{completed}/{total} 완료 | 경과 {_duration_text(elapsed_s)} | "
             f"남은 {_duration_text(remaining_s)} | 예상 종료 {finish_time}"
@@ -3590,7 +3653,26 @@ class MainWindow(QMainWindow):
         self.run_started_monotonic = None
         self.run_capture_cumulative_estimates_s = ()
 
+    def on_acquisition_status_available(self, worker: AcquisitionWorker) -> None:
+        message = worker.take_latest_status()
+        if worker is self.worker and message:
+            self.queue_run_status(message)
+
+    def on_capture_updates_available(self, worker: AcquisitionWorker) -> None:
+        records, seen_count, stats, progress = worker.take_capture_updates()
+        if worker is not self.worker:
+            return
+        self.pending_capture_seen += max(0, seen_count - len(records))
+        self.run_stats.merge(stats)
+        for record in records:
+            self._queue_capture_for_ui(record, add_stats=False)
+        if progress is not None:
+            self.on_progress_changed(*progress)
+
     def on_capture_done(self, record: dict[str, Any]) -> None:
+        self._queue_capture_for_ui(record, add_stats=True)
+
+    def _queue_capture_for_ui(self, record: dict[str, Any], *, add_stats: bool) -> None:
         values = [
             str(record.get("index", "")),
             _capture_sequence_text(record),
@@ -3606,10 +3688,12 @@ class MainWindow(QMainWindow):
             _threshold_text(record),
             str(record.get("image_path", "")),
         ]
-        compact_record = dict(record)
+        compact_record = {field: record.get(field, "") for field in CAPTURE_UI_RECORD_FIELDS}
         image_path = str(record.get("absolute_image_path", "") or "")
         self.pending_capture_rows.append((values, image_path, compact_record))
-        self.run_stats.add_record(compact_record)
+        self.pending_capture_seen += 1
+        if add_stats:
+            self.run_stats.add_record(compact_record)
         self.last_capture_record = compact_record
         if image_path:
             self.last_capture_image_path = image_path
@@ -3617,14 +3701,17 @@ class MainWindow(QMainWindow):
             if self.current_image_path is None or now - self.last_preview_update_monotonic >= 2.0:
                 self.show_image(Path(image_path))
                 self.last_preview_update_monotonic = now
-        self.capture_ui_timer.start()
+        if not self.capture_ui_timer.isActive():
+            self.capture_ui_timer.start()
 
     def flush_capture_ui_updates(self) -> None:
         if not self.pending_capture_rows and self.last_capture_record is None:
             return
-        rows = self.pending_capture_rows
-        self.pending_capture_rows = []
-        self.capture_results_model.append_captures(rows)
+        rows = list(self.pending_capture_rows)
+        seen_count = self.pending_capture_seen
+        self.pending_capture_rows.clear()
+        self.pending_capture_seen = 0
+        self.capture_results_model.append_captures(rows, seen_count=seen_count)
         self.update_error_summary()
         if rows:
             self.captures_table.scrollToBottom()
@@ -3638,7 +3725,8 @@ class MainWindow(QMainWindow):
     def queue_run_status(self, message: str) -> None:
         self.pending_status_message = message
         if hasattr(self, "run_status_timer"):
-            self.run_status_timer.start()
+            if not self.run_status_timer.isActive():
+                self.run_status_timer.start()
         else:
             self.flush_run_status()
 
@@ -3657,6 +3745,10 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "실행 실패", message)
 
     def on_run_done(self, run_dir: str, stopped: bool) -> None:
+        worker = self.worker
+        if worker is not None:
+            self.on_acquisition_status_available(worker)
+            self.on_capture_updates_available(worker)
         self.pending_run_result = (run_dir, stopped)
         self.restart_live_after_worker = True
         self.logger.info(
@@ -3677,7 +3769,7 @@ class MainWindow(QMainWindow):
     def on_worker_finished(self) -> None:
         self.cleanup_finished_worker()
 
-    def cleanup_finished_worker(self) -> None:
+    def cleanup_finished_worker(self, *, allow_live_restart: bool = True) -> None:
         worker = self.worker
         if worker is None or worker.isRunning():
             return
@@ -3698,7 +3790,7 @@ class MainWindow(QMainWindow):
             self.apply_state(AppRunState.ERROR)
         else:
             self.apply_ambient_state()
-        if restart_live:
+        if restart_live and allow_live_restart:
             self.restart_live_preview_after_run()
 
     def restart_live_preview_after_run(self) -> None:
@@ -3743,12 +3835,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "이미지 없음", "전체화면으로 볼 이미지가 없습니다.")
             return
         try:
-            self.image_viewer = FullscreenImageWindow(self.current_image_path)
+            viewer = FullscreenImageWindow(self.current_image_path)
         except Exception as exc:
             QMessageBox.warning(self, "Fullscreen image", str(exc))
             self.image_viewer = None
             return
-        self.image_viewer.showFullScreen()
+        viewer.closed.connect(self._on_image_viewer_closed)
+        self.image_viewer = viewer
+        viewer.showFullScreen()
+
+    def _on_image_viewer_closed(self, viewer: object) -> None:
+        if viewer is self.image_viewer:
+            self.image_viewer = None
 
     def open_current_dataset(self) -> None:
         if self.current_run_dir and self.current_run_dir.exists():
@@ -3823,7 +3921,9 @@ class MainWindow(QMainWindow):
     def update_error_summary(self) -> None:
         if not hasattr(self, "error_summary_table"):
             return
-        self.error_chart.set_records(self.capture_results_model.records() if hasattr(self, "capture_results_model") else [])
+        self.error_chart.set_records(
+            self.capture_results_model.records() if hasattr(self, "capture_results_model") else []
+        )
         stats = self.run_stats
         if stats.predicted_max_error_um_count <= 0:
             fixed_budget = error_budget_from_config({})
@@ -3858,22 +3958,6 @@ class MainWindow(QMainWindow):
 
     def _set_error_summary_values(self, values: list[str]) -> None:
         _set_table_values(self.error_summary_table, values)
-
-    @staticmethod
-    def _checked_formats(checks: dict[str, QCheckBox]) -> list[str]:
-        return [name for name, check in checks.items() if check.isChecked()]
-
-    @staticmethod
-    def _set_format_checks(checks: dict[str, QCheckBox], selected: Any) -> None:
-        if isinstance(selected, str):
-            selected_set = {item.strip().lower().lstrip(".") for item in selected.split(",") if item.strip()}
-        else:
-            selected_set = {str(item).strip().lower().lstrip(".") for item in selected or []}
-        selected_set = {"yaml" if item == "yml" else item for item in selected_set}
-        if not selected_set:
-            selected_set = set(checks.keys())
-        for name, check in checks.items():
-            check.setChecked(name in selected_set)
 
     @staticmethod
     def _set_combo_text(combo: QComboBox, text: str) -> None:

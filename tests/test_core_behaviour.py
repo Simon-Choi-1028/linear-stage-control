@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import csv
 import json
 import lzma
 import os
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from linear_stage_control.camera import (
+    CAMERA_CAPTURE_PARAMETER_FIELDS,
     PYLON_IMPORT_ERROR,
     BaslerCamera,
     apply_camera_orientation,
@@ -28,16 +31,12 @@ from linear_stage_control.dataset import (
     point_name,
     validate_image_output_plan,
 )
-from linear_stage_control.dataset_exports import (
-    DEFAULT_METADATA_FORMATS,
-    SUPPORTED_METADATA_FORMATS,
-    normalise_formats,
-)
 from linear_stage_control.disk_writer import AsyncCaptureDiskWriter, CaptureDiskWriteJob
 from linear_stage_control.error_model import ErrorBudgetSettings, estimate_position_error_um
 from linear_stage_control.exceptions import DatasetWriteError, StageConnectionError
 from linear_stage_control.position_validation import disabled_axis_variation_errors, validate_scan_points
 from linear_stage_control.scan import (
+    ScanPoint,
     linear_path_points,
     linear_path_points_by_spacing,
     points_from_config,
@@ -270,6 +269,80 @@ class CameraCompatibilityTests(unittest.TestCase):
         self.assertTrue(settings.flip_horizontal)
         self.assertTrue(settings.flip_vertical)
 
+    def test_capture_parameter_snapshot_uses_actual_camera_readbacks(self) -> None:
+        class Feature:
+            def __init__(self, value: object, *, fail: bool = False):
+                self.value = value
+                self.fail = fail
+
+            def GetValue(self) -> object:
+                if self.fail:
+                    raise RuntimeError("unreadable")
+                return self.value
+
+        class DeviceInfo:
+            def GetModelName(self) -> str:
+                return "Actual ace 2"
+
+            def GetSerialNumber(self) -> str:
+                return "40123456"
+
+            def GetUserDefinedName(self) -> str:
+                return "Lab camera"
+
+            def GetDeviceClass(self) -> str:
+                return "BaslerGigE"
+
+        class Camera:
+            PixelFormat = Feature("Mono12")
+            ExposureTime = Feature(None, fail=True)
+            ExposureTimeAbs = Feature(4321.5)
+            Gain = Feature(2.25)
+            AcquisitionFrameRate = Feature(17.5)
+            Width = Feature(1920)
+            Height = Feature(1200)
+            OffsetX = Feature(8)
+            OffsetY = Feature(4)
+            TriggerMode = Feature("On")
+            TriggerSelector = Feature("FrameStart")
+            TriggerSource = Feature("Software")
+
+            def GetDeviceInfo(self) -> DeviceInfo:
+                return DeviceInfo()
+
+        camera = BaslerCamera(
+            camera_settings_from_config(
+                {
+                    "camera": {
+                        "pixel_format": "Mono8",
+                        "exposure_us": 5000,
+                        "output_pixel_format": "Mono16",
+                        "timeout_ms": 7000,
+                        "rotate_180": False,
+                        "flip_horizontal": True,
+                    }
+                }
+            )
+        )
+        camera.camera = Camera()
+
+        snapshot = camera.capture_parameter_snapshot()
+
+        self.assertEqual(set(snapshot), set(CAMERA_CAPTURE_PARAMETER_FIELDS))
+        self.assertEqual(snapshot["camera_model_name"], "Actual ace 2")
+        self.assertEqual(snapshot["camera_serial_number"], "40123456")
+        self.assertEqual(snapshot["camera_pixel_format"], "Mono12")
+        self.assertEqual(snapshot["camera_exposure_us"], 4321.5)
+        self.assertEqual(snapshot["camera_gain"], 2.25)
+        self.assertEqual(snapshot["camera_acquisition_frame_rate_hz"], 17.5)
+        self.assertEqual(snapshot["camera_width_px"], 1920)
+        self.assertEqual(snapshot["camera_height_px"], 1200)
+        self.assertEqual(snapshot["camera_gamma"], "")
+        self.assertEqual(snapshot["camera_output_pixel_format"], "Mono16")
+        self.assertEqual(snapshot["camera_timeout_ms"], 7000)
+        self.assertFalse(snapshot["camera_rotate_180"])
+        self.assertTrue(snapshot["camera_flip_horizontal"])
+
     def test_camera_orientation_rotates_arrays_180_degrees(self) -> None:
         array = np.arange(12, dtype=np.uint8).reshape(3, 4)
 
@@ -299,6 +372,8 @@ class CameraCompatibilityTests(unittest.TestCase):
             "height": 4,
             "camera_timestamp_ns": 123,
             "block_id": 456,
+            "camera_pixel_format": "Mono12",
+            "camera_exposure_us": 4321.5,
         }
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "capture.png"
@@ -321,6 +396,8 @@ class CameraCompatibilityTests(unittest.TestCase):
             self.assertEqual(result.dtype, "uint8")
             self.assertEqual(result.shape, (4, 4))
             self.assertGreaterEqual(result.disk_write_duration_ms, 0.0)
+            self.assertEqual(result.camera_parameters["camera_pixel_format"], "Mono12")
+            self.assertEqual(result.camera_parameters["camera_exposure_us"], 4321.5)
             np.testing.assert_array_equal(np.load(npy_path), array)
 
     def test_original_capture_rejects_metadata_dimension_mismatch(self) -> None:
@@ -365,17 +442,6 @@ class CameraCompatibilityTests(unittest.TestCase):
         for output_format in ("Mono8", "Mono16", "RGB8", "BGR8"):
             camera = BaslerCamera(camera_settings_from_config({"camera": {"output_pixel_format": output_format}}))
             self.assertIsInstance(camera._output_pixel_type(), int)
-
-
-class ExportFormatTests(unittest.TestCase):
-    def test_normalise_formats_deduplicates_and_maps_yml(self) -> None:
-        formats = normalise_formats(
-            "csv, jsonl, yml, csv",
-            DEFAULT_METADATA_FORMATS,
-            SUPPORTED_METADATA_FORMATS,
-        )
-
-        self.assertEqual(formats, ("csv", "jsonl", "yaml"))
 
 
 class ProcessGuardTests(unittest.TestCase):
@@ -764,6 +830,17 @@ class UpdaterTests(unittest.TestCase):
         self.assertFalse(is_newer_version("v0.1.0", "0.1.1"))
         self.assertTrue(verify_file_sha256(__file__, sha256_file(__file__)))
 
+    def test_project_package_and_changelog_versions_match(self) -> None:
+        from linear_stage_control import __version__
+
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        project_version = project["project"]["version"]
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+        self.assertEqual(__version__, project_version)
+        self.assertIn(f"## v{project_version} - ", changelog)
+
 
 class GuiSmokeTests(unittest.TestCase):
     def test_live_frame_updates_preview_without_hardware(self) -> None:
@@ -834,13 +911,75 @@ class GuiSmokeTests(unittest.TestCase):
             record = dict(base_record)
             record["index"] = index
             record["label"] = f"point_{index:06d}"
+            record["unused_camera_payload"] = "not retained by the UI"
             window.on_capture_done(record)
+        self.assertEqual(len(window.pending_capture_rows), 1000)
         window.flush_capture_ui_updates()
         app.processEvents()
 
         self.assertEqual(window.capture_results_model.total_seen, 20_000)
         self.assertLessEqual(window.captures_table.rowCount(), 1000)
         self.assertEqual(window.run_stats.record_count, 20_000)
+        self.assertNotIn(
+            "unused_camera_payload",
+            window.capture_results_model.record_at(window.captures_table.rowCount() - 1) or {},
+        )
+        window.close()
+
+    def test_acquisition_worker_coalesces_capture_status_and_large_progress_updates(self) -> None:
+        from linear_stage_control.gui_workers import AcquisitionWorker
+
+        QApplication.instance() or QApplication([])
+        worker = AcquisitionWorker({}, [], Path("config.yaml"), "", False)
+        capture_wakes: list[bool] = []
+        status_wakes: list[bool] = []
+        worker.capture_updates_available.connect(lambda: capture_wakes.append(True))
+        worker.status_available.connect(lambda: status_wakes.append(True))
+        total = 25_000_000_000
+
+        for index in range(20_000):
+            worker._queue_capture_update(
+                {
+                    "status": "ok",
+                    "index": index,
+                    "predicted_max_error_um": 1.5,
+                    "within_error_threshold": True,
+                },
+                progress=(index + 1, total),
+            )
+            worker._queue_status(f"capture {index}")
+
+        records, seen_count, stats, progress = worker.take_capture_updates()
+        self.assertEqual(capture_wakes, [True])
+        self.assertEqual(status_wakes, [True])
+        self.assertEqual(len(records), 1000)
+        self.assertEqual(records[0]["index"], 19_000)
+        self.assertEqual(records[-1]["index"], 19_999)
+        self.assertEqual(seen_count, 20_000)
+        self.assertEqual(stats.record_count, 20_000)
+        self.assertEqual(stats.predicted_max_error_um_count, 20_000)
+        self.assertEqual(progress, (20_000, total))
+        self.assertEqual(worker.take_latest_status(), "capture 19999")
+
+        worker._queue_capture_update({"status": "error", "index": 20_000})
+        worker._queue_status("next")
+        self.assertEqual(len(capture_wakes), 2)
+        self.assertEqual(len(status_wakes), 2)
+        worker.deleteLater()
+
+    def test_progress_bar_scales_totals_larger_than_qt_int_range(self) -> None:
+        from linear_stage_control.gui_app import LARGE_RUN_PROGRESS_SCALE, MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        total = 25_000_000_000
+
+        window._set_capture_progress(total // 2, total)
+        self.assertEqual(window.progress_bar.maximum(), LARGE_RUN_PROGRESS_SCALE)
+        self.assertEqual(window.progress_bar.value(), LARGE_RUN_PROGRESS_SCALE // 2)
+
+        window._set_capture_progress(total, total)
+        self.assertEqual(window.progress_bar.value(), LARGE_RUN_PROGRESS_SCALE)
         window.close()
 
     def test_rapid_preview_and_position_events_are_debounced(self) -> None:
@@ -958,6 +1097,91 @@ class GuiSmokeTests(unittest.TestCase):
         window.live_worker = None
         window.close()
 
+    def test_stale_live_finished_signal_does_not_release_replacement_worker(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        class FakeLiveWorker:
+            def __init__(self) -> None:
+                self.deleted = False
+
+            def deleteLater(self) -> None:
+                self.deleted = True
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        old_worker = FakeLiveWorker()
+        replacement_worker = FakeLiveWorker()
+        window.live_worker = replacement_worker  # type: ignore[assignment]
+
+        window.on_live_finished(old_worker)  # type: ignore[arg-type]
+        app.processEvents()
+
+        self.assertIs(window.live_worker, replacement_worker)
+        self.assertTrue(old_worker.deleted)
+        self.assertFalse(replacement_worker.deleted)
+        window.live_worker = None
+        window.close()
+
+    def test_laser_command_coalesces_to_latest_value_and_off_bypasses_delay(self) -> None:
+        import time
+
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        started: list[int] = []
+        window._start_laser_command = started.append  # type: ignore[method-assign]
+        window.laser_worker = object()  # type: ignore[assignment]
+
+        window.send_laser_percent_from_ui(10)
+        window.send_laser_percent_from_ui(20)
+        self.assertEqual(window.pending_laser_percent, 20)
+        self.assertEqual(started, [])
+
+        window.laser_worker = None
+        window.flush_pending_laser_command()
+        self.assertEqual(started, [20])
+
+        window.last_laser_command_monotonic = time.monotonic()
+        window.send_laser_percent_from_ui(0)
+        self.assertEqual(started, [20, 0])
+        self.assertIsNone(window.pending_laser_percent)
+        window.close()
+
+    def test_update_waits_for_worker_cleanup_and_confirmation_before_closing(self) -> None:
+        from linear_stage_control import gui_app
+        from linear_stage_control.gui_app import MainWindow
+
+        class FinishedUpdateWorker:
+            def __init__(self) -> None:
+                self.deleted = False
+
+            def deleteLater(self) -> None:
+                self.deleted = True
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        worker = FinishedUpdateWorker()
+        window.update_download_worker = worker  # type: ignore[assignment]
+        events: list[str] = []
+        original_information = gui_app.QMessageBox.information
+        gui_app.QMessageBox.information = lambda *_args, **_kwargs: events.append("confirmed")  # type: ignore[assignment]
+        window._close_for_pending_update = lambda: events.append("close")  # type: ignore[method-assign]
+        try:
+            window.on_update_download_done("C:/tmp/verified-setup.exe")
+            self.assertEqual(events, [])
+
+            window.on_update_download_finished()
+            app.processEvents()
+
+            self.assertEqual(events, ["confirmed", "close"])
+            self.assertTrue(worker.deleted)
+            self.assertIsNone(window.update_download_worker)
+        finally:
+            gui_app.QMessageBox.information = original_information
+            window.pending_update_installer_path = None
+            window.close()
+
     def test_live_preview_defaults_to_four_by_three_frame(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
@@ -995,11 +1219,12 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_acquisition_worker_reference_survives_run_done_until_finished(self) -> None:
         from linear_stage_control.gui_app import MainWindow
+        from linear_stage_control.gui_workers import AcquisitionWorker
 
         app = QApplication.instance() or QApplication([])
         window = MainWindow(start_device_scan=False)
-        worker = QThread()
-        window.worker = worker  # type: ignore[assignment]
+        worker = AcquisitionWorker({}, [], Path("config.yaml"), "", False)
+        window.worker = worker
         window.on_run_done("C:/tmp/run", False)
         app.processEvents()
 
@@ -1016,11 +1241,12 @@ class GuiSmokeTests(unittest.TestCase):
     def test_failed_run_restarts_live_only_after_worker_cleanup(self) -> None:
         from linear_stage_control import gui_app
         from linear_stage_control.gui_app import MainWindow
+        from linear_stage_control.gui_workers import AcquisitionWorker
 
         app = QApplication.instance() or QApplication([])
         window = MainWindow(start_device_scan=False)
-        worker = QThread()
-        window.worker = worker  # type: ignore[assignment]
+        worker = AcquisitionWorker({}, [], Path("config.yaml"), "", False)
+        window.worker = worker
         restart_calls: list[bool] = []
         original_critical = gui_app.QMessageBox.critical
         gui_app.QMessageBox.critical = lambda *args, **kwargs: None  # type: ignore[assignment]
@@ -1066,7 +1292,11 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(metadata["frame"], 3)
 
     def test_image_write_queue_size_can_disable_async_writes(self) -> None:
-        from linear_stage_control.gui_workers import _image_write_queue_size_from_config
+        from linear_stage_control.gui_workers import (
+            _image_write_queue_max_bytes_from_config,
+            _image_write_queue_needs_drain,
+            _image_write_queue_size_from_config,
+        )
 
         self.assertEqual(
             _image_write_queue_size_from_config({"dataset": {"async_image_writes": False}}),
@@ -1077,6 +1307,42 @@ class GuiSmokeTests(unittest.TestCase):
                 {"dataset": {"async_image_writes": True, "image_write_queue_size": 99}}
             ),
             8,
+        )
+        self.assertEqual(
+            _image_write_queue_max_bytes_from_config({"dataset": {"image_write_queue_max_mib": 128}}),
+            128 * 1024 * 1024,
+        )
+        self.assertEqual(
+            _image_write_queue_max_bytes_from_config({"dataset": {"image_write_queue_max_mib": 1}}),
+            16 * 1024 * 1024,
+        )
+        mib = 1024 * 1024
+        self.assertFalse(
+            _image_write_queue_needs_drain(
+                pending_count=0,
+                pending_bytes=0,
+                next_array_bytes=512 * mib,
+                queue_size=2,
+                max_bytes=256 * mib,
+            )
+        )
+        self.assertTrue(
+            _image_write_queue_needs_drain(
+                pending_count=1,
+                pending_bytes=200 * mib,
+                next_array_bytes=100 * mib,
+                queue_size=2,
+                max_bytes=256 * mib,
+            )
+        )
+        self.assertTrue(
+            _image_write_queue_needs_drain(
+                pending_count=2,
+                pending_bytes=2 * mib,
+                next_array_bytes=1 * mib,
+                queue_size=2,
+                max_bytes=256 * mib,
+            )
         )
 
     def test_responsive_layout_allows_narrow_and_short_windows(self) -> None:
@@ -1138,6 +1404,10 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(config["camera"]["rotate_180"])
         self.assertFalse(config["camera"]["flip_horizontal"])
         self.assertFalse(config["camera"]["flip_vertical"])
+        self.assertEqual(window.capture_log_format_label.text(), "CSV (카메라 파라미터 포함)")
+        self.assertNotIn("metadata_formats", config["dataset"])
+        self.assertNotIn("summary_formats", config["dataset"])
+        self.assertNotIn("write_jsonl", config["dataset"])
         self.assertEqual(config["laser"]["baud_rate"], 9600)
         self.assertEqual(config["laser"]["percent"], 0)
 
@@ -1159,6 +1429,34 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIs(window.camera_flip_horizontal_check.parentWidget(), window.live_orientation_bar)
         self.assertIs(window.camera_flip_vertical_check.parentWidget(), window.live_orientation_bar)
         window.close()
+
+    def test_saved_config_keeps_positions_on_disk_but_not_in_window_memory(self) -> None:
+        from linear_stage_control import gui_app
+        from linear_stage_control.config import load_config
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        window.set_positions(
+            [
+                ScanPoint(index=1, x_mm=1.0, y_mm=2.0),
+                ScanPoint(index=2, x_mm=3.0, y_mm=4.0),
+            ]
+        )
+        original_dialog = gui_app.QFileDialog.getSaveFileName
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "saved.yaml"
+                gui_app.QFileDialog.getSaveFileName = lambda *_args, **_kwargs: (str(path), "")  # type: ignore[assignment]
+
+                window.save_config_dialog()
+
+                saved = load_config(path)
+                self.assertEqual(len(saved["scan"]["positions"]), 2)
+                self.assertNotIn("positions", window.config["scan"])
+        finally:
+            gui_app.QFileDialog.getSaveFileName = original_dialog
+            window.close()
 
     def test_manual_home_moves_to_center_at_fixed_velocity(self) -> None:
         from linear_stage_control import gui_workers
@@ -1255,6 +1553,131 @@ class GuiSmokeTests(unittest.TestCase):
             window.manual_stage_worker = None
             window.close()
             app.processEvents()
+
+    def test_close_is_deferred_while_camera_discovery_thread_is_running(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        class StuckCameraWorker:
+            def isRunning(self) -> bool:
+                return True
+
+            def wait(self, _timeout_ms: int) -> bool:
+                return False
+
+        class CloseEvent:
+            def __init__(self) -> None:
+                self.ignored = False
+
+            def ignore(self) -> None:
+                self.ignored = True
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        event = CloseEvent()
+        window.camera_scan_worker = StuckCameraWorker()  # type: ignore[assignment]
+        window.capture_ui_timer.start()
+        window.run_status_timer.start()
+
+        window.closeEvent(event)
+        app.processEvents()
+
+        self.assertTrue(event.ignored)
+        self.assertTrue(window.capture_ui_timer.isActive())
+        self.assertTrue(window.run_status_timer.isActive())
+        window.camera_scan_worker = None
+        window.close()
+
+    def test_deferred_close_preserves_acquisition_lifecycle_until_finished_signal(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        class StoppedAcquisitionWorker:
+            def __init__(self) -> None:
+                self.running = True
+                self.deleted = False
+
+            def isRunning(self) -> bool:
+                return self.running
+
+            def request_stop(self) -> None:
+                return
+
+            def wait(self, _timeout_ms: int) -> bool:
+                self.running = False
+                return True
+
+            def deleteLater(self) -> None:
+                self.deleted = True
+
+            def take_latest_status(self) -> str:
+                return ""
+
+            def take_capture_updates(self) -> tuple[list[dict[str, object]], int, object, None]:
+                from linear_stage_control.run_stats import RunStatsAccumulator
+
+                return [], 0, RunStatsAccumulator(), None
+
+        class StuckCameraWorker:
+            def isRunning(self) -> bool:
+                return True
+
+            def wait(self, _timeout_ms: int) -> bool:
+                return False
+
+        class CloseEvent:
+            def __init__(self) -> None:
+                self.ignored = False
+
+            def ignore(self) -> None:
+                self.ignored = True
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        worker = StoppedAcquisitionWorker()
+        event = CloseEvent()
+        window.worker = worker  # type: ignore[assignment]
+        window.camera_scan_worker = StuckCameraWorker()  # type: ignore[assignment]
+
+        window.closeEvent(event)  # type: ignore[arg-type]
+        app.processEvents()
+
+        self.assertTrue(event.ignored)
+        self.assertIs(window.worker, worker)
+        self.assertFalse(worker.deleted)
+
+        window.camera_scan_worker = None
+        window.on_run_done("C:/tmp/run", True)
+        window.on_worker_finished()
+        app.processEvents()
+
+        self.assertIsNone(window.worker)
+        self.assertTrue(worker.deleted)
+        self.assertIsNone(window.pending_run_result)
+        window.close()
+
+    def test_closed_fullscreen_viewer_releases_main_window_reference(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "preview.png"
+            pixmap = QPixmap(16, 12)
+            pixmap.fill(QColor("#2f80ed"))
+            self.assertTrue(pixmap.save(str(image_path)))
+            window.current_image_path = image_path
+
+            window.open_fullscreen_image()
+            viewer = window.image_viewer
+            self.assertIsNotNone(viewer)
+            assert viewer is not None
+            self.assertTrue(viewer.testAttribute(Qt.WA_DeleteOnClose))
+
+            viewer.close()
+            app.processEvents()
+
+            self.assertIsNone(window.image_viewer)
+            self.assertTrue(viewer.original_pixmap.isNull())
+        window.close()
 
     def test_app_state_centralizes_button_enablement(self) -> None:
         from linear_stage_control.app_state import AppRunState
@@ -1402,15 +1825,35 @@ class GuiSmokeTests(unittest.TestCase):
 
         estimate = estimate_run_duration(points, config)
 
-        self.assertAlmostEqual(estimate.seconds, 13.22, places=6)
+        self.assertAlmostEqual(estimate.seconds, 12.68, places=6)
         self.assertEqual(len(estimate.capture_cumulative_s), 2)
-        self.assertLess(estimate.capture_cumulative_s[-1], estimate.seconds)
+        self.assertAlmostEqual(estimate.capture_cumulative_s[-1], estimate.seconds, places=6)
         self.assertIn("준비 2초", estimate.detail)
         self.assertIn("원점 8초", estimate.detail)
         self.assertIn("안정화 0.4초", estimate.detail)
         self.assertIn("위치 0.2초", estimate.detail)
         self.assertIn("저장/UI 0.76초", estimate.detail)
-        self.assertIn("종료 0.54초", estimate.detail)
+        self.assertNotIn("종료", estimate.detail)
+
+    def test_run_duration_estimate_does_not_allocate_per_capture_for_large_runs(self) -> None:
+        from linear_stage_control.gui_app import estimate_run_duration
+
+        point = ScanPoint(index=1, x_mm=1.0, y_mm=1.0, capture_count=50_001)
+        config = {
+            "camera": {"exposure_us": 1_000},
+            "scan": {"default_capture_count": 1},
+            "stage": {
+                "serial_port": "COM_TEST",
+                "home_on_start": False,
+                "settle_s": 0.0,
+                "move_velocity_mm_s": 10,
+            },
+        }
+
+        estimate = estimate_run_duration([point], config)
+
+        self.assertEqual(estimate.capture_cumulative_s, ())
+        self.assertGreater(estimate.seconds, 0)
 
     def test_run_timing_display_scales_remaining_from_phase_plan(self) -> None:
         import time
@@ -1428,6 +1871,25 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertIn("남은 5초", window.progress_detail_label.text())
         window.close()
+
+    def test_run_timing_handles_finish_times_outside_platform_range(self) -> None:
+        from linear_stage_control import gui_app
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        original_localtime = gui_app.time.localtime
+
+        def out_of_range(_timestamp: float) -> object:
+            raise OSError(22, "Invalid argument")
+
+        gui_app.time.localtime = out_of_range  # type: ignore[assignment]
+        try:
+            window.start_run_timing(25_000_000_000, 100_000_000_000.0)
+            self.assertIn("계산 범위 초과", window.progress_detail_label.text())
+        finally:
+            gui_app.time.localtime = original_localtime
+            window.close()
 
     def test_preview_zoom_grid_and_cross_render_without_hardware(self) -> None:
         from linear_stage_control.gui_app import MainWindow
@@ -1514,6 +1976,23 @@ class DatasetNamingTests(unittest.TestCase):
         self.assertEqual(settings.metadata_flush_records, 25)
         self.assertEqual(settings.metadata_flush_interval_s, 0.5)
 
+    def test_legacy_metadata_config_is_ignored_by_csv_only_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = dataset_settings_from_config(
+                {
+                    "dataset": {
+                        "output_root": directory,
+                        "write_jsonl": True,
+                        "metadata_formats": ["csv", "jsonl", "json", "tsv", "yaml", "xlsx"],
+                        "summary_formats": ["json", "yaml", "md"],
+                    }
+                }
+            )
+
+        self.assertFalse(hasattr(settings, "write_jsonl"))
+        self.assertFalse(hasattr(settings, "metadata_formats"))
+        self.assertFalse(hasattr(settings, "summary_formats"))
+
     def test_point_name_uses_truncated_decimal_xy(self) -> None:
         first = points_from_records([{"label": "sample a", "x_mm": "33.3339", "y_mm": "0.0009"}])[0]
         second = points_from_records([{"label": "sample b", "x_mm": "0.5", "y_mm": "210"}])[0]
@@ -1530,7 +2009,7 @@ class DatasetNamingTests(unittest.TestCase):
                     {"label": "sample b", "x_mm": "33.3339", "y_mm": "0"},
                 ]
             )
-            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+            settings = DatasetSettings(output_root=Path(directory))
 
             with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
                 first = dataset.image_path(points[0], "20260528T153012_123456+0900", 1)
@@ -1541,6 +2020,18 @@ class DatasetNamingTests(unittest.TestCase):
             self.assertEqual(second_capture.name, "X033.333_Y000.000_C02.png")
             self.assertEqual(duplicate_point.name, "X033.333_Y000.000_P0002.png")
 
+    def test_image_name_plan_keeps_one_entry_per_point_for_large_capture_counts(self) -> None:
+        point = ScanPoint(index=1, x_mm=0.5, y_mm=0.0, capture_count=1_000_000)
+        dataset = DatasetRun(
+            DatasetSettings(output_root=Path(".")),
+            {"scan": {"default_capture_count": 1}},
+            [point],
+            "config.yaml",
+        )
+
+        self.assertEqual(dataset.image_name_stems, {1: "X000.500_Y000.000"})
+        self.assertEqual(dataset.image_path(point, "unused", 1_000_000).name, "X000.500_Y000.000_C1000000.png")
+
     def test_image_output_plan_allows_fractional_duplicate_and_multi_capture_names(self) -> None:
         points = points_from_records(
             [
@@ -1550,10 +2041,20 @@ class DatasetNamingTests(unittest.TestCase):
         )
         self.assertEqual(validate_image_output_plan(points), [])
 
+    def test_image_output_plan_rejects_duplicate_point_indexes(self) -> None:
+        points = [
+            ScanPoint(index=7, x_mm=0.0, y_mm=0.0),
+            ScanPoint(index=7, x_mm=1.0, y_mm=1.0),
+        ]
+
+        errors = validate_image_output_plan(points)
+
+        self.assertEqual(errors, ["Duplicate point index in image output plan: 7."])
+
     def test_dataset_open_accepts_fractional_image_output_plan(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             point = points_from_records([{"x_mm": "0.5", "y_mm": "0"}])[0]
-            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+            settings = DatasetSettings(output_root=Path(directory))
 
             with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml") as dataset:
                 image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
@@ -1563,7 +2064,7 @@ class DatasetNamingTests(unittest.TestCase):
     def test_dataset_manifest_includes_version_record_count_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             point = points_from_records([{"label": "sample a", "x_mm": "0", "y_mm": "0"}])[0]
-            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"), manifest_detail="full")
+            settings = DatasetSettings(output_root=Path(directory), manifest_detail="full")
 
             with DatasetRun(settings, {"dataset": {}}, [point], "config.yaml") as dataset:
                 image_path = dataset.image_path(point, "20260528T153012_123456+0900", 1)
@@ -1599,26 +2100,63 @@ class DatasetNamingTests(unittest.TestCase):
             points = points_from_records(
                 [{"label": f"sample {index}", "x_mm": str(index / 1000), "y_mm": "0"} for index in range(50)]
             )
-            settings = DatasetSettings(output_root=Path(directory), metadata_formats=("csv", "jsonl"))
+            settings = DatasetSettings(output_root=Path(directory))
 
             with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
                 for point in points:
                     record = base_capture_record(dataset.run_id, point)
                     record.update({"status": "ok", "capture_index": 1, "capture_count": 1})
                     dataset.write_capture(record)
-                self.assertEqual(dataset.records, [])
-                self.assertEqual(dataset.stats.record_count, 50)
+                self.assertEqual(len(dataset.image_name_stems), len(points))
+                self.assertEqual(dataset.record_count, 50)
                 run_dir = dataset.run_dir
 
             manifest = json.loads((run_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
-            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["record_count"], 50)
             self.assertNotIn("files", manifest)
-            self.assertEqual(summary["record_count"], 50)
+            self.assertEqual(manifest["metadata_format"], "csv")
+            self.assertEqual(manifest["metadata_files"], {"csv": "captures.csv"})
+            self.assertEqual(manifest["summary_files"], {})
+            self.assertFalse((run_dir / "summary.json").exists())
 
-    def test_timing_fields_are_exported_and_summarized(self) -> None:
+    def test_capture_csv_includes_camera_parameters_used_for_the_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            point = points_from_records([{"label": "sample", "x_mm": "1", "y_mm": "2"}])[0]
+            settings = DatasetSettings(output_root=Path(directory))
+
+            with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, [point], "config.yaml") as dataset:
+                record = base_capture_record(dataset.run_id, point)
+                record.update(
+                    {
+                        "status": "ok",
+                        "capture_index": 1,
+                        "capture_count": 1,
+                        "camera_pixel_format": "Mono12",
+                        "camera_exposure_us": 4321.5,
+                        "camera_gain": 2.25,
+                        "camera_width_px": 1920,
+                        "camera_height_px": 1200,
+                        "camera_trigger_source": "Software",
+                    }
+                )
+                dataset.write_capture(record)
+                csv_path = dataset.csv_path
+
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(set(CAMERA_CAPTURE_PARAMETER_FIELDS).issubset(reader.fieldnames or []))
+            self.assertEqual(rows[0]["camera_pixel_format"], "Mono12")
+            self.assertEqual(rows[0]["camera_exposure_us"], "4321.5")
+            self.assertEqual(rows[0]["camera_gain"], "2.25")
+            self.assertEqual(rows[0]["camera_width_px"], "1920")
+            self.assertEqual(rows[0]["camera_height_px"], "1200")
+            self.assertEqual(rows[0]["camera_trigger_source"], "Software")
+
+    def test_timing_fields_remain_in_capture_csv_schema(self) -> None:
         from linear_stage_control.dataset import CAPTURE_FIELDS
-        from linear_stage_control.dataset_exports import RunStatsAccumulator
 
         point = points_from_records([{"x_mm": 0, "y_mm": 0}])[0]
         record = base_capture_record("run", point)
@@ -1633,40 +2171,73 @@ class DatasetNamingTests(unittest.TestCase):
             self.assertIn(field, CAPTURE_FIELDS)
             self.assertIn(field, record)
 
+    def test_run_stats_keeps_only_constant_memory_gui_error_summary_values(self) -> None:
+        from linear_stage_control.run_stats import RunStatsAccumulator
+
         stats = RunStatsAccumulator()
         stats.add_record(
             {
                 "status": "ok",
-                "capture_duration_ms": 12.5,
-                "disk_write_duration_ms": 4.5,
+                "predicted_max_error_um": 12.5,
+                "within_error_threshold": False,
             }
         )
-        summary = stats.as_summary(run_id="run", status="complete", point_count=1)
+        stats.add_record({"status": "error", "error_message": "not retained"})
 
-        self.assertEqual(summary["capture_duration_ms_mean"], 12.5)
-        self.assertEqual(summary["disk_write_duration_ms_mean"], 4.5)
+        self.assertEqual(stats.record_count, 2)
+        self.assertEqual(stats.predicted_max_error_um_count, 1)
+        self.assertEqual(stats.predicted_max_error_um_sum, 12.5)
+        self.assertEqual(stats.predicted_max_error_um_max, 12.5)
+        self.assertEqual(stats.threshold_failure_count, 1)
+        self.assertFalse(hasattr(stats, "error_messages"))
 
-    def test_heavy_metadata_exports_are_generated_from_jsonl_stream(self) -> None:
+    def test_legacy_export_requests_still_produce_only_capture_csv(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             points = points_from_records(
                 [{"label": f"sample {index}", "x_mm": str(index / 1000), "y_mm": "0"} for index in range(3)]
             )
-            settings = DatasetSettings(
-                output_root=Path(directory),
-                metadata_formats=("csv", "jsonl", "json", "tsv", "yaml", "xlsx"),
-            )
+            config = {
+                "dataset": {
+                    "write_jsonl": True,
+                    "metadata_formats": ["csv", "jsonl", "json", "tsv", "yaml", "xlsx"],
+                    "summary_formats": ["json", "yaml", "md"],
+                },
+                "scan": {
+                    "default_capture_count": 1,
+                    "estimated_export_overhead_s": 0.5,
+                    "estimated_export_per_capture_s": 0.02,
+                },
+            }
+            settings = dataset_settings_from_config(config, output_override=directory)
 
-            with DatasetRun(settings, {"scan": {"default_capture_count": 1}}, points, "config.yaml") as dataset:
+            with DatasetRun(settings, config, points, "config.yaml") as dataset:
                 for point in points:
                     record = base_capture_record(dataset.run_id, point)
                     record.update({"status": "ok", "capture_index": 1, "capture_count": 1})
                     dataset.write_capture(record)
                 run_dir = dataset.run_dir
 
-            self.assertEqual(len(json.loads((run_dir / "captures.json").read_text(encoding="utf-8"))), 3)
-            self.assertTrue((run_dir / "captures.tsv").exists())
-            self.assertTrue((run_dir / "captures.yaml").exists())
-            self.assertTrue((run_dir / "captures.xlsx").exists())
+            with (run_dir / "captures.csv").open(newline="", encoding="utf-8") as handle:
+                self.assertEqual(len(list(csv.DictReader(handle))), 3)
+            self.assertFalse(hasattr(settings, "write_jsonl"))
+            self.assertFalse(hasattr(settings, "metadata_formats"))
+            self.assertFalse(hasattr(settings, "summary_formats"))
+            config_snapshot = (run_dir / "config.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("metadata_formats", config_snapshot)
+            self.assertNotIn("summary_formats", config_snapshot)
+            self.assertNotIn("write_jsonl", config_snapshot)
+            self.assertNotIn("estimated_export_", config_snapshot)
+            for filename in (
+                "captures.jsonl",
+                "captures.json",
+                "captures.tsv",
+                "captures.yaml",
+                "captures.xlsx",
+                "summary.json",
+                "summary.yaml",
+                "summary.md",
+            ):
+                self.assertFalse((run_dir / filename).exists(), filename)
 
 
 class DiagnosticsTests(unittest.TestCase):

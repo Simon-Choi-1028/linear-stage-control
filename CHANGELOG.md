@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.1.12 - 2026-07-23
+
+- Fixed acquisition metadata output to a single streamed `captures.csv` file and removed selectable JSONL/JSON/TSV/YAML/XLSX and summary exports from the GUI workflow.
+- Added per-capture camera identity, GenICam parameter readbacks, trigger settings, and image orientation settings to `captures.csv`.
+- Removed the legacy export module, unused compatibility fields, and the unused `python-dotenv` dependency; reduced dataset statistics and image-name planning to constant memory per run and O(point count), respectively.
+- Bounded large-run ETA checkpoints, capture UI batching, asynchronous image-write memory, fullscreen rendering, and linear-path preview sampling to prevent oversized allocations.
+- Reduced preview image copies and hardened live-preview, update, camera-discovery, and laser worker lifecycles against stale signals, orphaned `QThread` objects, and rapid-command buildup.
+- Hardened release publishing so exact versioned changelog notes and manifest-verified assets are required before publication.
 
 ## v0.1.11 - 2026-07-07
 

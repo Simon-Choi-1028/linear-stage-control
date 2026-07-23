@@ -26,6 +26,76 @@ def _wait_for(condition, app: QApplication, timeout_ms: int = 3000) -> bool:
 
 
 class ExperimentProcessingTests(unittest.TestCase):
+    def test_large_linear_path_preview_is_sampled_without_materializing_all_points(self) -> None:
+        from linear_stage_control.linear_path_dialog import (
+            LINEAR_PATH_PREVIEW_MAX_POINTS,
+            _count_path_preview,
+            _spacing_path_preview,
+        )
+
+        count_points, count = _count_path_preview(
+            x_start=0.0,
+            y_start=0.0,
+            x_stop=210.0,
+            y_stop=105.0,
+            count=250_000,
+        )
+        self.assertEqual(count, 250_000)
+        self.assertEqual(len(count_points), LINEAR_PATH_PREVIEW_MAX_POINTS)
+        self.assertEqual(count_points[0], (0.0, 0.0))
+        self.assertEqual(count_points[-1], (210.0, 105.0))
+
+        spacing_points, spacing_count = _spacing_path_preview(
+            x_start=0.0,
+            y_start=0.0,
+            x_stop=210.0,
+            y_stop=0.0,
+            spacing_mm=0.001,
+        )
+        self.assertEqual(spacing_count, 210_001)
+        self.assertEqual(len(spacing_points), LINEAR_PATH_PREVIEW_MAX_POINTS)
+        self.assertEqual(spacing_points[0], (0.0, 0.0))
+        self.assertEqual(spacing_points[-1], (210.0, 0.0))
+
+    def test_spacing_preview_count_matches_generator_at_rounding_boundary(self) -> None:
+        from linear_stage_control.linear_path_dialog import _spacing_path_preview
+        from linear_stage_control.scan import linear_path_points_by_spacing
+
+        length = 97.24465319429918
+        spacing = 0.0004795739728333083
+
+        _preview_points, preview_count = _spacing_path_preview(
+            x_start=0.0,
+            y_start=0.0,
+            x_stop=length,
+            y_stop=0.0,
+            spacing_mm=spacing,
+        )
+        generated_count = sum(
+            1
+            for _point in linear_path_points_by_spacing(
+                x_start=0.0,
+                y_start=0.0,
+                x_stop=length,
+                y_stop=0.0,
+                spacing_mm=spacing,
+            )
+        )
+
+        self.assertEqual(preview_count, 202_775)
+        self.assertEqual(generated_count, preview_count)
+
+    def test_fullscreen_scale_respects_render_pixel_budget(self) -> None:
+        from linear_stage_control.gui_widgets import (
+            MAX_FULLSCREEN_RENDER_PIXELS,
+            _bounded_fullscreen_size,
+        )
+
+        width, height, scale = _bounded_fullscreen_size(4000, 3000, 20.0)
+        self.assertLessEqual(width * height, MAX_FULLSCREEN_RENDER_PIXELS)
+        self.assertLess(scale, 20.0)
+        self.assertAlmostEqual(width / height, 4 / 3, places=3)
+
     def test_frame_source_validation_rejects_unsupported_or_huge_frames(self) -> None:
         from linear_stage_control.experiments.frame_sources import MAX_FRAME_PIXELS, validate_frame_array
 

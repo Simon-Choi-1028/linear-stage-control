@@ -33,11 +33,13 @@
 
 | 구분 | 다운로드 | 용도 | 포함 항목 |
 | --- | --- | --- | --- |
+| Online installer | [LinearStageControlSetup.exe](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControlSetup.exe) | 일반 Windows 설치 및 자동 업데이트 | 앱, Zaber Motion Library, Zaber Device Database |
+| Update manifest | [update_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/update_manifest.json) | 설치기 SHA256 검증 | 설치기 hash, 크기, 버전 |
 | Portable ZIP | [LinearStageControl-Portable.zip](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/LinearStageControl-Portable.zip) | 설치기 EXE 없이 압축 해제 후 실행 | 앱, Zaber Motion Library, Zaber Device Database |
 | Portable manifest | [portable_manifest.json](https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest/download/portable_manifest.json) | portable ZIP SHA256 검증 | ZIP 파일 hash, 크기, 진입점 |
 
-- Current public release: `v0.1.11`
-- Current local verification candidate: `v0.1.11`
+- Current public release: `v0.1.12`
+- Current local verification candidate: `v0.1.12`
 - Release notes: [CHANGELOG.md](CHANGELOG.md)
 - Basler pylon 다운로드: [pylon Software Suite](https://www.baslerweb.com/en-us/software/pylon-software-suite/)
 - Zaber SDK/도구 다운로드: [Zaber Software](https://www.zaber.com/software), [Zaber Motion Library Docs](https://software.zaber.com/motion-library/docs)
@@ -95,15 +97,15 @@ GUI 실행은 아래 명령을 사용합니다.
 python scripts\launch_gui.py
 ```
 
-GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접 입력, CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 위치 import, CSV export, 데이터셋 저장 위치 선택, 촬영 시작/중지, 촬영 이미지 미리보기, 캡처 목록 확인을 할 수 있습니다. 촬영 전 점검에는 준비, 원점 복귀, 이동, 위치 확인, 안정화, 촬영, 저장/UI, 종료 export를 포함한 예상 소요시간이 표시되고, 촬영 중에는 `진행` 영역에 연결, 원점 복귀, 위치 이동, 안정화 대기, 촬영, 저장 같은 현재 단계와 완료 개수, 경과 시간, 남은 시간, 예상 종료시각이 표시됩니다. 오른쪽 `촬영 목록`은 장시간 run 중 메모리를 보호하기 위해 최근 1,000개만 표시하며, 전체 기록은 run 폴더의 `captures.csv`와 `captures.jsonl`에 저장됩니다. 촬영된 이미지는 `촬영 목록`을 클릭하면 다시 볼 수 있고, 선택한 사진의 target/actual 위치와 um 단위 오차는 미리보기 아래의 표 칸에 나뉘어 표시됩니다.
+GUI는 한국어 UI로 구성되어 있으며 장비 새로고침, 위치 직접 입력, CSV/TSV/TXT/JSON/JSONL/YAML/XLSX 위치 import, CSV export, 데이터셋 저장 위치 선택, 촬영 시작/중지, 촬영 이미지 미리보기, 캡처 목록 확인을 할 수 있습니다. 촬영 전 점검에는 준비, 원점 복귀, 이동, 위치 확인, 안정화, 촬영, 저장/UI를 포함한 예상 소요시간이 표시되고, 촬영 중에는 `진행` 영역에 연결, 원점 복귀, 위치 이동, 안정화 대기, 촬영, 저장 같은 현재 단계와 완료 개수, 경과 시간, 남은 시간, 예상 종료시각이 표시됩니다. 오른쪽 `촬영 목록`은 장시간 run 중 메모리를 보호하기 위해 최근 1,000개만 표시하며, 전체 촬영 기록은 run 폴더의 `captures.csv` 하나에 연속 저장됩니다. 촬영된 이미지는 `촬영 목록`을 클릭하면 다시 볼 수 있고, 선택한 사진의 target/actual 위치와 um 단위 오차는 미리보기 아래의 표 칸에 나뉘어 표시됩니다.
 
 위치 테이블은 Zaber 210 mm XY 스테이지 이동 범위 기준으로 `0-210 mm`를 즉시 검사합니다. 각 행에는 `X`, `Y`뿐 아니라 선택 입력인 `속도 mm/s`, `캡쳐 수`를 넣을 수 있습니다. 속도나 캡쳐 수를 비우면 촬영 설정의 이동속도와 기본 캡쳐 수를 사용합니다. 범위를 벗어난 X/Y 셀은 빨간색, 중복 좌표나 빈 라벨 같은 확인 항목은 노란색으로 표시되며, 테이블 아래 상태 줄에 오류/경고 요약이 표시됩니다.
 
 `시작`을 누르면 촬영 전 점검 창이 먼저 열립니다. 이 창은 위치 범위, Basler 카메라 감지 여부, Zaber COM 포트, X/Y 축 매핑 중복, 저장 폴더 생성 가능 여부, 이동 속도, 촬영 설정, 고정 오차 기준을 한 번에 확인합니다. 오류가 있으면 시작 버튼이 비활성화되고, 경고만 있을 때는 사용자가 내용을 확인한 뒤 계속 진행할 수 있습니다.
 
-촬영 설정의 `메타데이터`, `요약`, `실행 옵션` 체크박스는 각각 별도 박스 안에 표시되어 다른 촬영 파라미터와 구분됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`, `좌우 반전`, `상하 반전`이 들어갑니다. 기본 메타데이터 출력은 run 중 스트리밍 저장되는 `captures.csv`, `captures.jsonl`이고, `captures.json`, `captures.tsv`, `captures.yaml`, `captures.xlsx`는 필요할 때 체크해서 post-run export로 생성합니다. 기본 요약 출력은 `summary.json`, `summary.yaml`, `summary.md`입니다.
+촬영 로그 형식은 `captures.csv`로 고정되어 GUI에서 다른 형식을 선택하지 않습니다. 각 캡처 행에는 위치·오차·시간 정보와 함께 카메라 모델/serial, PixelFormat, 노출, Gain, FrameRate, ROI, Gamma, Black Level, Binning/Decimation, trigger, 회전/반전 등 해당 프레임에 적용된 카메라 파라미터가 기록됩니다. 실행 옵션에는 `소프트웨어 트리거`, `NPY 저장`, `원점 복귀 생략`, `카메라 180도 반전`, `좌우 반전`, `상하 반전`이 들어갑니다.
 
-화면에 보이는 숫자는 불필요한 0을 줄여 표시합니다. mm 위치값은 최대 4자리, um 오차값은 최대 2자리까지만 보여주며, `captures.csv`와 `captures.jsonl`에는 계산 원본 값이 그대로 저장됩니다.
+화면에 보이는 숫자는 불필요한 0을 줄여 표시합니다. mm 위치값은 최대 4자리, um 오차값은 최대 2자리까지만 보여주며, `captures.csv`에는 계산 원본 값이 그대로 저장됩니다.
 
 창 폭이 좁아지면 좌우 분할 레이아웃이 위아래 배치로 자동 전환되며, 왼쪽 제어 영역은 스크롤 가능합니다. 이미지 미리보기는 `전체화면 보기` 버튼 또는 이미지 더블클릭으로 확대 창을 열 수 있고, 확대 창에서는 화면 맞춤, 100%, 확대, 축소를 사용할 수 있습니다.
 
@@ -175,7 +177,7 @@ calibration:
   max_allowed_um: 8.598418459
 ```
 
-GUI의 `Error` 탭에는 캡처별 오차 예측 범위가 캔들차트로 표시됩니다. 캔들의 wick은 `predicted_min_error_um`부터 `predicted_max_error_um`까지의 범위이고, body는 측정 radial error에서 최대 예측 오차까지의 구간입니다. 전체 최대/평균, 허용 한계, 제한값 초과 개수는 요약 표로 표시됩니다. `captures.csv`와 `captures.jsonl`에도 `measured_error_x_um`, `measured_error_y_um`, `measured_radial_error_um`, `predicted_min_error_um`, `predicted_max_error_um`, `predicted_x_min_um`, `predicted_x_max_um`, `predicted_y_min_um`, `predicted_y_max_um`, `within_error_threshold`가 저장됩니다.
+GUI의 `Error` 탭에는 캡처별 오차 예측 범위가 캔들차트로 표시됩니다. 캔들의 wick은 `predicted_min_error_um`부터 `predicted_max_error_um`까지의 범위이고, body는 측정 radial error에서 최대 예측 오차까지의 구간입니다. 전체 최대/평균, 허용 한계, 제한값 초과 개수는 요약 표로 표시됩니다. `captures.csv`에도 `measured_error_x_um`, `measured_error_y_um`, `measured_radial_error_um`, `predicted_min_error_um`, `predicted_max_error_um`, `predicted_x_min_um`, `predicted_x_max_um`, `predicted_y_min_um`, `predicted_y_max_um`, `within_error_threshold`가 저장됩니다.
 
 제조사 스펙은 사용자가 매번 조작할 값이 아니므로 왼쪽 제어 패널에는 상시 표시하지 않습니다. 필요한 경우 `오차` 탭의 `스펙 보기` 버튼에서 고정값 표를 확인할 수 있습니다.
 
@@ -195,8 +197,6 @@ scan:
   estimated_capture_overhead_s: 0.35
   estimated_npy_save_overhead_s: 0.15
   estimated_ui_capture_overhead_s: 0.03
-  estimated_export_overhead_s: 0.50
-  estimated_export_per_capture_s: 0.02
   positions:
     - label: origin
       x_mm: 0
@@ -231,19 +231,11 @@ GUI에서 위치 파일을 불러오면 같은 범위 검사가 즉시 적용됩
   manifest.json
   config.yaml
   captures.csv
-  captures.jsonl
-  captures.json        # optional
-  captures.tsv         # optional
-  captures.yaml        # optional
-  captures.xlsx        # optional
-  summary.json
-  summary.yaml
-  summary.md
   images/
     X000.000_Y000.000.png
 ```
 
-`captures.*`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 이미지 파일명은 기본적으로 `X000.000_Y000.000.png` 형태로 저장됩니다. X/Y는 소수점 3자리까지 반올림 없이 절삭되며, 같은 좌표에서 여러 장을 촬영하거나 중복 좌표가 있으면 `_C02`, `_P0002` 같은 suffix가 필요한 경우에만 붙습니다. `summary.*`에는 run 전체 성공/오류 개수, 최대/평균 오차, 한계 초과 개수, 오류 메시지가 저장되어 논문용 통계 처리나 실험 로그 정리에 바로 쓸 수 있습니다. `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 크기와 SHA256 hash가 저장됩니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
+`captures.csv`에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡쳐 순번, um 단위 오차 예측, 이동 시작/완료 timestamp, settle 완료 timestamp, capture 명령/완료 timestamp, 카메라 timestamp, 이미지 파일명과 경로가 기록됩니다. 각 행의 `camera_*` 열에는 캡처 직전에 실제 카메라에서 읽은 파라미터와 앱에서 적용한 trigger·회전·반전 설정이 함께 저장됩니다. 이미지 파일명은 기본적으로 `X000.000_Y000.000.png` 형태로 저장됩니다. X/Y는 소수점 3자리까지 반올림 없이 절삭되며, 같은 좌표에서 여러 장을 촬영하거나 중복 좌표가 있으면 `_C02`, `_P0002` 같은 suffix가 필요한 경우에만 붙습니다. `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 크기와 SHA256 hash가 저장됩니다. 기존 자동화와 호환되도록 같은 내용의 `manifest.json`도 함께 생성합니다.
 
 ## 원본 이미지
 
@@ -345,10 +337,11 @@ slim build는 Qt QML/Quick/PDF/VirtualKeyboard, Qt translations, pypylon DataPro
 dist/LinearStageControlSetup.exe
 ```
 
-기본 빌드는 online/slim installer입니다. `sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있어도 기본 Setup에는 포함하지 않으며, 새 PC에 pylon Runtime이 없으면 앱에서 장비 연결 실패 안내와 다운로드 버튼을 표시합니다. 릴리즈용 온라인/오프라인 설치본을 둘 다 만들 때는 아래 명령을 사용합니다.
+기본 빌드는 online/slim installer입니다. `sdk_downloads/installers/pylon_Runtime_26.04.1.exe`가 있어도 기본 Setup에는 포함하지 않으며, 새 PC에 pylon Runtime이 없으면 앱에서 장비 연결 실패 안내와 다운로드 버튼을 표시합니다. 기본 릴리즈용 online 설치본은 아래 명령으로 만듭니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1
+powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1 -SkipOffline
+powershell -ExecutionPolicy Bypass -File packaging\build_portable_release.ps1
 ```
 
 릴리즈 빌드 결과:
@@ -356,10 +349,19 @@ powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1
 ```text
 dist/LinearStageControlSetup.exe
 dist/LinearStageControlSetup-Online.exe
-dist/LinearStageControlSetup-Offline.exe
 dist/update_manifest.json
+dist/LinearStageControl-Portable.zip
+dist/portable_manifest.json
 ```
 
-`LinearStageControlSetup.exe`는 자동 업데이트가 사용하는 기본 온라인 설치본입니다. `LinearStageControlSetup-Offline.exe`는 Basler pylon Runtime installer까지 묶은 현장용 설치본입니다. 앱의 `업데이트 확인` 버튼은 public GitHub Release의 latest 버전을 확인하며, Release에는 기본 Setup과 `update_manifest.json`이 함께 있어야 합니다. 앱은 Setup을 다운로드한 뒤 SHA256 검증이 통과할 때만 설치 파일을 실행합니다.
+`LinearStageControlSetup.exe`는 자동 업데이트가 사용하는 기본 온라인 설치본입니다. 인터넷이 없는 현장용 offline 설치본이 필요할 때만 `-SkipOffline` 없이 installer 빌드를 실행합니다. 앱의 `업데이트 확인` 버튼은 public GitHub Release의 latest 버전을 확인하며, 앱은 Setup을 다운로드한 뒤 SHA256 검증이 통과할 때만 설치 파일을 실행합니다.
 
-GitHub Release 업로드는 사용자가 릴리즈를 승인한 뒤에만 실행하세요. 설치본을 빌드한 다음 `packaging\release_github.ps1 -Tag vX.Y.Z`를 사용하면 `LinearStageControlSetup.exe`, 선택적 offline installer, `update_manifest.json`을 GitHub Release asset으로 올릴 수 있습니다.
+GitHub Release 업로드 전에는 main을 push하고 동일 커밋에 `vX.Y.Z` 태그를 만들어 push합니다. 그 다음 dry-run에서 두 manifest의 버전·크기·SHA256을 확인하고 실제 업로드를 실행합니다.
+
+```powershell
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin main
+git push origin vX.Y.Z
+powershell -ExecutionPolicy Bypass -File packaging\release_github.ps1 -Tag vX.Y.Z -IncludePortable -DryRun
+powershell -ExecutionPolicy Bypass -File packaging\release_github.ps1 -Tag vX.Y.Z -IncludePortable
+```

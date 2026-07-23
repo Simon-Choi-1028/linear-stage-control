@@ -123,6 +123,7 @@ def main() -> None:
                     npy_path = dataset.npy_path(point, image_timestamp, capture_index)
                     capture = camera.capture_original_to(image_path, npy_path=npy_path)
 
+                    capture_record.update(capture.camera_parameters)
                     capture_record.update(
                         {
                             "status": "ok",

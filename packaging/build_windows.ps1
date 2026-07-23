@@ -58,6 +58,7 @@ $pyinstallerArgs = @(
   "--collect-all", "zaber_motion",
   "--collect-binaries", "zaber_motion_bindings",
   "--collect-submodules", "cv2",
+  "--hidden-import", "scipy._external.array_api_compat.numpy.fft",
   "--collect-submodules", "serial"
 )
 

@@ -977,6 +977,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertTrue(any(item.startswith("pyinstaller") for item in build_dependencies))
         self.assertIn('-e ".[build]"', build_script)
         self.assertNotIn('"--collect-all", "scipy"', build_script)
+        self.assertIn('"--hidden-import", "scipy._external.array_api_compat.numpy.fft"', build_script)
         self.assertIn("source_fingerprint", build_script)
         portable_script = (root / "packaging" / "build_portable_release.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-SourceFingerprint", portable_script)

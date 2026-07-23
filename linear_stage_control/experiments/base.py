@@ -178,10 +178,6 @@ class ExperimentWindowBase(QMainWindow):
         self.config = self._load_config()
         self.worker: ExperimentLiveWorker | None = None
         self.latest_measurement: MeasurementSnapshot | None = None
-        self.latest_overlay_bgr: np.ndarray | None = None
-        self.latest_result: object | None = None
-        self.latest_source_name = ""
-        self.latest_roi: Rect | None = None
         self.preview_source_qimage: QImage | None = None
         self.preview_crop_rect: tuple[int, int, int, int] | None = None
         self.preview_center_x = 0.5
@@ -459,7 +455,14 @@ class ExperimentWindowBase(QMainWindow):
             self._invalidate_latest_measurement("Source changed; waiting for a fresh measurement.")
         worker = ExperimentLiveWorker(source_factory, self.process_frame, processing_state)
         worker.frame_ready.connect(
-            lambda overlay, result, source_name, roi, frame_id, state_version, timestamp, worker=worker: self._on_frame_ready_from_worker(
+            lambda overlay,
+            result,
+            source_name,
+            roi,
+            frame_id,
+            state_version,
+            timestamp,
+            worker=worker: self._on_frame_ready_from_worker(
                 worker,
                 overlay,
                 result,
@@ -598,10 +601,6 @@ class ExperimentWindowBase(QMainWindow):
             state_version=int(state_version),
         )
         self.latest_measurement = measurement
-        self.latest_overlay_bgr = measurement.overlay_bgr
-        self.latest_result = result
-        self.latest_source_name = source_name
-        self.latest_roi = roi_tuple
         self.source_label.setText(f"Source: {source_name}")
         self.source_status_label.setText(f"Source: {source_name}")
         self.roi_controls.update_summary(roi_tuple)
@@ -653,10 +652,6 @@ class ExperimentWindowBase(QMainWindow):
 
     def _invalidate_latest_measurement(self, message: str) -> None:
         self.latest_measurement = None
-        self.latest_result = None
-        self.latest_overlay_bgr = None
-        self.latest_source_name = ""
-        self.latest_roi = None
         self._set_save_buttons_enabled(False)
         if hasattr(self, "result_table"):
             self.set_result_pairs([("Status", message)])
@@ -704,8 +699,12 @@ class ExperimentWindowBase(QMainWindow):
         if rel_x < 0 or rel_x > 1 or rel_y < 0 or rel_y > 1:
             return
         crop_x, crop_y, crop_w, crop_h = self.preview_crop_rect
-        self.preview_center_x = min(1.0, max(0.0, (crop_x + rel_x * crop_w) / max(1, self.preview_source_qimage.width())))
-        self.preview_center_y = min(1.0, max(0.0, (crop_y + rel_y * crop_h) / max(1, self.preview_source_qimage.height())))
+        self.preview_center_x = min(
+            1.0, max(0.0, (crop_x + rel_x * crop_w) / max(1, self.preview_source_qimage.width()))
+        )
+        self.preview_center_y = min(
+            1.0, max(0.0, (crop_y + rel_y * crop_h) / max(1, self.preview_source_qimage.height()))
+        )
         self.render_preview_source()
 
     def set_preview_source(self, qimage: QImage, reset_center: bool = False) -> None:
@@ -742,7 +741,9 @@ class ExperimentWindowBase(QMainWindow):
             return
         self._layout_is_narrow = is_narrow
         self.splitter.setOrientation(Qt.Vertical if is_narrow else Qt.Horizontal)
-        self.splitter.setSizes([330, max(420, self.height() - 330)] if is_narrow else [450, max(720, self.width() - 450)])
+        self.splitter.setSizes(
+            [330, max(420, self.height() - 330)] if is_narrow else [450, max(720, self.width() - 450)]
+        )
 
     def save_overlay_dialog(self) -> None:
         measurement = self.latest_measurement
@@ -751,7 +752,9 @@ class ExperimentWindowBase(QMainWindow):
             return
         directory = default_output_dir(self.feature_key)
         default_path = directory / f"{self.feature_key}_overlay_{timestamp_for_filename()}.png"
-        path, _selected = QFileDialog.getSaveFileName(self, "Save overlay", str(default_path), "PNG image (*.png);;JPEG image (*.jpg);;All files (*.*)")
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Save overlay", str(default_path), "PNG image (*.png);;JPEG image (*.jpg);;All files (*.*)"
+        )
         if not path:
             return
         try:
@@ -768,7 +771,9 @@ class ExperimentWindowBase(QMainWindow):
             return
         directory = default_output_dir(self.feature_key)
         default_path = directory / f"{self.feature_key}_result_{timestamp_for_filename()}.csv"
-        path, _selected = QFileDialog.getSaveFileName(self, "Save CSV", str(default_path), "CSV file (*.csv);;All files (*.*)")
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Save CSV", str(default_path), "CSV file (*.csv);;All files (*.*)"
+        )
         if not path:
             return
         try:

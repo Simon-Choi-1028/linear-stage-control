@@ -38,7 +38,9 @@ def main() -> int:
     screenshots: list[Path] = []
 
     launcher = ExperimentLauncherWindow()
-    screenshots.extend(_capture_window(app, launcher, output_dir, "launcher", failures, warnings, check_experiment=False))
+    screenshots.extend(
+        _capture_window(app, launcher, output_dir, "launcher", failures, warnings, check_experiment=False)
+    )
     launcher.close()
 
     for key, window_class in (("fwhm", FwhmWindow), ("alignment", AlignmentWindow), ("vp", VPWindow)):
@@ -90,8 +92,11 @@ def _capture_window(
     return paths
 
 
-def _check_experiment_window(window: QWidget, key: str, size_label: str, failures: list[str], warnings: list[str]) -> None:
-    overlay = getattr(window, "latest_overlay_bgr", None)
+def _check_experiment_window(
+    window: QWidget, key: str, size_label: str, failures: list[str], warnings: list[str]
+) -> None:
+    measurement = getattr(window, "latest_measurement", None)
+    overlay = measurement.overlay_bgr if measurement is not None else None
     if overlay is None:
         failures.append(f"{key} {size_label}: preview overlay was not produced")
     else:
@@ -130,7 +135,9 @@ def _colored_overlay_pixels(arr: np.ndarray) -> int:
     b = arr[:, :, 0].astype(np.int16)
     g = arr[:, :, 1].astype(np.int16)
     r = arr[:, :, 2].astype(np.int16)
-    saturated_color = ((np.maximum.reduce([b, g, r]) > 160) & ((np.maximum.reduce([b, g, r]) - np.minimum.reduce([b, g, r])) > 50))
+    saturated_color = (np.maximum.reduce([b, g, r]) > 160) & (
+        (np.maximum.reduce([b, g, r]) - np.minimum.reduce([b, g, r])) > 50
+    )
     return int(np.count_nonzero(saturated_color))
 
 

@@ -191,11 +191,14 @@ class ExperimentLauncherWindow(QMainWindow):
 
 def main() -> int:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    smoke_test = bool(os.environ.get("LINEAR_STAGE_SMOKE_TRACE")) or any(arg.lower() in {"--smoke", "--smoke-test"} for arg in sys.argv[1:])
+    smoke_test = bool(os.environ.get("LINEAR_STAGE_SMOKE_TRACE")) or any(
+        arg.lower() in {"--smoke", "--smoke-test"} for arg in sys.argv[1:]
+    )
     _trace(f"launcher_main_start smoke={int(smoke_test)}")
     if smoke_test:
         _trace("launcher_smoke_import_cv2_start")
         import cv2  # noqa: F401
+
         _trace("launcher_smoke_import_cv2_done")
         _trace("launcher_smoke_import_scipy_start")
         import numpy as np

@@ -6,14 +6,14 @@
 - Basler ace 2 LAN/GigE 카메라는 기본적으로 software trigger 모드를 사용한다. `TriggerSelector=FrameStart`, `TriggerSource=Software`, `ExecuteSoftwareTrigger()` 흐름으로 캡처 시점을 명확히 남긴다.
 - Basler live preview는 capture용 single grab과 분리해 `TriggerMode Off` continuous grabbing 세션으로 운용한다. Live worker는 `GrabStrategy_LatestImageOnly`를 우선 사용하고, 촬영 run 시작 전에는 live 세션을 정지해 카메라 점유 충돌을 막는다.
 - Live 중 노출/Gain/Gamma/Black Level/FrameRate처럼 grabbing 중 writable인 파라미터는 active worker에 debounce update로 적용한다. ROI, Binning, Decimation, PixelFormat처럼 grabbing 중 변경이 불안정한 항목은 Live worker를 짧게 재시작해 전체 frame fit 상태로 복귀시킨다.
-- 원본 보존은 변환 없는 `grab_result.GetArray().copy()`를 기준으로 한다. 저장 기본값은 lossless TIFF이며, 완전한 numpy 배열 재현이 필요할 때만 `dataset.save_numpy: true`를 켠다.
-- 데이터셋은 run 단위 timestamp 디렉터리로 격리한다. 각 run에는 `dataset_manifest.json`, legacy 호환용 `manifest.json`, `config.yaml` 스냅샷, `captures.csv`, 선택적 `captures.jsonl`, `images/`를 둔다.
-- `dataset_manifest.json`에는 앱 버전, record 수, 주요 산출물의 상대 경로, 파일 크기, SHA256 hash를 저장한다. 실험/논문 데이터셋을 옮길 때 파일 누락이나 변조 여부를 재검증할 수 있어야 한다.
+- 원본 보존은 변환 없는 `grab_result.GetArray().copy()`를 기준으로 한다. 저장 기본값은 lossless PNG이며, 완전한 numpy 배열 재현이 필요할 때만 `dataset.save_numpy: true`를 켠다.
+- 데이터셋은 run 단위 timestamp 디렉터리로 격리한다. 각 run에는 `dataset_manifest.json`, legacy 호환용 `manifest.json`, `config.yaml` 스냅샷, `captures.csv`, `images/`를 둔다.
+- `dataset_manifest.json`에는 앱 버전, record 수와 주요 산출물의 상대 경로를 저장한다. 파일 크기와 SHA256 hash가 필요한 검증용 run은 `manifest_detail: full`을 사용하고, 파일 항목은 전체 목록을 메모리에 쌓지 않고 순차 기록한다.
 - 각 캡처 레코드에는 target 위치, actual 위치, 위치 오차, 위치별/실제 적용 이동속도, 위치 내 캡처 순번, 이동/settle/capture timestamp, 카메라 timestamp, 이미지 경로를 모두 기록한다.
 - 위치 입력은 `scan.positions` 또는 `scan.positions_file`을 우선한다. `scan.linear_path`는 명시적으로 설정된 선형 연속 경로 fallback이고, grid scan은 테스트나 균일 스캔이 필요할 때의 최종 fallback으로만 둔다. 파일 입력은 CSV, TSV, TXT, JSON, JSONL, YAML, XLSX를 지원하고, `label/name/id`, `x/x_mm/X mm/target_x_mm`, `y/y_mm/Y mm/target_y_mm`, `velocity/move_velocity_mm_s/speed_mm_s`, `capture_count/captures/frames`처럼 흔한 컬럼명 변형을 허용한다.
 - GUI 위치 입력은 Zaber 210 mm 이동 범위 기준 `0-210 mm`를 즉시 검사한다. 범위를 벗어난 좌표는 오류로 표시하고 촬영 run 시작을 막는다. 위치별 이동속도는 비워 두거나 0보다 커야 하며, 위치별 캡쳐 수는 비워 두거나 1 이상 정수여야 한다. 중복 좌표, 빈 라벨, 매우 큰 위치 목록은 경고로 표시한다.
 - 위치 파일 파싱 오류는 행 번호와 원인을 함께 제시한다. 빈 파일, X/Y 컬럼 누락, 숫자 변환 실패, 지원하지 않는 확장자는 장비 동작 전에 차단한다.
-- 파일명에는 label 또는 point id, X/Y 위치, timestamp, capture index를 넣되 label은 파일명 안전 문자로 정규화한다. 기본 형식은 `{label_or_point}_x{X}mm_y{Y}mm_{timestamp}_cap{capture_index:03d}`로 유지한다.
+- 이미지 파일명은 소수점 셋째 자리까지 절삭한 `X000.000_Y000.000` 좌표 stem을 사용한다. 같은 위치의 추가 캡처에는 `_Cxx`, 중복 좌표 포인트에는 `_Pxxxx`를 붙여 충돌을 막는다.
 - GUI는 장비 제어 루프를 Qt worker thread에서 실행한다. 메인 UI thread는 위치 편집, 진행률, 로그, 이미지 미리보기만 담당한다.
 - GUI의 전역 실행 상태는 `AppRunState` enum과 `apply_state()`를 기준으로 관리한다. 각 slot에서 버튼 enable/disable을 흩뿌리지 말고 촬영, 취소, live, 카메라 탐색, 진단, 수동 스테이지, 업데이트 상태 전환을 한 함수로 모은다.
 - GUI 수동 스테이지 명령은 촬영 run과 동시에 실행하지 않는다. 현재 위치 읽기, 원점 복귀, jog/절대 이동은 별도 worker에서 처리하되 acquisition worker가 동작 중이면 버튼을 비활성화해 serial connection 충돌을 줄인다.
@@ -21,11 +21,11 @@
 - GUI 미리보기 확대, 격자, 중앙 크로스라인은 화면 검사용 render-only 오버레이로 유지한다. 원본 이미지 파일과 저장 metadata의 원본 배열에는 오버레이를 합성하지 않는다.
 - GUI의 Basler LAN/GigE 카메라 자동 검색은 사용자가 `자동검색`을 누를 때 짧은 Qt worker thread로 단발 실행한다. 주기 타이머로 반복 검색하지 않고, `탐색중/성공/실패` 상태 배지를 색상으로 구분해 pypylon 장치 열기/트리거 흐름과 충돌할 가능성을 줄인다.
 - GUI 화면 문구는 한국어를 기본으로 한다. 촬영 중에는 연결, 원점 복귀, 이동, 안정화, 촬영, 저장 단계를 별도 상태 라벨에 표시해 사용자가 현재 진행 위치를 알 수 있게 한다.
-- GUI 표시 숫자는 저장 데이터와 분리한다. CSV/JSONL에는 계산 원본 값을 보존하되, 화면에서는 mm 위치값 최대 4자리, um 오차값 최대 2자리로 trailing zero를 줄이고 상세 정보는 `|`로 이어붙이지 않고 표 칸으로 나눠 표시한다.
+- GUI 표시 숫자는 저장 데이터와 분리한다. CSV에는 계산 원본 값을 보존하되, 화면에서는 mm 위치값 최대 4자리, um 오차값 최대 2자리로 trailing zero를 줄이고 상세 정보는 `|`로 이어붙이지 않고 표 칸으로 나눠 표시한다.
 - GUI는 폭이 좁을 때 좌우 분할을 위아래 배치로 전환하고 제어 패널을 스크롤 영역에 넣는다. 원본 이미지는 미리보기 더블클릭 또는 `전체화면 보기`로 확대 창에서 확인할 수 있게 한다.
 - 주요 GUI 버튼에는 Qt 표준 아이콘과 툴팁을 붙인다. 버튼을 단순 텍스트 덩어리로 늘어놓지 않고, 위치 편집처럼 버튼 수가 많은 영역은 2줄 그리드로 정리한다.
 - 노출, 안정화, 이동속도, 기본 캡쳐 수처럼 반복 조정이 잦은 수치 파라미터는 키보드 입력칸을 유지하되, 같은 행 오른쪽에 outlined 빠른 증감 버튼을 둔다. 각 값 입력칸과 버튼에는 조정 대상, 단위, 기본값 또는 증감량 툴팁을 제공한다.
-- 메타데이터, 요약 출력 포맷, 실행 옵션 체크박스는 별도 박스 안에 배치해 촬영 파라미터 입력부와 시각적으로 구분한다. 실행 옵션에는 소프트웨어 트리거, NPY 저장, 원점 복귀 생략을 둔다.
+- 촬영 로그 형식은 CSV로 고정하고 GUI에는 `카메라 파라미터 포함` 안내를 표시한다. 실행 옵션에는 소프트웨어 트리거, NPY 저장, 원점 복귀 생략을 둔다.
 - GUI와 config의 선형 경로 생성은 `간격 mm/캡쳐` 기준을 우선 지원한다. 간격 기준은 경로 거리마다 한 위치를 만들고 끝점을 항상 포함하며, 필요할 때만 총 `위치 수` 기준으로 균등 보간한다.
 - 촬영 시작 전에는 preflight 점검 창을 띄운다. 위치 목록, Basler 카메라 감지, Zaber COM 포트, X/Y 축 매핑, 저장 폴더, 이동 속도, 촬영 설정, 고정 오차 기준을 확인하고 오류가 있으면 시작 버튼을 비활성화한다.
 - X/Y 축이 같은 Zaber device/axis 주소를 가리키는 설정은 안전하지 않으므로 run 전에 오류로 차단한다. 저장 폴더는 run 시작 전에 생성 가능 여부를 확인해 데이터셋 기록 실패를 앞단에서 줄인다.
@@ -33,14 +33,15 @@
 - 배포는 PyInstaller one-folder portable 빌드와 online/slim installer를 기본으로 한다. Basler pylon Runtime은 기본 Setup에 묶지 않고, Runtime이 없는 PC에서는 앱에서 설치 안내/다운로드 버튼을 제공한다. 현장 PC가 인터넷 없이 설치되어야 할 때만 별도 offline installer에 pylon Runtime installer를 포함한다.
 - slim installer를 만들 때는 이전 offline build의 pylon Runtime payload가 `dist`에 남아 있는지 먼저 확인한다. `build_installer.ps1`는 `-IncludePylonRuntime` 없이 Runtime payload가 감지되면 중단해 accidental 1GB+ setup 생성을 막는다.
 - PyInstaller slim build 후에는 사용하지 않는 Qt QML/Quick/PDF/VirtualKeyboard 파일, Qt translations, pypylon DataProcessing 바이너리를 prune한다. 단, `LinearStageControl.exe --smoke-test`를 prune 이후 반드시 실행해 누락된 DLL을 즉시 잡는다.
-- 릴리즈에는 기본 업데이트 채널인 `LinearStageControlSetup.exe`, 선택용 `LinearStageControlSetup-Offline.exe`, `update_manifest.json`을 함께 올린다. manifest의 top-level `asset_name`과 `sha256`은 항상 online/slim Setup을 가리키게 둔다.
+- PyInstaller는 runtime dependency에 넣지 않고 `build` optional dependency로 관리한다. installer 빌드 직후 portable ZIP을 만들 때는 smoke를 통과하고 버전·전체 소스 fingerprint가 현재 worktree와 일치하는 app build만 재사용해 대규모 파일 생성을 반복하지 않는다.
+- 기본 릴리즈에는 `LinearStageControlSetup.exe`, `update_manifest.json`, `LinearStageControl-Portable.zip`, `portable_manifest.json`을 함께 올린다. offline 빌드를 수행한 경우에만 manifest에 선언된 `LinearStageControlSetup-Offline.exe`를 추가한다. update manifest의 top-level `asset_name`과 `sha256`은 항상 online/slim Setup을 가리키게 둔다.
 - dual installer 릴리즈 빌드에서는 online/slim 패키지에서 `--smoke-test`를 수행하고, offline 패키지는 동일 앱 코드에 Basler pylon Runtime installer payload만 추가하므로 별도 smoke를 반복하지 않는다.
 - GitHub Release 업데이트는 `update_manifest.json`의 SHA256과 Setup asset을 함께 검증한다. 검증 실패 시 설치 파일을 실행하지 않는다.
 - 하드웨어, 위치 파서, 데이터셋 저장, 업데이트 검증 오류는 `LinearStageControlError` 계층을 우선 사용한다. GUI에는 `user_message`를 보여주고, traceback과 원본 예외는 structured log에 남긴다.
 - 앱 로그는 `%USERPROFILE%/Documents/LinearStageControl/logs/app_YYYYMMDD.log`에 JSONL로 저장하고, acquisition run이 시작되면 `run_<run_id>.log`를 추가로 붙인다. 현장 이슈 재현에는 UI 텍스트보다 로그의 `event` 필드와 run id를 우선 본다.
 - PyInstaller 빌드에서는 Zaber Motion Python 패키지와 별도로 `zaber_motion_bindings` 네이티브 DLL을 반드시 포함한다. `zaber-motion-core-windows-amd64.dll`이 `dist/LinearStageControl/_internal/zaber_motion_bindings/`에 없으면 frozen exe가 시작 시 import 단계에서 실패한다.
 - 공식 Zaber Device Database는 uncompressed `devices-public-v2.sqlite`를 빌드에 우선 포함하고, legacy `devices-public-v2.sqlite.lzma`만 있을 때는 런타임 cache에 해제한 뒤 SQLite header를 검증한다. 스테이지 연결 전에는 검증된 `.sqlite`만 `Library.set_device_db_source(DeviceDbSourceType.FILE, ...)`로 지정하고, 실패 시 Web Service fallback을 로그에 남긴다.
-- 데이터셋 메타데이터는 기본적으로 CSV, JSONL, JSON, TSV, YAML, XLSX를 생성한다. run 요약은 JSON, YAML, Markdown으로 저장해 실험 기록, 통계 분석, 논문 표 작성에 재사용할 수 있게 한다.
+- 데이터셋 촬영 로그는 `captures.csv` 하나만 생성한다. 각 캡처 행에는 위치·오차·시간과 함께 실제 카메라 readback 및 앱에서 적용한 trigger·회전·반전 파라미터를 기록한다.
 - GUI와 CLI는 같은 `base_capture_record`, `DatasetRun`, 위치 파서, 위치 검증 모듈을 사용한다. 포맷이나 레코드 필드가 늘어날 때 중복 구현을 만들지 않는다.
 - 정적 검사는 `ruff check .`, `ruff format .`, `pyright`를 기본 개발 루틴으로 둔다. `pyright`는 strict가 아니라 핵심 로직 모듈부터 basic mode로 검사하고, 대상 모듈은 `pyproject.toml`의 `[tool.pyright].include`에 명시한다.
 - 매뉴얼 스크린샷은 `scripts/capture_manual_screenshots.py`로 재현 가능하게 생성한다. 문서 이미지를 손으로 하나씩 찍는 방식은 UI 변경 추적이 어렵기 때문에, 주요 탭/모달/제어 패널 캡처를 스크립트에서 관리한다.
@@ -49,5 +50,5 @@
 - `gui_app.py`는 화면 구성과 이벤트 처리 중심으로 유지하고, 장시간 실행되는 acquisition/camera discovery thread는 별도 모듈에 둔다. 하드웨어 제어 loop가 커질 때는 UI 파일에 직접 누적하지 않는다.
 - Live/image preview 렌더링처럼 NumPy/QImage/QPixmap 변환, crop, overlay drawing이 커지는 코드는 `preview_rendering.py`처럼 render-only 모듈로 분리한다. UI class에는 상태 전환과 사용자 이벤트만 남겨 GUI 파일 비대화를 늦춘다.
 - Optical calibration 오차 표시는 Zaber 210 mm LDM/X-LDM-AE crossed XY 스테이지 제조사 스펙을 고정값으로 사용한다. 사용자 입력형 `오차 예산`을 두지 않는다. 단축 정확도 1.00 um, 반복 정밀도 0.08 um, 수평 런아웃 5.00 um을 합산해 `xy_axis_worst_case_um = 6.08 um`로 두고, XY 반경 기준은 `sqrt(2) * 6.08 = 8.60 um`로 둔다. 수직 런아웃 8.00 um은 Z/초점 참고값으로 별도 표시한다.
-- 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_stage_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
+- 실제 Zaber report 위치와 target 위치의 radial error를 um로 바꾸고, `max(measured_radial_error_um, xy_radial_worst_case_um)`를 `predicted_max_error_um`로 저장한다. 같은 고정값을 측정 radial error에서 뺀 값은 0 이상으로 clamp해 `predicted_min_error_um`로 저장한다.
 - 각 사진에는 개별 `predicted_min_error_um`, `predicted_max_error_um`, X/Y 예측 범위를 저장하고, run 전체에는 GUI Error 탭에서 캔들차트와 최대/평균/제한 초과 개수를 표시한다.

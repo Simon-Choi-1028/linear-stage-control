@@ -138,21 +138,6 @@ def download_file(
     return path
 
 
-def build_update_manifest(
-    *,
-    version: str,
-    asset_name: str,
-    sha256: str,
-    size_bytes: int,
-) -> dict[str, Any]:
-    return {
-        "version": version,
-        "asset_name": asset_name,
-        "sha256": sha256,
-        "size_bytes": size_bytes,
-    }
-
-
 def _fetch_json(url: str, *, timeout_s: float) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "LinearStageControl-Updater"})
     with urllib.request.urlopen(request, timeout=timeout_s) as response:

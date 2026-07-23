@@ -37,11 +37,218 @@ function Get-ReleaseNotes {
 
   $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $ChangeLog
   $escapedTag = [regex]::Escape($ReleaseTag)
-  $match = [regex]::Match($text, "(?ms)^##\s+$escapedTag\b.*?(?=^##\s+v|\z)")
+  $match = [regex]::Match(
+    $text,
+    "(?ms)^##[ \t]+$escapedTag(?:[ \t]+-[^\r\n]*)?[ \t]*\r?\n.*?(?=^##[ \t]+|\z)"
+  )
   if ($match.Success) {
     return $match.Value.Trim()
   }
-  return $text.Trim()
+  throw "CHANGELOG.md does not contain a release section for the exact tag '$ReleaseTag'."
+}
+
+function Get-RequiredManifestValue {
+  param(
+    [Parameter(Mandatory = $true)][object]$Object,
+    [Parameter(Mandatory = $true)][string]$PropertyName,
+    [Parameter(Mandatory = $true)][string]$ManifestName
+  )
+
+  $property = $Object.PSObject.Properties[$PropertyName]
+  if ($null -eq $property -or $null -eq $property.Value -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+    throw "$ManifestName is missing required property '$PropertyName'."
+  }
+  return $property.Value
+}
+
+function Get-ManifestAssetNames {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $manifestItem = Get-Item -LiteralPath $Path
+  try {
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestItem.FullName | ConvertFrom-Json
+  } catch {
+    throw "Could not parse $($manifestItem.Name) as JSON: $($_.Exception.Message)"
+  }
+
+  $names = @(
+    [string](
+      Get-RequiredManifestValue `
+        -Object $manifest `
+        -PropertyName "asset_name" `
+        -ManifestName $manifestItem.Name
+    )
+  )
+  $assetsProperty = $manifest.PSObject.Properties["assets"]
+  if ($null -ne $assetsProperty -and $null -ne $assetsProperty.Value) {
+    foreach ($entry in @($assetsProperty.Value)) {
+      if ($null -eq $entry) {
+        throw "$($manifestItem.Name) contains an empty assets entry."
+      }
+      $names += [string](
+        Get-RequiredManifestValue `
+          -Object $entry `
+          -PropertyName "name" `
+          -ManifestName $manifestItem.Name
+      )
+    }
+  }
+  return @($names | Sort-Object -Unique)
+}
+
+function Assert-UpdateManifestPolicy {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
+  $manifestName = Split-Path -Leaf $Path
+  $primaryName = [string](
+    Get-RequiredManifestValue -Object $manifest -PropertyName "asset_name" -ManifestName $manifestName
+  )
+  if ($primaryName -cne "LinearStageControlSetup.exe") {
+    throw "$manifestName must use LinearStageControlSetup.exe as its primary asset."
+  }
+
+  $channels = Get-RequiredManifestValue -Object $manifest -PropertyName "channels" -ManifestName $manifestName
+  if ([string]$channels.default -cne "online" -or [string]$channels.online -cne $primaryName) {
+    throw "$manifestName must declare default=online and online=$primaryName."
+  }
+
+  $declaredNames = @(Get-ManifestAssetNames -Path $Path)
+  $allowedNames = @("LinearStageControlSetup.exe", "LinearStageControlSetup-Offline.exe")
+  foreach ($name in $declaredNames) {
+    if ($allowedNames -notcontains $name) {
+      throw "$manifestName declares unsupported installer asset '$name'."
+    }
+  }
+
+  $offlineName = [string]$channels.offline
+  $offlineDeclared = $declaredNames -contains "LinearStageControlSetup-Offline.exe"
+  if ([string]::IsNullOrWhiteSpace($offlineName)) {
+    if ($offlineDeclared) {
+      throw "$manifestName declares an offline asset entry but channels.offline is empty."
+    }
+  } elseif ($offlineName -cne "LinearStageControlSetup-Offline.exe" -or -not $offlineDeclared) {
+    throw "$manifestName channels.offline and assets[] must both declare LinearStageControlSetup-Offline.exe."
+  }
+}
+
+function Assert-PortableManifestPolicy {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
+  $manifestName = Split-Path -Leaf $Path
+  $primaryName = [string](
+    Get-RequiredManifestValue -Object $manifest -PropertyName "asset_name" -ManifestName $manifestName
+  )
+  if ($primaryName -cne "LinearStageControl-Portable.zip") {
+    throw "$manifestName must use LinearStageControl-Portable.zip as its primary asset."
+  }
+  if ([string]$manifest.distribution -cne "portable") {
+    throw "$manifestName must declare distribution=portable."
+  }
+  if ([string]$manifest.entrypoint -cne "LinearStageControl\LinearStageControl.exe") {
+    throw "$manifestName contains an unexpected portable entrypoint."
+  }
+}
+
+function Assert-ManifestAssetEntry {
+  param(
+    [Parameter(Mandatory = $true)][object]$Entry,
+    [Parameter(Mandatory = $true)][string]$ManifestName,
+    [Parameter(Mandatory = $true)][hashtable]$LocalAssetsByName,
+    [Parameter(Mandatory = $true)][hashtable]$HashCache
+  )
+
+  $assetName = [string](Get-RequiredManifestValue -Object $Entry -PropertyName "name" -ManifestName $ManifestName)
+  $expectedHash = [string](Get-RequiredManifestValue -Object $Entry -PropertyName "sha256" -ManifestName $ManifestName)
+  $expectedSizeValue = Get-RequiredManifestValue -Object $Entry -PropertyName "size_bytes" -ManifestName $ManifestName
+
+  if (-not $LocalAssetsByName.ContainsKey($assetName)) {
+    throw "$ManifestName references '$assetName', but that local asset is not included in this release."
+  }
+  if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "$ManifestName contains an invalid SHA256 value for '$assetName'."
+  }
+
+  try {
+    $expectedSize = [int64]::Parse(
+      [string]$expectedSizeValue,
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+  } catch {
+    throw "$ManifestName contains an invalid size_bytes value for '$assetName'."
+  }
+
+  $localAsset = $LocalAssetsByName[$assetName]
+  if ([int64]$localAsset.Length -ne $expectedSize) {
+    throw "$ManifestName size mismatch for '$assetName': expected $expectedSize bytes, found $($localAsset.Length). Rebuild the release assets."
+  }
+
+  if (-not $HashCache.ContainsKey($localAsset.FullName)) {
+    $HashCache[$localAsset.FullName] = (Get-FileHash -LiteralPath $localAsset.FullName -Algorithm SHA256).Hash
+  }
+  $actualHash = [string]$HashCache[$localAsset.FullName]
+  if (-not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "$ManifestName SHA256 mismatch for '$assetName'. Rebuild the release assets and manifest."
+  }
+}
+
+function Assert-ReleaseManifest {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+    [Parameter(Mandatory = $true)][string[]]$ReleaseAssets,
+    [Parameter(Mandatory = $true)][hashtable]$HashCache
+  )
+
+  $manifestItem = Get-Item -LiteralPath $Path
+  $manifestName = $manifestItem.Name
+  try {
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestItem.FullName | ConvertFrom-Json
+  } catch {
+    throw "Could not parse $manifestName as JSON: $($_.Exception.Message)"
+  }
+
+  $manifestVersion = [string](
+    Get-RequiredManifestValue -Object $manifest -PropertyName "version" -ManifestName $manifestName
+  )
+  if ($manifestVersion -cne $ExpectedVersion) {
+    throw "$manifestName version '$manifestVersion' does not match release tag '$ExpectedVersion'. Rebuild the release assets."
+  }
+
+  $localAssetsByName = @{}
+  foreach ($assetPath in $ReleaseAssets) {
+    $asset = Get-Item -LiteralPath $assetPath
+    if ($localAssetsByName.ContainsKey($asset.Name)) {
+      throw "Duplicate local release asset name: $($asset.Name)"
+    }
+    $localAssetsByName[$asset.Name] = $asset
+  }
+
+  $primaryEntry = [pscustomobject]@{
+    name = Get-RequiredManifestValue -Object $manifest -PropertyName "asset_name" -ManifestName $manifestName
+    sha256 = Get-RequiredManifestValue -Object $manifest -PropertyName "sha256" -ManifestName $manifestName
+    size_bytes = Get-RequiredManifestValue -Object $manifest -PropertyName "size_bytes" -ManifestName $manifestName
+  }
+  Assert-ManifestAssetEntry `
+    -Entry $primaryEntry `
+    -ManifestName $manifestName `
+    -LocalAssetsByName $localAssetsByName `
+    -HashCache $HashCache
+
+  $assetsProperty = $manifest.PSObject.Properties["assets"]
+  if ($null -ne $assetsProperty -and $null -ne $assetsProperty.Value) {
+    foreach ($entry in @($assetsProperty.Value)) {
+      if ($null -eq $entry) {
+        throw "$manifestName contains an empty assets entry."
+      }
+      Assert-ManifestAssetEntry `
+        -Entry $entry `
+        -ManifestName $manifestName `
+        -LocalAssetsByName $localAssetsByName `
+        -HashCache $HashCache
+    }
+  }
 }
 
 function Get-GitHubToken {
@@ -158,7 +365,8 @@ function Publish-GitHubRestRelease {
   param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$ReleaseTag,
-    [Parameter(Mandatory = $true)][string[]]$ReleaseAssets
+    [Parameter(Mandatory = $true)][string[]]$ReleaseAssets,
+    [Parameter(Mandatory = $true)][string]$ReleaseNotes
   )
 
   $token = Get-GitHubToken
@@ -178,7 +386,7 @@ function Publish-GitHubRestRelease {
     $body = @{
       tag_name = $ReleaseTag
       name = $ReleaseTag
-      body = Get-ReleaseNotes -ReleaseTag $ReleaseTag
+      body = $ReleaseNotes
       draft = $false
       prerelease = $false
     } | ConvertTo-Json -Depth 5
@@ -191,7 +399,7 @@ function Publish-GitHubRestRelease {
   } else {
     $body = @{
       name = $ReleaseTag
-      body = Get-ReleaseNotes -ReleaseTag $ReleaseTag
+      body = $ReleaseNotes
       draft = $false
       prerelease = $false
     } | ConvertTo-Json -Depth 5
@@ -252,30 +460,61 @@ function Publish-GitHubRestRelease {
   }
 }
 
+$ProjectVersion = Get-ProjectVersion
+$ExpectedTag = "v$ProjectVersion"
 if (-not $Tag) {
-  $Tag = "v$(Get-ProjectVersion)"
+  $Tag = $ExpectedTag
+}
+if ($Tag -cne $ExpectedTag) {
+  throw "Release tag '$Tag' does not match project version '$ProjectVersion'. Expected '$ExpectedTag'."
 }
 
 if ($PortableOnly) {
   Assert-Asset $PortableZip
-  $Assets = @($PortableZip)
-  if (Test-Path -LiteralPath $PortableManifest) {
-    $Assets += $PortableManifest
-  }
+  Assert-Asset $PortableManifest
+  Assert-PortableManifestPolicy -Path $PortableManifest
+  $Assets = @($PortableZip, $PortableManifest)
 } else {
   Assert-Asset $ManifestPath
   Assert-Asset $OnlineSetup
-  if (Test-Path -LiteralPath $OfflineSetup) {
-    $Assets = @($OnlineSetup, $OfflineSetup, $ManifestPath)
-  } else {
-    $Assets = @($OnlineSetup, $ManifestPath)
+  Assert-UpdateManifestPolicy -Path $ManifestPath
+  $Assets = @($OnlineSetup)
+  $declaredInstallerAssets = @(Get-ManifestAssetNames -Path $ManifestPath)
+  if ($declaredInstallerAssets -contains (Split-Path -Leaf $OfflineSetup)) {
+    Assert-Asset $OfflineSetup
+    $Assets += $OfflineSetup
+  } elseif (Test-Path -LiteralPath $OfflineSetup) {
+    Write-Host "Ignoring stale offline installer not declared by update_manifest.json: $OfflineSetup"
   }
+  $Assets += $ManifestPath
   if ($IncludePortable) {
     Assert-Asset $PortableZip
-    $Assets += $PortableZip
-    if (Test-Path -LiteralPath $PortableManifest) {
-      $Assets += $PortableManifest
-    }
+    Assert-Asset $PortableManifest
+    Assert-PortableManifestPolicy -Path $PortableManifest
+    $Assets += @($PortableZip, $PortableManifest)
+  }
+}
+
+$ReleaseNotes = Get-ReleaseNotes -ReleaseTag $Tag
+$HashCache = @{}
+if ($PortableOnly) {
+  Assert-ReleaseManifest `
+    -Path $PortableManifest `
+    -ExpectedVersion $Tag `
+    -ReleaseAssets $Assets `
+    -HashCache $HashCache
+} else {
+  Assert-ReleaseManifest `
+    -Path $ManifestPath `
+    -ExpectedVersion $Tag `
+    -ReleaseAssets $Assets `
+    -HashCache $HashCache
+  if ($IncludePortable) {
+    Assert-ReleaseManifest `
+      -Path $PortableManifest `
+      -ExpectedVersion $Tag `
+      -ReleaseAssets $Assets `
+      -HashCache $HashCache
   }
 }
 
@@ -285,7 +524,8 @@ $GhArgs = @(
   "release", "create", $Tag
   "--repo", $Repo
   "--title", $Tag
-  "--notes-file", $ChangeLog
+  "--notes", $ReleaseNotes
+  "--verify-tag"
 )
 $GhArgs += $Assets
 
@@ -298,10 +538,14 @@ if ($DryRun) {
 }
 
 if ($Gh) {
-  & gh @GhArgs
+  & $Gh.Source @GhArgs
   if ($LASTEXITCODE -ne 0) {
     throw "GitHub release creation failed with exit code $LASTEXITCODE"
   }
 } else {
-  Publish-GitHubRestRelease -Repository $Repo -ReleaseTag $Tag -ReleaseAssets $Assets
+  Publish-GitHubRestRelease `
+    -Repository $Repo `
+    -ReleaseTag $Tag `
+    -ReleaseAssets $Assets `
+    -ReleaseNotes $ReleaseNotes
 }

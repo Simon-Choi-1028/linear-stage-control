@@ -1,5 +1,6 @@
 param(
   [switch]$SkipSmoke,
+  [switch]$SkipAppBuild,
   [switch]$IncludePylonRuntime,
   [switch]$SkipZaberSdkDownload
 )
@@ -7,39 +8,74 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
+. (Join-Path $PSScriptRoot "build_provenance.ps1")
 $DistDir = Join-Path $Root "dist"
 $AppDir = Join-Path $DistDir "LinearStageControl"
 $StageDir = Join-Path $DistDir "portable_package"
 $ZipPath = Join-Path $DistDir "LinearStageControl-Portable.zip"
 $ManifestPath = Join-Path $DistDir "portable_manifest.json"
+$AppExe = Join-Path $AppDir "LinearStageControl.exe"
+$PylonRuntimePayload = Join-Path $AppDir "_internal\sdk_downloads\installers\pylon_Runtime_26.04.1.exe"
+$BuildProvenancePath = Join-Path $AppDir "build_provenance.json"
 
-function Get-ProjectVersion {
-  $VersionLine = Select-String -Path (Join-Path $Root "pyproject.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-  if ($VersionLine -and $VersionLine.Matches.Count) {
-    return $VersionLine.Matches[0].Groups[1].Value
+if ($SkipAppBuild) {
+  if (-not (Test-Path -LiteralPath $AppExe)) {
+    throw "Cannot reuse app build because the executable was not found: $AppExe"
   }
-  throw "Could not read project version from pyproject.toml"
+  if (-not (Test-Path -LiteralPath $BuildProvenancePath)) {
+    throw "Cannot reuse app build because provenance is missing: $BuildProvenancePath"
+  }
+  try {
+    $buildProvenance = Get-Content -LiteralPath $BuildProvenancePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  } catch {
+    throw "Cannot reuse app build because provenance is invalid: $($_.Exception.Message)"
+  }
+  $expectedVersion = "v$(Get-ProjectVersion -ProjectRoot $Root)"
+  $expectedFingerprint = Get-SourceFingerprint -ProjectRoot $Root
+  if ($buildProvenance.version -ne $expectedVersion) {
+    throw "Cannot reuse app build: provenance version $($buildProvenance.version) does not match $expectedVersion."
+  }
+  if ($buildProvenance.source_fingerprint -ne $expectedFingerprint) {
+    throw "Cannot reuse app build: source fingerprint does not match the current worktree."
+  }
+  $hasPylonRuntime = Test-Path -LiteralPath $PylonRuntimePayload
+  if ($IncludePylonRuntime -and -not $hasPylonRuntime) {
+    throw "Cannot reuse app build: the requested pylon Runtime payload is missing: $PylonRuntimePayload"
+  }
+  if (-not $IncludePylonRuntime -and $hasPylonRuntime) {
+    throw "Cannot reuse app build: a slim portable package must not contain the pylon Runtime payload: $PylonRuntimePayload"
+  }
+  if (-not $SkipSmoke) {
+    $smokeTrace = Join-Path $DistDir "portable-smoke-test.log"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run_packaged_smoke.ps1") `
+      -AppExe $AppExe -TracePath $smokeTrace -TimeoutMs 120000
+    if ($LASTEXITCODE -eq 124) {
+      throw "Reused app smoke test timed out after 120 seconds. Trace: $smokeTrace"
+    }
+    if ($LASTEXITCODE -ne 0) {
+      throw "Reused app smoke test failed with exit code $LASTEXITCODE. Trace: $smokeTrace"
+    }
+  }
+} else {
+  $buildArgs = @{}
+  if ($SkipSmoke) {
+    $buildArgs.SkipSmoke = $true
+  }
+  if ($IncludePylonRuntime) {
+    $buildArgs.IncludePylonRuntime = $true
+  }
+  if ($SkipZaberSdkDownload) {
+    $buildArgs.SkipZaberSdkDownload = $true
+  }
+
+  & (Join-Path $PSScriptRoot "build_windows.ps1") @buildArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Windows package build failed with exit code $LASTEXITCODE"
+  }
 }
 
-$buildArgs = @{}
-if ($SkipSmoke) {
-  $buildArgs.SkipSmoke = $true
-}
-if ($IncludePylonRuntime) {
-  $buildArgs.IncludePylonRuntime = $true
-}
-if ($SkipZaberSdkDownload) {
-  $buildArgs.SkipZaberSdkDownload = $true
-}
-
-& (Join-Path $PSScriptRoot "build_windows.ps1") @buildArgs
-if ($LASTEXITCODE -ne 0) {
-  throw "Windows package build failed with exit code $LASTEXITCODE"
-}
-
-$appExe = Join-Path $AppDir "LinearStageControl.exe"
-if (-not (Test-Path -LiteralPath $appExe)) {
-  throw "Portable app executable was not found: $appExe"
+if (-not (Test-Path -LiteralPath $AppExe)) {
+  throw "Portable app executable was not found: $AppExe"
 }
 
 Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -65,7 +101,7 @@ $portableReadme | Set-Content -LiteralPath (Join-Path $StageDir "README-PORTABLE
 
 Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ZipPath -CompressionLevel Optimal -Force
 
-$version = Get-ProjectVersion
+$version = Get-ProjectVersion -ProjectRoot $Root
 $zipItem = Get-Item -LiteralPath $ZipPath
 $zipHash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{

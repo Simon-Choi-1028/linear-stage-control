@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,6 +23,8 @@ from PySide6.QtWidgets import (
 from .gui_support import apply_button_icon as _apply_button_icon
 from .preview_rendering import MAX_PREVIEW_PIXELS, qimage_from_array
 from .text_formatting import um_text as _um_text
+
+MAX_FULLSCREEN_RENDER_PIXELS = MAX_PREVIEW_PIXELS
 
 
 class ImagePreviewLabel(QLabel):
@@ -49,9 +52,6 @@ class PreviewResizeHandle(QWidget):
         self.setFixedSize(28, 28)
         self.setCursor(Qt.SizeFDiagCursor)
         self.setToolTip(
-            "미리보기 영역 우하단을 끌어 Live/이미지 화면 높이를 조정합니다. 더블클릭하면 기본 크기로 돌아갑니다."
-        )
-        self.setToolTip(
             "미리보기 화면 우하단 모서리를 대각선으로 끌어 Live/이미지 화면 크기를 조정합니다. "
             "더블클릭하면 4:3 기본 크기로 돌아갑니다."
         )
@@ -59,8 +59,9 @@ class PreviewResizeHandle(QWidget):
 
     def mousePressEvent(self, event: object) -> None:
         self._last_position = _event_global_position(event) or _event_position(event)
-        if hasattr(event, "accept"):
-            event.accept()
+        accept = getattr(event, "accept", None)
+        if callable(accept):
+            accept()
 
     def mouseMoveEvent(self, event: object) -> None:
         position = _event_global_position(event) or _event_position(event)
@@ -71,19 +72,22 @@ class PreviewResizeHandle(QWidget):
         if delta_x or delta_y:
             self.dragged.emit(delta_x, delta_y)
             self._last_position = position
-        if hasattr(event, "accept"):
-            event.accept()
+        accept = getattr(event, "accept", None)
+        if callable(accept):
+            accept()
 
     def mouseReleaseEvent(self, event: object) -> None:
         self._last_position = None
-        if hasattr(event, "accept"):
-            event.accept()
+        accept = getattr(event, "accept", None)
+        if callable(accept):
+            accept()
 
     def mouseDoubleClickEvent(self, event: object) -> None:
         self._last_position = None
         self.reset_requested.emit()
-        if hasattr(event, "accept"):
-            event.accept()
+        accept = getattr(event, "accept", None)
+        if callable(accept):
+            accept()
 
     def paintEvent(self, event: object) -> None:
         painter = QPainter(self)
@@ -97,7 +101,7 @@ class PreviewResizeHandle(QWidget):
 def _event_position(event: object) -> QPointF | None:
     position_getter = getattr(event, "position", None)
     if callable(position_getter):
-        position = position_getter()
+        position: Any = position_getter()
         if position is not None:
             return QPointF(float(position.x()), float(position.y()))
     pos_getter = getattr(event, "pos", None)
@@ -111,7 +115,7 @@ def _event_position(event: object) -> QPointF | None:
 def _event_global_position(event: object) -> QPointF | None:
     position_getter = getattr(event, "globalPosition", None)
     if callable(position_getter):
-        position = position_getter()
+        position: Any = position_getter()
         if position is not None:
             return QPointF(float(position.x()), float(position.y()))
     pos_getter = getattr(event, "globalPos", None)
@@ -273,8 +277,11 @@ class LinearPathPreviewWidget(QWidget):
 
 
 class FullscreenImageWindow(QMainWindow):
+    closed = Signal(object)
+
     def __init__(self, image_path: Path):
         super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.image_path = image_path
         self.original_pixmap = _pixmap_from_image_path(image_path)
         self.scale_factor = 1.0
@@ -357,6 +364,8 @@ class FullscreenImageWindow(QMainWindow):
         self.image_label.clear()
         self.original_pixmap = QPixmap()
         super().closeEvent(event)
+        if getattr(event, "isAccepted", lambda: True)():
+            self.closed.emit(self)
 
     def set_fit_mode(self) -> None:
         self.fit_to_window = True
@@ -364,14 +373,22 @@ class FullscreenImageWindow(QMainWindow):
 
     def set_actual_size(self) -> None:
         self.fit_to_window = False
-        self.scale_factor = 1.0
+        self.scale_factor = _bounded_fullscreen_scale(
+            self.original_pixmap.width(),
+            self.original_pixmap.height(),
+            1.0,
+        )
         self.update_image()
 
     def zoom(self, factor: float) -> None:
         if self.original_pixmap.isNull():
             return
         self.fit_to_window = False
-        self.scale_factor = max(0.05, min(20.0, self.scale_factor * factor))
+        self.scale_factor = _bounded_fullscreen_scale(
+            self.original_pixmap.width(),
+            self.original_pixmap.height(),
+            self.scale_factor * factor,
+        )
         self.update_image()
 
     def update_image(self) -> None:
@@ -387,12 +404,21 @@ class FullscreenImageWindow(QMainWindow):
                 Qt.SmoothTransformation,
             )
         else:
-            target = self.original_pixmap.scaled(
-                max(1, int(self.original_pixmap.width() * self.scale_factor)),
-                max(1, int(self.original_pixmap.height() * self.scale_factor)),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+            target_width, target_height, bounded_scale = _bounded_fullscreen_size(
+                self.original_pixmap.width(),
+                self.original_pixmap.height(),
+                self.scale_factor,
             )
+            self.scale_factor = bounded_scale
+            if target_width == self.original_pixmap.width() and target_height == self.original_pixmap.height():
+                target = self.original_pixmap
+            else:
+                target = self.original_pixmap.scaled(
+                    target_width,
+                    target_height,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
         self.image_label.setPixmap(target)
         self.image_label.resize(target.size())
 
@@ -487,12 +513,37 @@ def _pixmap_from_image_path(path: Path) -> QPixmap:
         pixels = int(width) * int(height)
         if pixels > MAX_PREVIEW_PIXELS:
             raise MemoryError(
-                f"Fullscreen image is too large: {width}x{height} px "
-                f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
+                f"Fullscreen image is too large: {width}x{height} px " f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
             )
         image = source_image.convert("RGB")
         qimage = qimage_from_array(np.asarray(image))
     return QPixmap.fromImage(qimage)
+
+
+def _bounded_fullscreen_scale(
+    source_width: int,
+    source_height: int,
+    requested_scale: float,
+    *,
+    max_pixels: int = MAX_FULLSCREEN_RENDER_PIXELS,
+) -> float:
+    source_pixels = max(1, int(source_width)) * max(1, int(source_height))
+    pixel_limited_scale = math.sqrt(max(1, int(max_pixels)) / source_pixels)
+    minimum_scale = min(0.05, pixel_limited_scale)
+    return max(minimum_scale, min(20.0, float(requested_scale), pixel_limited_scale))
+
+
+def _bounded_fullscreen_size(
+    source_width: int,
+    source_height: int,
+    requested_scale: float,
+    *,
+    max_pixels: int = MAX_FULLSCREEN_RENDER_PIXELS,
+) -> tuple[int, int, float]:
+    width = max(1, int(source_width))
+    height = max(1, int(source_height))
+    scale = _bounded_fullscreen_scale(width, height, requested_scale, max_pixels=max_pixels)
+    return max(1, int(width * scale)), max(1, int(height * scale)), scale
 
 
 def _error_candle(record: dict[str, Any]) -> dict[str, float] | None:

@@ -9,7 +9,7 @@ from rich.table import Table
 
 from linear_stage_control.camera import BaslerCamera, camera_settings_from_config
 from linear_stage_control.config import load_config
-from linear_stage_control.dataset import DatasetRun, base_capture_record, dataset_settings_from_config, safe_timestamp
+from linear_stage_control.dataset import DatasetRun, base_capture_record, dataset_settings_from_config
 from linear_stage_control.error_model import error_budget_from_config, estimate_position_error_um
 from linear_stage_control.position_validation import (
     disabled_axis_variation_errors,
@@ -118,11 +118,11 @@ def main() -> None:
                 for capture_index in range(1, capture_count + 1):
                     capture_record = dict(record)
                     capture_record["capture_index"] = capture_index
-                    image_timestamp = safe_timestamp()
-                    image_path = dataset.image_path(point, image_timestamp, capture_index)
-                    npy_path = dataset.npy_path(point, image_timestamp, capture_index)
+                    image_path = dataset.image_path(point, capture_index)
+                    npy_path = dataset.npy_path(point, capture_index)
                     capture = camera.capture_original_to(image_path, npy_path=npy_path)
 
+                    capture_record.update(capture.camera_parameters)
                     capture_record.update(
                         {
                             "status": "ok",

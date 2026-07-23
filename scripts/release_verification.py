@@ -37,7 +37,8 @@ class VirtualAxis:
     def is_homed(self) -> bool:
         return self.homed
 
-    def home(self) -> None:
+    def home(self, *, wait_until_idle: bool = True) -> None:
+        _ = wait_until_idle
         self.home_calls += 1
         self.position_mm = 0.0
         self.homed = True
@@ -103,7 +104,8 @@ class FakeAcquisitionStage:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         return
 
-    def home(self) -> None:
+    def home(self, *, cancel_requested: object = None) -> None:
+        _ = cancel_requested
         self.home_calls += 1
         self.x_mm = 0.0
         self.y_mm = 0.0
@@ -245,11 +247,7 @@ def sampled_color_count(path: Path) -> int:
     image = Image.open(path).convert("RGB")
     step_x = max(1, image.width // 64)
     step_y = max(1, image.height // 64)
-    colors = {
-        image.getpixel((x, y))
-        for x in range(0, image.width, step_x)
-        for y in range(0, image.height, step_y)
-    }
+    colors = {image.getpixel((x, y)) for x in range(0, image.width, step_x) for y in range(0, image.height, step_y)}
     return len(colors)
 
 
@@ -360,9 +358,9 @@ def run_acquisition_experiments(iterations: int, output_dir: Path) -> list[dict[
                 skip_home=True,
             )
             window.worker.log_message.connect(window.log)
-            window.worker.status_changed.connect(window.set_run_status)
-            window.worker.capture_done.connect(window.on_capture_done)
-            window.worker.progress_changed.connect(window.on_progress_changed)
+            worker = window.worker
+            worker.status_available.connect(lambda worker=worker: window.on_acquisition_status_available(worker))
+            worker.capture_updates_available.connect(lambda worker=worker: window.on_capture_updates_available(worker))
             window.worker.run_failed.connect(window.on_run_failed)
             window.worker.run_done.connect(window.on_run_done)
             window.worker.finished.connect(window.on_worker_finished)

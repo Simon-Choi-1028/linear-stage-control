@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 
 MAX_PREVIEW_PIXELS = 64_000_000
 MAX_PREVIEW_SOURCE_BYTES = 256 * 1024 * 1024
+MAX_INTEGER_PREVIEW_LUT_VALUES = 1 << 16
 
 
 def qimage_from_array(array: object) -> QImage:
@@ -58,9 +59,7 @@ def _validate_preview_array(arr: np.ndarray) -> None:
             f"({pixels:,} px > {MAX_PREVIEW_PIXELS:,} px)"
         )
     if int(arr.nbytes) > MAX_PREVIEW_SOURCE_BYTES:
-        raise MemoryError(
-            f"Preview frame uses too much source memory: {arr.nbytes / (1024 * 1024):.1f} MiB"
-        )
+        raise MemoryError(f"Preview frame uses too much source memory: {arr.nbytes / (1024 * 1024):.1f} MiB")
 
 
 def render_preview_qimage(
@@ -74,12 +73,21 @@ def render_preview_qimage(
 ) -> tuple[QPixmap, tuple[int, int, int, int]]:
     crop_rect = preview_crop_rect(qimage, zoom_percent, center_x, center_y)
     crop_x, crop_y, crop_w, crop_h = crop_rect
-    cropped = qimage.copy(crop_x, crop_y, crop_w, crop_h)
-    pixmap = QPixmap.fromImage(cropped).scaled(
-        target_size,
-        Qt.KeepAspectRatio,
-        Qt.SmoothTransformation,
+    target_w = max(1, target_size.width())
+    target_h = max(1, target_size.height())
+    scale = min(target_w / crop_w, target_h / crop_h)
+    render_w = max(1, min(target_w, round(crop_w * scale)))
+    render_h = max(1, min(target_h, round(crop_h * scale)))
+    pixmap = QPixmap(render_w, render_h)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    painter.drawImage(
+        QRectF(0, 0, render_w, render_h),
+        qimage,
+        QRectF(crop_x, crop_y, crop_w, crop_h),
     )
+    painter.end()
     if show_grid or show_cross:
         draw_preview_overlays(pixmap, show_grid=show_grid, show_cross=show_cross)
     return pixmap, crop_rect
@@ -149,6 +157,10 @@ def _to_uint8(array: np.ndarray) -> np.ndarray:
     if np.issubdtype(arr.dtype, np.integer):
         min_value = float(arr.min())
         max_value = float(arr.max())
+        if max_value <= min_value:
+            return np.zeros(arr.shape, dtype=np.uint8)
+        if 1 << (arr.dtype.itemsize * 8) <= MAX_INTEGER_PREVIEW_LUT_VALUES:
+            return _small_integer_to_uint8(arr, min_value, max_value)
         arr_float = arr.astype(np.float32, copy=False)
     else:
         arr_float = arr.astype(np.float32, copy=False)
@@ -162,3 +174,19 @@ def _to_uint8(array: np.ndarray) -> np.ndarray:
         return np.zeros(arr.shape, dtype=np.uint8)
     scaled = (arr_float - min_value) * (255.0 / (max_value - min_value))
     return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
+
+
+def _small_integer_to_uint8(array: np.ndarray, min_value: float, max_value: float) -> np.ndarray:
+    """Scale an 8/16-bit integer frame through a small LUT instead of full-frame floats."""
+    value_count = 1 << (array.dtype.itemsize * 8)
+    values = np.arange(value_count, dtype=np.int32)
+    if np.issubdtype(array.dtype, np.signedinteger):
+        signed_max = int(np.iinfo(array.dtype).max)
+        values[signed_max + 1 :] -= value_count
+
+    scaled = values.astype(np.float32)
+    scaled -= min_value
+    scaled *= 255.0 / (max_value - min_value)
+    np.clip(scaled, 0, 255, out=scaled)
+    lookup = scaled.astype(np.uint8)
+    return np.ascontiguousarray(lookup[array])

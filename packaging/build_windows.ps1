@@ -7,7 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
+. (Join-Path $PSScriptRoot "build_provenance.ps1")
 Set-Location $Root
+$projectVersion = Get-ProjectVersion -ProjectRoot $Root
+$sourceFingerprint = Get-SourceFingerprint -ProjectRoot $Root
 
 $VenvDir = Join-Path $Root "build\.venv"
 $venvPython = Join-Path $VenvDir "Scripts\python.exe"
@@ -24,7 +27,7 @@ if (-not (Test-Path -LiteralPath $VenvDir)) {
 
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r requirements.txt
-& $venvPython -m pip install --no-build-isolation -e .
+& $venvPython -m pip install --no-build-isolation -e ".[build]"
 
 $distTarget = Join-Path $Root "dist\LinearStageControl"
 $runningApps = Get-Process -Name "LinearStageControl" -ErrorAction SilentlyContinue
@@ -55,7 +58,7 @@ $pyinstallerArgs = @(
   "--collect-all", "zaber_motion",
   "--collect-binaries", "zaber_motion_bindings",
   "--collect-submodules", "cv2",
-  "--collect-all", "scipy",
+  "--hidden-import", "scipy._external.array_api_compat.numpy.fft",
   "--collect-submodules", "serial"
 )
 
@@ -221,4 +224,13 @@ if (-not $SkipSmoke) {
   }
 }
 
+$provenancePath = Join-Path $distTarget "build_provenance.json"
+$provenance = [ordered]@{
+  version = "v$projectVersion"
+  source_fingerprint = $sourceFingerprint
+  built_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+}
+$provenance | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
+
 Write-Host "Built: $distTarget\LinearStageControl.exe"
+Write-Host "Build provenance: $provenancePath"

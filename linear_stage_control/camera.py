@@ -44,6 +44,58 @@ OUTPUT_PIXEL_TYPE_ALIASES = {
 }
 MAX_CAPTURE_PIXELS = 128_000_000
 MAX_CAPTURE_SOURCE_BYTES = 1024 * 1024 * 1024
+CAMERA_CAPTURE_PARAMETER_FIELDS: tuple[str, ...] = (
+    "camera_model_name",
+    "camera_serial_number",
+    "camera_user_name",
+    "camera_device_class",
+    "camera_pixel_format",
+    "camera_exposure_us",
+    "camera_gain",
+    "camera_acquisition_frame_rate_hz",
+    "camera_width_px",
+    "camera_height_px",
+    "camera_offset_x_px",
+    "camera_offset_y_px",
+    "camera_gamma",
+    "camera_black_level",
+    "camera_binning_x",
+    "camera_binning_y",
+    "camera_decimation_x",
+    "camera_decimation_y",
+    "camera_trigger_mode",
+    "camera_trigger_selector",
+    "camera_trigger_source",
+    "camera_use_software_trigger",
+    "camera_output_pixel_format",
+    "camera_timeout_ms",
+    "camera_rotate_180",
+    "camera_flip_horizontal",
+    "camera_flip_vertical",
+)
+
+_CAMERA_CAPTURE_FEATURES = (
+    ("camera_pixel_format", ("PixelFormat",)),
+    ("camera_exposure_us", ("ExposureTime", "ExposureTimeAbs")),
+    ("camera_gain", ("Gain", "GainRaw")),
+    (
+        "camera_acquisition_frame_rate_hz",
+        ("AcquisitionFrameRate", "AcquisitionFrameRateAbs"),
+    ),
+    ("camera_width_px", ("Width",)),
+    ("camera_height_px", ("Height",)),
+    ("camera_offset_x_px", ("OffsetX",)),
+    ("camera_offset_y_px", ("OffsetY",)),
+    ("camera_gamma", ("Gamma",)),
+    ("camera_black_level", ("BlackLevel", "BlackLevelRaw")),
+    ("camera_binning_x", ("BinningHorizontal", "BinningX")),
+    ("camera_binning_y", ("BinningVertical", "BinningY")),
+    ("camera_decimation_x", ("DecimationHorizontal", "DecimationX")),
+    ("camera_decimation_y", ("DecimationVertical", "DecimationY")),
+    ("camera_trigger_mode", ("TriggerMode",)),
+    ("camera_trigger_selector", ("TriggerSelector",)),
+    ("camera_trigger_source", ("TriggerSource",)),
+)
 
 
 @dataclass
@@ -106,7 +158,9 @@ def camera_settings_from_config(config: dict[str, Any]) -> CameraSettings:
         trigger_mode=none_if_blank(camera.get("trigger_mode", "Off")),
         trigger_selector=str(camera.get("trigger_selector", "FrameStart")),
         trigger_source=str(camera.get("trigger_source", "Software")),
-        use_software_trigger=_bool_value(camera.get("use_software_trigger", False), False, "camera.use_software_trigger"),
+        use_software_trigger=_bool_value(
+            camera.get("use_software_trigger", False), False, "camera.use_software_trigger"
+        ),
         output_pixel_format=camera.get("output_pixel_format", "Mono8"),
         timeout_ms=int(camera.get("timeout_ms", 5000)),
         rotate_180=_bool_value(camera.get("rotate_180", True), True, "camera.rotate_180"),
@@ -129,6 +183,7 @@ class CaptureResult:
     camera_timestamp_ns: int | None
     block_id: int | None
     disk_write_duration_ms: float = 0.0
+    camera_parameters: dict[str, Any] = field(default_factory=dict)
 
 
 def enumerate_cameras() -> list[dict[str, str]]:
@@ -247,12 +302,6 @@ class BaslerCamera:
             if self.camera is not None and self.camera.IsGrabbing():
                 self.camera.StopGrabbing()
 
-    def capture_to(self, output_path: str | Path) -> Path:
-        array = self.grab_array()
-        path = Path(output_path)
-        save_array(path, array, self.settings.output_pixel_format)
-        return path
-
     def capture_original_to(
         self,
         output_path: str | Path,
@@ -276,6 +325,8 @@ class BaslerCamera:
             raise RuntimeError("Camera is not open.")
 
         timeout = timeout_ms or self.settings.timeout_ms
+        camera_parameters = self.capture_parameter_snapshot()
+        camera_parameters["camera_timeout_ms"] = timeout
         self.camera.StartGrabbingMax(1)
         captured_at = iso_timestamp()
         try:
@@ -299,6 +350,11 @@ class BaslerCamera:
                     flip_vertical=self.settings.flip_vertical,
                 )
                 metadata = _grab_metadata(grab_result, captured_at, completed_at)
+                if metadata["width"] is not None:
+                    camera_parameters["camera_width_px"] = metadata["width"]
+                if metadata["height"] is not None:
+                    camera_parameters["camera_height_px"] = metadata["height"]
+                metadata.update(camera_parameters)
                 return array, metadata
             finally:
                 grab_result.Release()
@@ -373,8 +429,43 @@ class BaslerCamera:
             raise RuntimeError("Camera is not open.")
         warning_start = len(self.warnings)
         self.settings = settings
-        self._apply_live_safe_camera_parameters(settings)
-        return self.warnings[warning_start:]
+        try:
+            self._apply_live_safe_camera_parameters(settings)
+            return self.warnings[warning_start:]
+        finally:
+            del self.warnings[warning_start:]
+
+    def capture_parameter_snapshot(self) -> dict[str, Any]:
+        parameters: dict[str, Any] = {field_name: "" for field_name in CAMERA_CAPTURE_PARAMETER_FIELDS}
+        parameters.update(
+            {
+                "camera_use_software_trigger": self.settings.use_software_trigger,
+                "camera_output_pixel_format": self.settings.output_pixel_format,
+                "camera_timeout_ms": self.settings.timeout_ms,
+                "camera_rotate_180": self.settings.rotate_180,
+                "camera_flip_horizontal": self.settings.flip_horizontal,
+                "camera_flip_vertical": self.settings.flip_vertical,
+            }
+        )
+
+        camera = self.camera
+        if camera is None:
+            return parameters
+
+        device_info = _camera_device_info(camera)
+        if device_info is not None:
+            parameters.update(
+                {
+                    "camera_model_name": _safe_device_value(device_info, "GetModelName") or "",
+                    "camera_serial_number": _safe_device_value(device_info, "GetSerialNumber") or "",
+                    "camera_user_name": _safe_device_value(device_info, "GetUserDefinedName") or "",
+                    "camera_device_class": _safe_device_value(device_info, "GetDeviceClass") or "",
+                }
+            )
+
+        for field_name, feature_names in _CAMERA_CAPTURE_FEATURES:
+            parameters[field_name] = _read_first_available_feature(camera, feature_names)
+        return parameters
 
     def _apply_live_safe_camera_parameters(self, settings: CameraSettings) -> None:
         if settings.exposure_us is not None:
@@ -630,6 +721,36 @@ def _safe_device_value(device_info: Any, method_name: str) -> str | None:
     return str(value) if value else None
 
 
+def _camera_device_info(camera: Any) -> Any | None:
+    try:
+        getter = getattr(camera, "GetDeviceInfo")
+        return getter()
+    except Exception:
+        return None
+
+
+def _read_first_available_feature(camera: Any, feature_names: tuple[str, ...]) -> Any:
+    for feature_name in feature_names:
+        try:
+            feature = getattr(camera, feature_name)
+            getter = getattr(feature, "GetValue")
+            value = getter()
+        except Exception:
+            continue
+        return _metadata_scalar(value)
+    return ""
+
+
+def _metadata_scalar(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def _string_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None:
         return default
@@ -719,30 +840,6 @@ def apply_camera_orientation(
     return np.array(arr, copy=True, order="C")
 
 
-def save_array(path: Path, array: np.ndarray, pixel_format: str) -> None:
-    image: Image.Image | None = None
-    try:
-        array = _validate_image_array_for_save(array, context="converted image")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        output_format = _normalise_pixel_format_name(pixel_format)
-        if array.ndim == 2:
-            image = Image.fromarray(array)
-        elif array.ndim == 3 and array.shape[2] == 3 and output_format in {"BGR8", "BGR8packed"}:
-            image = Image.fromarray(np.ascontiguousarray(array[:, :, ::-1]), "RGB")
-        elif array.ndim == 3 and array.shape[2] == 3:
-            image = Image.fromarray(np.ascontiguousarray(array), "RGB")
-        else:
-            raise ValueError(f"Unsupported image array shape: {array.shape}")
-        _save_image(image, path)
-    except DatasetWriteError:
-        raise
-    except Exception as exc:
-        raise DatasetWriteError("이미지 파일 저장에 실패했습니다.", str(exc)) from exc
-    finally:
-        if image is not None:
-            image.close()
-
-
 def save_original_array(path: Path, array: np.ndarray) -> None:
     image: Image.Image | None = None
     try:
@@ -793,6 +890,7 @@ def save_original_capture(
         height=metadata.get("height"),
         camera_timestamp_ns=metadata.get("camera_timestamp_ns"),
         block_id=metadata.get("block_id"),
+        camera_parameters={field_name: metadata.get(field_name, "") for field_name in CAMERA_CAPTURE_PARAMETER_FIELDS},
     )
 
 

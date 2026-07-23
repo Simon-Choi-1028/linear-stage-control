@@ -112,23 +112,6 @@ def linear_distance(x_start: float, y_start: float, x_stop: float, y_stop: float
     return math.hypot(x_stop - x_start, y_stop - y_start)
 
 
-def linear_spacing_point_count(
-    x_start: float,
-    y_start: float,
-    x_stop: float,
-    y_stop: float,
-    spacing_mm: float,
-) -> int:
-    if spacing_mm <= 0:
-        raise ValueError("선형 경로 간격은 0보다 커야 합니다.")
-    length = linear_distance(x_start, y_start, x_stop, y_stop)
-    if length <= 0:
-        return 2
-    base_count = int(math.floor(length / spacing_mm)) + 1
-    endpoint_count = 0 if math.isclose((base_count - 1) * spacing_mm, length, rel_tol=0.0, abs_tol=1e-9) else 1
-    return base_count + endpoint_count
-
-
 def position_cell_tooltip(column: int) -> str:
     tooltips = {
         1: "위치 라벨입니다. 비워도 실행은 가능하지만 구분하기 어려울 수 있습니다.",
@@ -147,13 +130,6 @@ def point_config_record(point: ScanPoint) -> dict[str, Any]:
     if point.capture_count is not None:
         record["capture_count"] = point.capture_count
     return record
-
-
-def axis_activity_from_stage_config(stage: dict[str, Any]) -> tuple[bool, bool]:
-    axes = stage.get("axes", {})
-    x_axis = axes.get("x", {}) or {}
-    y_axis = axes.get("y", {}) or {}
-    return bool(x_axis.get("enabled", True)), bool(y_axis.get("enabled", True))
 
 
 def camera_display_name(camera: dict[str, str]) -> str:

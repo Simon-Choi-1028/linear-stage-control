@@ -14,6 +14,7 @@ from .camera import (
     CAMERA_CAPTURE_PARAMETER_FIELDS,
     BaslerCamera,
     CaptureResult,
+    camera_orientation_view,
     camera_settings_from_config,
     enumerate_cameras,
     iso_timestamp,
@@ -441,7 +442,7 @@ class LivePreviewWorker(QThread):
         self._settings_lock = Lock()
         self._pending_config: dict[str, Any] | None = None
         self._frame_lock = Lock()
-        self._latest_frame: tuple[object, dict[str, Any]] | None = None
+        self._latest_frame: tuple[object, dict[str, Any], object] | None = None
         self._frame_signal_pending = False
 
     def request_stop(self) -> None:
@@ -458,7 +459,7 @@ class LivePreviewWorker(QThread):
             self._pending_config = None
         return pending
 
-    def take_latest_frame(self) -> tuple[object, dict[str, Any]] | None:
+    def take_latest_frame(self) -> tuple[object, dict[str, Any], object] | None:
         with self._frame_lock:
             frame = self._latest_frame
             self._latest_frame = None
@@ -470,9 +471,15 @@ class LivePreviewWorker(QThread):
             self._latest_frame = None
             self._frame_signal_pending = False
 
-    def _store_latest_frame(self, array: object, metadata: dict[str, Any]) -> bool:
+    def _store_latest_frame(
+        self,
+        array: object,
+        metadata: dict[str, Any],
+        *,
+        source_array: object | None = None,
+    ) -> bool:
         with self._frame_lock:
-            self._latest_frame = (array, metadata)
+            self._latest_frame = (array, metadata, array if source_array is None else source_array)
             if self._frame_signal_pending:
                 return False
             self._frame_signal_pending = True
@@ -491,7 +498,7 @@ class LivePreviewWorker(QThread):
             with BaslerCamera(settings) as camera:
                 self.status_changed.emit("Live 첫 프레임 대기")
                 first_frame = True
-                for array, metadata in camera.live_original_arrays(
+                for source_array, metadata in camera.live_original_arrays(
                     timeout_ms=settings.timeout_ms,
                     stop_requested=lambda: self._stop_requested,
                     max_consecutive_failures=5,
@@ -505,6 +512,7 @@ class LivePreviewWorker(QThread):
                         pending_camera_config["trigger_mode"] = "Off"
                         pending_settings = camera_settings_from_config(pending_config)
                         warnings = camera.apply_live_settings(pending_settings)
+                        settings = pending_settings
                         if warnings:
                             self.status_changed.emit("Live 설정 경고")
                     if first_frame:
@@ -514,7 +522,13 @@ class LivePreviewWorker(QThread):
                     frame_times.append(now)
                     metadata = dict(metadata)
                     metadata["live_fps"] = _rolling_fps(frame_times)
-                    if self._store_latest_frame(array, metadata):
+                    preview_array = camera_orientation_view(
+                        source_array,
+                        rotate_180=settings.rotate_180,
+                        flip_horizontal=settings.flip_horizontal,
+                        flip_vertical=settings.flip_vertical,
+                    )
+                    if self._store_latest_frame(preview_array, metadata, source_array=source_array):
                         self.frame_available.emit()
                     self.msleep(frame_delay_ms)
         except Exception as exc:

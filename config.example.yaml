@@ -33,7 +33,7 @@ camera:
   trigger_mode: Off
   output_pixel_format: Mono8
   timeout_ms: 5000
-  # Orientation corrections are applied to both live preview and saved images.
+  # Orientation applies to live preview and scan-run images; raw Live captures keep sensor order.
   rotate_180: true
   flip_horizontal: false
   flip_vertical: false

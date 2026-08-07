@@ -368,6 +368,7 @@ class BaslerCamera:
         stop_requested: Callable[[], bool] | None = None,
         max_consecutive_failures: int = 5,
     ) -> Any:
+        """Yield detached sensor arrays without preview-only orientation transforms."""
         if self.camera is None:
             raise RuntimeError("Camera is not open.")
 
@@ -395,6 +396,7 @@ class BaslerCamera:
                         ) from exc
                     continue
                 completed_at = iso_timestamp()
+                frame: tuple[np.ndarray, dict[str, Any]] | None = None
                 try:
                     if not grab_result.GrabSucceeded():
                         consecutive_failures += 1
@@ -405,13 +407,8 @@ class BaslerCamera:
                             )
                         continue
                     consecutive_failures = 0
-                    yield (
-                        apply_camera_orientation(
-                            grab_result.GetArray(),
-                            rotate_180=self.settings.rotate_180,
-                            flip_horizontal=self.settings.flip_horizontal,
-                            flip_vertical=self.settings.flip_vertical,
-                        ),
+                    frame = (
+                        np.array(grab_result.GetArray(), copy=True, order="C"),
                         _grab_metadata(
                             grab_result,
                             captured_at,
@@ -420,6 +417,8 @@ class BaslerCamera:
                     )
                 finally:
                     grab_result.Release()
+                if frame is not None:
+                    yield frame
         finally:
             if self.camera is not None and self.camera.IsGrabbing():
                 self.camera.StopGrabbing()
@@ -821,7 +820,7 @@ def _normalise_pixel_format_name(value: Any) -> str:
     return str(value or "").strip().replace(" ", "")
 
 
-def apply_camera_orientation(
+def camera_orientation_view(
     array: np.ndarray,
     *,
     rotate_180: bool,
@@ -830,14 +829,33 @@ def apply_camera_orientation(
 ) -> np.ndarray:
     arr = np.asarray(array)
     if arr.ndim < 2:
-        return np.array(arr, copy=True, order="C")
+        return arr
     if rotate_180:
         arr = np.flip(arr, axis=(0, 1))
     if flip_vertical:
         arr = np.flip(arr, axis=0)
     if flip_horizontal:
         arr = np.flip(arr, axis=1)
-    return np.array(arr, copy=True, order="C")
+    return arr
+
+
+def apply_camera_orientation(
+    array: np.ndarray,
+    *,
+    rotate_180: bool,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+) -> np.ndarray:
+    return np.array(
+        camera_orientation_view(
+            array,
+            rotate_180=rotate_180,
+            flip_horizontal=flip_horizontal,
+            flip_vertical=flip_vertical,
+        ),
+        copy=True,
+        order="C",
+    )
 
 
 def save_original_array(path: Path, array: np.ndarray) -> None:

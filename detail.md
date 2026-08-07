@@ -1,8 +1,8 @@
 # Linear Stage Control 상세 개발 기록
 
 작성일: 2026-05-29
-최종 갱신: 2026-07-23
-현재 기준 버전: `v0.1.12`
+최종 갱신: 2026-08-07
+현재 기준 버전: `v0.1.13`
 GitHub 저장소: `Simon-Choi-1028/linear-stage-control`
 최신 공개 릴리즈: https://github.com/Simon-Choi-1028/linear-stage-control/releases/latest
 
@@ -42,7 +42,7 @@ GitHub 저장소: `Simon-Choi-1028/linear-stage-control`
 
 ## 2. 현재 릴리즈 상태
 
-`v0.1.12`는 CSV-only 캡처 로그와 캡처별 카메라 readback, 장시간 실행 메모리 제한, worker 수명주기 안정화, 대형 경로/미리보기 최적화를 포함합니다. 기본 공개 asset은 online Setup, update manifest, portable ZIP, portable manifest이며 offline Setup은 현장에서 별도로 요구할 때만 만듭니다.
+`v0.1.13`은 단일 Live 캡처를 화면 렌더 결과가 아닌 SDK 센서 배열에서 저장해 원본 크기·비트 심도·픽셀 값을 보존하고, 미리보기 회전·반전·리사이즈·정규화·오버레이가 저장 파일에 섞이지 않도록 수정합니다. 기본 공개 asset은 online Setup, update manifest, portable ZIP, portable manifest이며 offline Setup은 현장에서 별도로 요구할 때만 만듭니다.
 
 `update_manifest.json`의 기본 채널은 online/slim 설치본입니다. 앱의 자동 업데이트 기능은 `LinearStageControlSetup.exe`를 기본 설치 asset으로 사용하고, 다운로드 후 SHA256을 검증한 뒤 사용자 승인 시 설치 파일을 실행합니다.
 
@@ -444,7 +444,7 @@ Run manifest:
 grab_result.GetArray().copy()
 ```
 
-이 배열을 방향 보정 후 lossless PNG로 저장합니다. 설정에 따라 TIFF/BMP도 사용할 수 있으며, 완전한 NumPy 배열 보존이 필요하면 NPY 저장을 함께 켭니다.
+Scan run은 이 배열에 설정된 방향 보정을 적용해 lossless PNG로 저장합니다. 단일 `Live 캡처`는 예외로, SDK buffer에서 분리한 sensor-order 배열을 회전·반전·비트 심도 변환·리사이즈 없이 lossless PNG로 저장합니다. 설정에 따라 TIFF/BMP도 사용할 수 있으며, scan에서 완전한 NumPy 배열 보존이 필요하면 NPY 저장을 함께 켭니다.
 
 NPY 저장:
 
@@ -684,7 +684,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build_release_installers.ps1
 GitHub Release upload:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\release_github.ps1 -Tag v0.1.12 -IncludePortable
+powershell -ExecutionPolicy Bypass -File packaging\release_github.ps1 -Tag v0.1.13 -IncludePortable
 ```
 
 Packaging safeguards:
@@ -875,7 +875,7 @@ updates:
 
 ## 21. 차후 개선 후보
 
-현재 기능은 `v0.1.12` 기준으로 단위 테스트, 정적 검사, release verification, packaged smoke를 수행합니다. 실제 장비 운용이 늘어나면 다음 항목을 우선 검토하면 좋습니다.
+현재 기능은 `v0.1.13` 기준으로 단위 테스트, 정적 검사, release verification, packaged smoke를 수행합니다. 실제 장비 운용이 늘어나면 다음 항목을 우선 검토하면 좋습니다.
 
 - Basler GigE packet size, inter-packet delay, NIC IP 대역 상태를 진단 탭에서 더 직접적으로 표시.
 - live preview 프레임 드롭률 진단.

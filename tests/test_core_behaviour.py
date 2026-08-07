@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 from PySide6.QtCore import QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
@@ -21,6 +22,7 @@ from linear_stage_control.camera import (
     PYLON_IMPORT_ERROR,
     BaslerCamera,
     apply_camera_orientation,
+    camera_orientation_view,
     camera_settings_from_config,
     save_original_capture,
 )
@@ -392,6 +394,87 @@ class CameraCompatibilityTests(unittest.TestCase):
         np.testing.assert_array_equal(detached, array)
         self.assertTrue(detached.flags.c_contiguous)
         self.assertFalse(np.shares_memory(detached, array))
+
+    def test_camera_orientation_view_keeps_sensor_array_unmodified(self) -> None:
+        array = np.arange(12, dtype=np.uint16).reshape(3, 4)
+
+        oriented = camera_orientation_view(array, rotate_180=True, flip_horizontal=True)
+
+        np.testing.assert_array_equal(oriented, array[::-1, :])
+        np.testing.assert_array_equal(array, np.arange(12, dtype=np.uint16).reshape(3, 4))
+        self.assertTrue(np.shares_memory(oriented, array))
+
+    def test_live_original_array_detaches_unmodified_sensor_pixels_before_release(self) -> None:
+        from linear_stage_control import camera as camera_module
+
+        class FakePylon:
+            GrabStrategy_LatestImageOnly = object()
+            TimeoutHandling_ThrowException = object()
+
+        class FakeGrabResult:
+            PixelType = "Mono12"
+            Width = 4
+            Height = 3
+            TimeStamp = 123
+            BlockID = 7
+
+            def __init__(self, backing: np.ndarray):
+                self.backing = backing
+                self.released = False
+
+            def GrabSucceeded(self) -> bool:
+                return True
+
+            def GetArray(self) -> np.ndarray:
+                return self.backing
+
+            def Release(self) -> None:
+                self.released = True
+                self.backing.fill(0)
+
+        class FakeSdkCamera:
+            def __init__(self, grab_result: FakeGrabResult):
+                self.grab_result = grab_result
+                self.retrieved = False
+                self.grabbing = False
+
+            def StartGrabbing(self, *_args: object) -> None:
+                self.grabbing = True
+
+            def IsGrabbing(self) -> bool:
+                return self.grabbing and not self.retrieved
+
+            def RetrieveResult(self, *_args: object) -> FakeGrabResult:
+                self.retrieved = True
+                return self.grab_result
+
+            def StopGrabbing(self) -> None:
+                self.grabbing = False
+
+        sensor_array = np.arange(12, dtype=np.uint16).reshape(3, 4)
+        expected = sensor_array.copy()
+        grab_result = FakeGrabResult(sensor_array)
+        sdk_camera = FakeSdkCamera(grab_result)
+        camera = BaslerCamera(camera_settings_from_config({"camera": {"rotate_180": True}}))
+        camera.camera = sdk_camera
+        original_pylon = camera_module.pylon
+        camera_module.pylon = FakePylon()
+        try:
+            frames = camera.live_original_arrays()
+            saved_source, metadata = next(frames)
+            self.assertTrue(grab_result.released)
+            np.testing.assert_array_equal(sensor_array, np.zeros_like(sensor_array))
+            np.testing.assert_array_equal(saved_source, expected)
+            self.assertFalse(np.shares_memory(saved_source, sensor_array))
+            self.assertEqual(metadata["pixel_type"], "Mono12")
+            with self.assertRaises(StopIteration):
+                next(frames)
+        finally:
+            camera_module.pylon = original_pylon
+
+        self.assertTrue(grab_result.released)
+        np.testing.assert_array_equal(sensor_array, np.zeros_like(sensor_array))
+        np.testing.assert_array_equal(saved_source, expected)
 
     def test_async_capture_disk_writer_saves_image_and_npy(self) -> None:
         array = np.arange(16, dtype=np.uint8).reshape(4, 4)
@@ -998,7 +1081,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(window.live_status_label.text(), "Live 9.8 FPS")
         window.close()
 
-    def test_live_capture_saves_visible_preview_pixmap(self) -> None:
+    def test_live_capture_preserves_native_frame_without_preview_transforms(self) -> None:
         from linear_stage_control.gui_app import MainWindow
 
         app = QApplication.instance() or QApplication([])
@@ -1009,9 +1092,15 @@ class GuiSmokeTests(unittest.TestCase):
             window.preview_zoom_slider.setValue(200)
             window.preview_grid_check.setChecked(True)
             window.preview_cross_check.setChecked(True)
-            window.on_live_frame(np.arange(48 * 64, dtype=np.uint16).reshape(48, 64), {"live_fps": 10})
+            source_frame = np.arange(37 * 61, dtype=np.uint16).reshape(37, 61)
+            preview_frame = source_frame[::-1, ::-1]
+            source_size = QSize(source_frame.shape[1], source_frame.shape[0])
+            window.on_live_frame(preview_frame, {"live_fps": 10}, source_array=source_frame)
             app.processEvents()
-            saved_size = window.preview_label.pixmap().size()
+            source_image = window.preview_source_qimage
+            self.assertIsNotNone(source_image)
+            rendered_size = window.preview_label.pixmap().size()
+            self.assertNotEqual(rendered_size, source_size)
 
             window.capture_live_preview()
             app.processEvents()
@@ -1021,9 +1110,12 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(files[0].exists())
             self.assertEqual(window.preview_mode, "live")
             self.assertEqual(window.captures_table.rowCount(), 1)
-            loaded = QPixmap(str(files[0]))
-            self.assertFalse(loaded.isNull())
-            self.assertEqual(loaded.size(), saved_size)
+            with Image.open(files[0]) as saved_image:
+                saved_array = np.array(saved_image, copy=True)
+            self.assertEqual(saved_array.shape, source_frame.shape)
+            self.assertEqual(saved_array.dtype, source_frame.dtype)
+            np.testing.assert_array_equal(saved_array, source_frame)
+            self.assertFalse(np.array_equal(saved_array, preview_frame))
             window.close()
 
     def test_capture_results_model_keeps_recent_rows_for_large_run(self) -> None:
@@ -1246,11 +1338,13 @@ class GuiSmokeTests(unittest.TestCase):
         window.camera_combo.addItem("Basler test", "123")
         fake_worker = StuckLiveWorker()
         window.live_worker = fake_worker  # type: ignore[assignment]
+        window.live_capture_source_array = np.ones((2, 2), dtype=np.uint16)
 
         window.start_live_preview()
         app.processEvents()
 
         self.assertIs(window.live_worker, fake_worker)
+        self.assertIsNone(window.live_capture_source_array)
         self.assertTrue(fake_worker.stop_requested)
         self.assertEqual(window.live_status_label.text(), "이전 Live 정리 중")
         window.live_worker = None
@@ -1271,13 +1365,31 @@ class GuiSmokeTests(unittest.TestCase):
         old_worker = FakeLiveWorker()
         replacement_worker = FakeLiveWorker()
         window.live_worker = replacement_worker  # type: ignore[assignment]
+        current_source = np.ones((2, 2), dtype=np.uint16)
+        window.live_capture_source_array = current_source
 
         window.on_live_finished(old_worker)  # type: ignore[arg-type]
         app.processEvents()
 
         self.assertIs(window.live_worker, replacement_worker)
+        self.assertIs(window.live_capture_source_array, current_source)
         self.assertTrue(old_worker.deleted)
         self.assertFalse(replacement_worker.deleted)
+        window.live_worker = None
+        window.close()
+
+    def test_current_live_failure_invalidates_capture_source(self) -> None:
+        from linear_stage_control.gui_app import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow(start_device_scan=False)
+        worker = object()
+        window.live_worker = worker  # type: ignore[assignment]
+        window.live_capture_source_array = np.ones((2, 2), dtype=np.uint16)
+
+        window.on_live_failed(worker, "camera disconnected")  # type: ignore[arg-type]
+
+        self.assertIsNone(window.live_capture_source_array)
         window.live_worker = None
         window.close()
 
@@ -1432,20 +1544,25 @@ class GuiSmokeTests(unittest.TestCase):
         first = np.zeros((2, 2), dtype=np.uint8)
         second = np.ones((2, 2), dtype=np.uint8)
         third = np.full((2, 2), 2, dtype=np.uint8)
+        first_source = np.full((2, 2), 10, dtype=np.uint16)
+        second_source = np.full((2, 2), 11, dtype=np.uint16)
+        third_source = np.full((2, 2), 12, dtype=np.uint16)
 
-        self.assertTrue(worker._store_latest_frame(first, {"frame": 1}))
-        self.assertFalse(worker._store_latest_frame(second, {"frame": 2}))
+        self.assertTrue(worker._store_latest_frame(first, {"frame": 1}, source_array=first_source))
+        self.assertFalse(worker._store_latest_frame(second, {"frame": 2}, source_array=second_source))
         frame = worker.take_latest_frame()
         self.assertIsNotNone(frame)
-        array, metadata = frame
+        array, metadata, source_array = frame
         np.testing.assert_array_equal(array, second)
+        np.testing.assert_array_equal(source_array, second_source)
         self.assertEqual(metadata["frame"], 2)
 
-        self.assertTrue(worker._store_latest_frame(third, {"frame": 3}))
+        self.assertTrue(worker._store_latest_frame(third, {"frame": 3}, source_array=third_source))
         frame = worker.take_latest_frame()
         self.assertIsNotNone(frame)
-        array, metadata = frame
+        array, metadata, source_array = frame
         np.testing.assert_array_equal(array, third)
+        np.testing.assert_array_equal(source_array, third_source)
         self.assertEqual(metadata["frame"], 3)
 
     def test_image_write_queue_size_can_disable_async_writes(self) -> None:

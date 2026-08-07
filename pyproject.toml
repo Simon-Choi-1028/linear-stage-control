@@ -1,6 +1,6 @@
 [project]
 name = "linear-stage-control"
-version = "0.1.12"
+version = "0.1.13"
 description = "Baseline Basler ace 2 and Zaber XY stage acquisition scripts."
 requires-python = ">=3.13,<3.14"
 dependencies = [

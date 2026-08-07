@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .app_state import AppRunState
-from .camera import iso_timestamp
+from .camera import iso_timestamp, save_original_array
 from .config import ConfigError, load_config
 from .dataset import safe_timestamp, validate_image_output_plan
 from .error_model import (
@@ -486,6 +486,7 @@ class MainWindow(QMainWindow):
         self.preview_base_size = QSize(PREVIEW_DEFAULT_WIDTH, self._aspect_height(PREVIEW_DEFAULT_WIDTH))
         self.preview_user_size: QSize | None = None
         self.preview_source_qimage: QImage | None = None
+        self.live_capture_source_array: np.ndarray | None = None
         self.preview_crop_rect: tuple[int, int, int, int] | None = None
         self.preview_center_x = 0.5
         self.preview_center_y = 0.5
@@ -1015,6 +1016,7 @@ class MainWindow(QMainWindow):
 
     def clear_preview_source(self) -> None:
         self.preview_source_qimage = None
+        self.live_capture_source_array = None
         self.preview_crop_rect = None
         if hasattr(self, "preview_label"):
             self.preview_label.clear()
@@ -1708,7 +1710,9 @@ class MainWindow(QMainWindow):
         self.live_size_reset_button.setToolTip("Live/이미지 미리보기 높이를 현재 레이아웃의 기본값으로 되돌립니다.")
         _apply_button_icon(self.live_button, QStyle.SP_MediaPlay, "실시간 카메라 영상을 다시 표시합니다.")
         _apply_button_icon(
-            self.live_capture_button, QStyle.SP_DialogSaveButton, "현재 Live 미리보기 화면을 PNG로 저장합니다."
+            self.live_capture_button,
+            QStyle.SP_DialogSaveButton,
+            "현재 Live 센서 프레임을 회전·리사이즈·비트 심도 변환 없이 lossless PNG로 저장합니다.",
         )
         _apply_button_icon(self.live_stop_button, QStyle.SP_MediaStop, "실시간 미리보기를 정지합니다.")
         _apply_button_icon(
@@ -2244,6 +2248,7 @@ class MainWindow(QMainWindow):
     def show_live_preview(self) -> None:
         self.preview_mode = "live"
         self.current_image_path = None
+        self.live_capture_source_array = None
         self.fullscreen_button.setEnabled(False)
         self.reset_live_preview_view()
         if self.live_worker is None or not self.live_worker.isRunning():
@@ -2264,6 +2269,7 @@ class MainWindow(QMainWindow):
         self.start_live_preview()
 
     def start_live_preview(self) -> None:
+        self.live_capture_source_array = None
         if self.worker is not None and self.worker.isRunning():
             return
         if self.camera_combo.count() <= 1:
@@ -2307,6 +2313,7 @@ class MainWindow(QMainWindow):
         self.apply_state(AppRunState.LIVE_PREVIEW)
 
     def stop_live_preview(self, wait_ms: int = 0, update_label: bool = True) -> bool:
+        self.live_capture_source_array = None
         if self.live_worker is None:
             if update_label and hasattr(self, "live_status_label"):
                 self.live_status_label.setText("Live 정지")
@@ -2350,10 +2357,16 @@ class MainWindow(QMainWindow):
         frame = worker.take_latest_frame()
         if frame is None:
             return
-        array, metadata = frame
-        self.on_live_frame(array, metadata)
+        array, metadata, source_array = frame
+        self.on_live_frame(array, metadata, source_array=source_array)
 
-    def on_live_frame(self, array: object, metadata: dict[str, Any]) -> None:
+    def on_live_frame(
+        self,
+        array: object,
+        metadata: dict[str, Any],
+        *,
+        source_array: object | None = None,
+    ) -> None:
         if self.preview_mode != "live":
             return
         reset_center = self.live_first_frame_pending
@@ -2370,6 +2383,9 @@ class MainWindow(QMainWindow):
                 self._last_live_frame_error = str(exc)
                 self.log(message)
             return
+        # Retain the SDK-detached sensor array for single capture. The oriented
+        # array and QImage are display-only and must never become saved pixels.
+        self.live_capture_source_array = np.asarray(array if source_array is None else source_array)
         self.set_preview_source(qimage, reset_center=reset_center)
         if reset_center:
             shape = getattr(array, "shape", None)
@@ -2399,8 +2415,8 @@ class MainWindow(QMainWindow):
         if self.preview_mode != "live":
             QMessageBox.information(self, "Live 캡처", "Live 화면이 표시 중일 때 캡처할 수 있습니다.")
             return
-        pixmap = self.preview_label.pixmap()
-        if pixmap is None or pixmap.isNull():
+        source_array = self.live_capture_source_array
+        if source_array is None:
             QMessageBox.information(self, "Live 캡처", "저장할 Live 화면이 아직 없습니다.")
             return
         try:
@@ -2408,8 +2424,7 @@ class MainWindow(QMainWindow):
             live_dir = Path(os.path.expandvars(os.path.expanduser(output_root))) / "live_captures"
             live_dir.mkdir(parents=True, exist_ok=True)
             image_path = live_dir / f"live_{safe_timestamp()}.png"
-            if not pixmap.save(str(image_path), "PNG"):
-                raise OSError(f"PNG 저장 실패: {image_path}")
+            save_original_array(image_path, source_array)
         except Exception as exc:
             QMessageBox.warning(self, "Live 캡처 실패", str(exc))
             return
@@ -2451,6 +2466,7 @@ class MainWindow(QMainWindow):
     def on_live_failed(self, worker: LivePreviewWorker, message: str) -> None:
         if worker is not self.live_worker:
             return
+        self.live_capture_source_array = None
         self.live_status_label.setText("Live 오류")
         self.preview_label.setText(f"Live preview 오류\n{message}")
         if "pylon" in message.lower():
@@ -2460,6 +2476,7 @@ class MainWindow(QMainWindow):
 
     def on_live_finished(self, worker: LivePreviewWorker) -> None:
         if self.live_worker is worker:
+            self.live_capture_source_array = None
             self.live_worker = None
         self._delete_worker_later(worker)
         if self.live_worker is None and self.app_state == AppRunState.LIVE_PREVIEW:

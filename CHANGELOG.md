@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.13 - 2026-08-07
+
+- Fixed single Live capture to save the SDK-detached sensor array instead of the rendered preview, preserving the native dimensions, bit depth, and pixel values without preview resizing, normalization, zoom/crop, or overlays.
+- Kept software rotation and flip preview-only for single Live captures, while preserving the active hardware acquisition parameters that produced the frame.
+- Paired raw and preview frames atomically, invalidated stale capture frames across Live restarts and failures, and released SDK grab buffers before yielding frames to the worker.
+
 ## v0.1.12 - 2026-07-23
 
 - Fixed acquisition metadata output to a single streamed `captures.csv` file and removed selectable JSONL/JSON/TSV/YAML/XLSX and summary exports from the GUI workflow.
